@@ -276,13 +276,7 @@ export class SignalingHub {
 
       if (isBinary) {
         if (!registeredClient) return;
-        const bytes =
-          data instanceof Buffer
-            ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
-            : data instanceof ArrayBuffer
-              ? new Uint8Array(data)
-              : new Uint8Array(Buffer.concat(data as Buffer[]));
-        this.routeBinaryFrame(registeredClient, bytes);
+        this.routeBinaryFrame(registeredClient, data);
         return;
       }
 
@@ -471,7 +465,19 @@ export class SignalingHub {
     });
   }
 
-  private routeBinaryFrame(sender: ConnectedClient, bytes: Uint8Array): void {
+  private routeBinaryFrame(
+    sender: ConnectedClient,
+    data: Buffer | ArrayBuffer | Buffer[]
+  ): void {
+    // `ws` hands us a freshly-allocated Buffer per message, so we can stamp
+    // the authenticated sender id into it and forward the very same buffer —
+    // the old path allocated + memcpy'd every relayed frame (256 KiB chunks
+    // at full link speed), burning relay CPU on pure copying.
+    const bytes: Uint8Array = Buffer.isBuffer(data)
+      ? data
+      : data instanceof ArrayBuffer
+        ? new Uint8Array(data)
+        : Buffer.concat(data);
     if (bytes.byteLength < ROUTING_HEADER_LENGTH || bytes[0] !== FRAME_ROUTED_RELAY) {
       return;
     }
@@ -484,14 +490,14 @@ export class SignalingHub {
       return;
     }
 
-    // Do not let a fast sender grow the relay queue without bound.
-    if (target.ws.bufferedAmount > 16 * 1024 * 1024) return;
+    // Do not let a fast sender grow the relay queue without bound. Senders
+    // self-throttle at a 16 MiB socket buffer, so this 64 MiB valve should
+    // never trip in honest use — it only stops a runaway queue.
+    if (target.ws.bufferedAmount > 64 * 1024 * 1024) return;
     // Stamp authenticated sender peerId in-place so sourcePeerId can never be forged
-    const copy = new Uint8Array(bytes.byteLength);
-    copy.set(bytes);
-    overwriteRoutedSourcePeerId(copy, sender.peerId);
+    overwriteRoutedSourcePeerId(bytes, sender.peerId);
 
-    target.ws.send(copy, { binary: true });
+    target.ws.send(bytes, { binary: true });
   }
 
   private canCommunicate(a: ConnectedClient, b: ConnectedClient): boolean {

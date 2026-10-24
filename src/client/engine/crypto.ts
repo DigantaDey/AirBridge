@@ -25,6 +25,17 @@ function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
   return copy.buffer;
 }
 
+/**
+ * WebCrypto accepts any ArrayBufferView and respects its byteOffset/length,
+ * so chunk data (often a subarray of a received frame, or a fresh file slice)
+ * can be handed over as-is. The previous code copied every chunk into a new
+ * ArrayBuffer before each encrypt/decrypt — at 256 KiB per chunk that copy
+ * was pure memory-bandwidth overhead on the hot path.
+ */
+function asBufferSource(u8: Uint8Array): BufferSource {
+  return u8 as unknown as BufferSource;
+}
+
 export async function generateIdentityKeyPair(): Promise<IdentityKeys> {
   // crypto.subtle only exists in secure contexts (HTTPS or localhost).
   // Without this guard an http://<LAN-IP> page fails with an opaque
@@ -174,7 +185,7 @@ export async function encryptBinaryChunk(
   const cipherBuf = await globalThis.crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: toArrayBuffer(iv) },
     aesKey,
-    toArrayBuffer(plaintext)
+    asBufferSource(plaintext)
   );
 
   return {
@@ -191,12 +202,31 @@ export async function decryptBinaryChunk(
   const plainBuf = await globalThis.crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: toArrayBuffer(iv) },
     aesKey,
-    toArrayBuffer(ciphertext)
+    asBufferSource(ciphertext)
   );
   return new Uint8Array(plainBuf);
 }
 
 export async function sha256Hex(chunks: Array<Uint8Array | undefined>): Promise<string> {
+  // Fast path: a single present chunk can be digested in place — no merge copy.
+  let onlyChunk: Uint8Array | null = null;
+  let presentCount = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i];
+    if (c) {
+      presentCount++;
+      onlyChunk = c;
+      if (presentCount > 1) break;
+    }
+  }
+  if (presentCount === 1 && onlyChunk) {
+    const single = new Uint8Array(
+      await globalThis.crypto.subtle.digest('SHA-256', asBufferSource(onlyChunk))
+    );
+    return Array.from(single)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  }
   let totalLen = 0;
   for (let i = 0; i < chunks.length; i++) {
     const c = chunks[i];

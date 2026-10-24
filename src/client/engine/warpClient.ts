@@ -32,9 +32,11 @@ import {
 } from './crypto.js';
 import { loadOrCreateDeviceId } from './deviceDetect.js';
 
-export const CHUNK_SIZE = 64 * 1024; // 64 KB optimal for both WebRTC SCTP & WS Binary Relay
+export const CHUNK_SIZE = 256 * 1024; // 256 KiB — 4× fewer read/encrypt/frame/ACK round-trips per byte than the old 64 KiB
+export const MIN_CHUNK_SIZE = 16 * 1024; // smallest per-file chunk size a peer may declare (legacy peers use 64 KiB)
+export const MAX_CHUNK_SIZE = 1024 * 1024; // largest per-file chunk size a peer may declare
 export const MAX_FILES_PER_TRANSFER = 100;
-export const MAX_CHUNKS_PER_TRANSFER = 262_144; // 16 GiB at 64 KiB chunks — a manifest sanity ceiling, not a product limit
+export const MAX_CHUNKS_PER_TRANSFER = 262_144; // 64 GiB at 256 KiB chunks — a manifest sanity ceiling, not a product limit
 export const MAX_CLIPBOARD_TEXT = 256_000;
 export const MAX_CLIPBOARD_IMAGE_DATAURL_LENGTH = MAX_CLIPBOARD_IMAGE_DATAURL;
 
@@ -46,8 +48,11 @@ export function isValidFileManifest(files: unknown, totalBytes: unknown): files 
     const f = files[i] as FileManifestItem;
     if (!f || f.index !== i || typeof f.name !== 'string' || f.name.length === 0 || f.name.length > 512) return false;
     if (typeof f.size !== 'number' || !Number.isFinite(f.size) || f.size < 0) return false;
-    if (f.chunkSize !== CHUNK_SIZE) return false;
-    const expectedChunks = Math.max(1, Math.ceil(f.size / CHUNK_SIZE));
+    // Honor the sender's declared chunk size (bounded) instead of demanding
+    // our own: legacy 64 KiB peers and future larger-chunk peers both work,
+    // and the receiver sizes/validates every chunk against this declaration.
+    if (typeof f.chunkSize !== 'number' || f.chunkSize < MIN_CHUNK_SIZE || f.chunkSize > MAX_CHUNK_SIZE) return false;
+    const expectedChunks = Math.max(1, Math.ceil(f.size / f.chunkSize));
     if (f.totalChunks !== expectedChunks) return false;
     if (f.previewDataUrl !== undefined && (typeof f.previewDataUrl !== 'string' || f.previewDataUrl.length > 16_000 || !f.previewDataUrl.startsWith('data:image/'))) return false;
     sum += f.size; chunks += f.totalChunks;
@@ -55,9 +60,11 @@ export function isValidFileManifest(files: unknown, totalBytes: unknown): files 
   }
   return sum === totalBytes;
 }
-const MAX_UNACKED_CHUNKS = 48; // 3 MB sliding window
-const ACK_INTERVAL_CHUNKS = 8;
-const MAX_BUFFER_HIGH_WATER = 2 * 1024 * 1024; // 2 MB socket buffer threshold
+const MAX_UNACKED_CHUNKS = 256; // 64 MiB sliding window at 256 KiB chunks — never let ACK RTT throttle a fast LAN link
+const ACK_INTERVAL_CHUNKS = 32; // receiver ACKs at most every 32 chunks (8 MiB) + on each file's last chunk
+const ENCRYPT_PIPELINE_DEPTH = 8; // file reads + AES-GCM encrypts kept in flight ahead of the socket (2 MiB of frames)
+const MAX_BUFFER_HIGH_WATER = 16 * 1024 * 1024; // 16 MiB socket buffer threshold — deep enough to keep the pipe full
+const BUFFER_LOW_WATER = 4 * 1024 * 1024; // resume sending once a drained socket falls to 4 MiB
 
 export interface SendableFileInput {
   name: string;
@@ -934,32 +941,51 @@ export class WarpClient {
       const filePlainChunksForHash: Uint8Array[] = [];
       const canKeepFullHashInRam = input.size <= 128 * 1024 * 1024; // 128 MB
 
+      // Pipelined producer: up to ENCRYPT_PIPELINE_DEPTH chunks are being
+      // read from disk + AES-GCM encrypted concurrently (WebCrypto runs
+      // these in parallel off the main thread) while the chunk ahead of
+      // them is being pushed into the socket. The old loop awaited read →
+      // encrypt → send strictly one chunk at a time, so the network idled
+      // during every encrypt and the CPU idled during every send. Frames
+      // are still *sent* strictly in chunk order.
+      interface PreparedChunk {
+        plainChunk: Uint8Array;
+        innerFrame: Uint8Array;
+      }
+      const preparedChunks = new Map<number, Promise<PreparedChunk>>();
+      const launchPrepare = (chunkIdx: number): void => {
+        if (chunkIdx >= meta.totalChunks || preparedChunks.has(chunkIdx)) return;
+        const task = (async (): Promise<PreparedChunk> => {
+          const start = chunkIdx * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, input.size);
+          const plainChunk =
+            input.size === 0 ? new Uint8Array(0) : await input.sliceBytes(start, end);
+          const { iv, ciphertext } = await encryptBinaryChunk(
+            cryptoSession.aesKey,
+            plainChunk,
+            fileIdx,
+            chunkIdx
+          );
+          const innerFrame = encodeEncryptedChunkFrame({
+            transferId: session.transferId,
+            fileIndex: fileIdx,
+            chunkIndex: chunkIdx,
+            iv,
+            ciphertext,
+          });
+          return { plainChunk, innerFrame };
+        })();
+        // If the transfer is cancelled before this chunk is consumed, its
+        // rejection must not surface as an unhandled rejection.
+        task.catch(() => {});
+        preparedChunks.set(chunkIdx, task);
+      };
+      for (let i = 0; i < Math.min(ENCRYPT_PIPELINE_DEPTH, meta.totalChunks); i++) {
+        launchPrepare(i);
+      }
+
       for (let chunkIdx = 0; chunkIdx < meta.totalChunks; chunkIdx++) {
         if (sendState.cancelled) return;
-
-        const start = chunkIdx * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, input.size);
-        const plainChunk =
-          input.size === 0 ? new Uint8Array(0) : await input.sliceBytes(start, end);
-
-        if (canKeepFullHashInRam) {
-          filePlainChunksForHash.push(plainChunk);
-        }
-
-        const { iv, ciphertext } = await encryptBinaryChunk(
-          cryptoSession.aesKey,
-          plainChunk,
-          fileIdx,
-          chunkIdx
-        );
-
-        const innerFrame = encodeEncryptedChunkFrame({
-          transferId: session.transferId,
-          fileIndex: fileIdx,
-          chunkIndex: chunkIdx,
-          iv,
-          ciphertext,
-        });
 
         // Respect socket buffer + receiver sliding-window backpressure
         while (!sendState.cancelled && globalSentChunks - sendState.ackedGlobalChunks >= MAX_UNACKED_CHUNKS) {
@@ -973,9 +999,25 @@ export class WarpClient {
         }
         if (sendState.cancelled) return;
 
+        const { plainChunk, innerFrame } = await preparedChunks.get(chunkIdx)!;
+        preparedChunks.delete(chunkIdx);
+        launchPrepare(chunkIdx + ENCRYPT_PIPELINE_DEPTH);
+
+        if (canKeepFullHashInRam) {
+          filePlainChunksForHash.push(plainChunk);
+        }
+
         // Send over WebRTC DataChannel if open; seamlessly fall back to WS Binary Relay if closed!
         if (transport === 'webrtc' && this.isRtcOpen(peer.peerId)) {
-          await this.sendRtcBinaryWithBackpressure(peer.peerId, innerFrame);
+          try {
+            await this.sendRtcBinaryWithBackpressure(peer.peerId, innerFrame);
+          } catch {
+            // Channel died (or the frame exceeds this browser's SCTP
+            // maxMessageSize): relay this and every later chunk over WS.
+            transport = 'ws-relay';
+            session.transport = 'ws-relay';
+            await this.sendWsRelayBinaryWithBackpressure(peer.peerId, innerFrame);
+          }
         } else {
           if (transport === 'webrtc') {
             transport = 'ws-relay';
@@ -1769,8 +1811,14 @@ export class WarpClient {
     );
 
     if (!this.incomingStates.has(decoded.transferId)) return;
-    // Each chunk must be exactly the size the manifest promises for its slot.
-    const expectedSize = meta0.size === 0 ? 0 : Math.min(CHUNK_SIZE, meta0.size - decoded.chunkIndex * CHUNK_SIZE);
+    // Each chunk must be exactly the size the manifest promises for its slot,
+    // sized by the sender's declared chunkSize (validated in the manifest).
+    const declaredChunkSize =
+      typeof meta0.chunkSize === 'number' && meta0.chunkSize > 0 ? meta0.chunkSize : CHUNK_SIZE;
+    const expectedSize =
+      meta0.size === 0
+        ? 0
+        : Math.min(declaredChunkSize, meta0.size - decoded.chunkIndex * declaredChunkSize);
     if (plainBytes.byteLength !== expectedSize) return;
 
     recvState.session.transport = transport;
@@ -1806,7 +1854,10 @@ export class WarpClient {
     const meta = recvState.session.files[decoded.fileIndex];
     const isLastChunk = meta && decoded.chunkIndex === meta.totalChunks - 1;
     if (decoded.chunkIndex % ACK_INTERVAL_CHUNKS === 0 || isLastChunk) {
-      await this.sendControlMessage(
+      // Fire-and-forget: ACKs are infrequent now (every 8 MiB), and awaiting
+      // their AES-GCM encryption here would stall this chunk's decrypt slot
+      // in the receive pipeline behind control-channel latency.
+      void this.sendControlMessage(
         fromPeerId,
         {
           kind: 'chunk-ack',
@@ -1816,7 +1867,7 @@ export class WarpClient {
           bytesReceivedTotal: recvState.bytesReceived,
         },
         true
-      );
+      ).catch(() => {});
     }
 
     if (
@@ -1875,7 +1926,7 @@ export class WarpClient {
 
   private attachDataChannel(peerId: string, dc: RTCDataChannel): void {
     dc.binaryType = 'arraybuffer';
-    dc.bufferedAmountLowThreshold = 512 * 1024;
+    dc.bufferedAmountLowThreshold = BUFFER_LOW_WATER;
     this.rtcChannels.set(peerId, dc);
 
     dc.onopen = () => {
@@ -1984,7 +2035,15 @@ export class WarpClient {
     if (!dc || dc.readyState !== 'open') {
       throw new Error('RTCDataChannel closed');
     }
-    if (dc.bufferedAmount > MAX_BUFFER_HIGH_WATER) {
+    // A 256 KiB chunk frame can exceed a browser's negotiated SCTP
+    // maxMessageSize (256 KiB in some Chrome builds). Throwing here makes
+    // the caller relay this chunk over WebSocket instead of killing the
+    // channel mid-transfer.
+    const maxMessageSize = this.rtcPeers.get(peerId)?.sctp?.maxMessageSize ?? 0;
+    if (maxMessageSize > 0 && frame.byteLength > maxMessageSize) {
+      throw new Error(`RTCDataChannel maxMessageSize ${maxMessageSize} < frame ${frame.byteLength}`);
+    }
+    while (dc.bufferedAmount > MAX_BUFFER_HIGH_WATER) {
       await new Promise<void>((resolve) => {
         const onLow = () => {
           dc.removeEventListener('bufferedamountlow', onLow);
@@ -1994,13 +2053,15 @@ export class WarpClient {
         const fallback = setTimeout(() => {
           dc.removeEventListener('bufferedamountlow', onLow);
           resolve();
-        }, 200);
+        }, 100);
         dc.addEventListener('bufferedamountlow', onLow);
       });
+      if (dc.readyState !== 'open') {
+        throw new Error('RTCDataChannel closed');
+      }
     }
-    const copy = new Uint8Array(frame.byteLength);
-    copy.set(frame);
-    dc.send(copy.buffer);
+    // send() copies into the SCTP queue synchronously — no extra copy here.
+    dc.send(frame as Uint8Array<ArrayBuffer>);
   }
 
   private async sendWsRelayBinaryWithBackpressure(
@@ -2011,7 +2072,12 @@ export class WarpClient {
       throw new Error('Signaling relay socket disconnected');
     }
     while (this.ws.bufferedAmount > MAX_BUFFER_HIGH_WATER) {
-      await new Promise((r) => setTimeout(r, 15));
+      if (this.ws.readyState !== WebSocket.OPEN) {
+        throw new Error('Signaling relay socket disconnected');
+      }
+      // Short poll: browsers expose no drain event for WebSocket, and a
+      // 15 ms nap here used to cap relay throughput far below link speed.
+      await new Promise((r) => setTimeout(r, 3));
     }
     const routed = wrapRoutedRelayFrame(targetPeerId, this.peerId, innerFrame);
     this.ws.send(routed);

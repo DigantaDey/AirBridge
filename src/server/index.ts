@@ -137,6 +137,10 @@ export async function createAirBridgeServer(
 
   const httpServer = http.createServer(app);
   const httpsServer = tls ? https.createServer({ key: tls.key, cert: tls.cert }, app) : null;
+  // Disable Nagle on transfer sockets (also covers dispatcher-handed sockets
+  // in TLS mode, which arrive via emit('connection')).
+  httpServer.on('connection', (socket) => (socket as net.Socket).setNoDelay(true));
+  httpsServer?.on('connection', (socket) => (socket as net.Socket).setNoDelay(true));
   let activePort = requestedPort;
   let mdns: MdnsHandle | null = null;
 
@@ -409,6 +413,9 @@ export async function createAirBridgeServer(
   let dispatcher: net.Server | null = null;
   if (httpsServer) {
     dispatcher = net.createServer((socket) => {
+      // Relayed transfer frames are large and latency-sensitive; Nagle's
+      // algorithm only adds delay here.
+      socket.setNoDelay(true);
       const onPeekError = () => socket.destroy();
       socket.once('error', onPeekError);
       socket.once('data', (firstChunk) => {
