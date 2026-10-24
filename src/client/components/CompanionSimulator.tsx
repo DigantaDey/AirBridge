@@ -134,7 +134,7 @@ export function CompanionSimulator({
       initialPairCode: hostPairCode,
       storagePrefix: 'airbridge-sim-pixel',
       deviceOverride: {
-        name: 'Pixel 9 Pro · Virtual',
+        name: 'Demo phone (simulated)',
         platform: 'android',
         model: 'Pixel 9 Pro',
         formFactor: 'phone',
@@ -181,6 +181,7 @@ export function CompanionSimulator({
 
   return (
     <div className="rounded-[2.2rem] bg-slate-950 text-slate-100 border-[3px] border-slate-800 shadow-2xl p-4 flex flex-col justify-between min-h-[540px] max-w-[360px] w-full mx-auto relative overflow-hidden">
+      <p className="text-xs text-amber-300 mb-3">Demo only · This is a simulated phone in this browser, not your Android device.</p>
       {/* Android 15 Punch-hole & Status Bar */}
       <div>
         <div className="flex items-center justify-between text-[11px] text-slate-400 px-2 pb-3">

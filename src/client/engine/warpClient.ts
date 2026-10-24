@@ -287,6 +287,9 @@ export class WarpClient {
   public async start(deviceFactory?: (publicKeyB64: string) => DeviceProfile): Promise<void> {
     this.destroyed = false;
     this.keys = await generateIdentityKeyPair();
+    // Cleanup can run while WebCrypto is pending (e.g. StrictMode replay).
+    // A stopped client must not open a socket or install a heartbeat.
+    if (this.destroyed) return;
 
     if (this.opts.deviceOverride) {
       this.myDevice = {
@@ -821,7 +824,6 @@ export class WarpClient {
 
     ws.onopen = () => {
       if (this.destroyed || !this.myDevice) return;
-      this.connectionState = 'connected';
       this.sendServer({
         type: 'hello',
         peerId: this.peerId,
@@ -868,6 +870,7 @@ export class WarpClient {
   private handleServerMessage(msg: ServerToClientMessage): void {
     switch (msg.type) {
       case 'welcome': {
+        this.connectionState = 'connected';
         this.peerId = msg.peerId;
         this.pairCode = msg.pairCode;
         this.persistPairCode(msg.pairCode);
