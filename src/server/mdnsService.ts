@@ -4,26 +4,34 @@ import os from 'node:os';
 const MDNS_MULTICAST_ADDR = '224.0.0.251';
 const MDNS_PORT = 5353;
 
-export function getLanUrls(port: number): string[] {
+/**
+ * Non-internal IPv4 addresses of this machine, preferred Wi-Fi/Ethernet
+ * interfaces (en0, wlan0, eth0, …) first. Used both for the URLs handed to
+ * phones and for the SAN list of the auto-generated TLS certificate.
+ */
+export function getLanIpv4Addresses(): string[] {
   const interfaces = os.networkInterfaces();
-  const urls: string[] = [];
+  const addresses: string[] = [];
 
   for (const [name, addrs] of Object.entries(interfaces)) {
     if (!addrs) continue;
     // Skip virtual docker/bridge interfaces where possible, prioritize en0/wlan0/eth0
     for (const addr of addrs) {
       if (addr.family === 'IPv4' && !addr.internal && !addr.address.startsWith('169.254.')) {
-        const url = `http://${addr.address}:${port}`;
         if (/^(en|wlan|wi-fi|eth)/i.test(name)) {
-          urls.unshift(url);
+          addresses.unshift(addr.address);
         } else {
-          urls.push(url);
+          addresses.push(addr.address);
         }
       }
     }
   }
 
-  return Array.from(new Set(urls));
+  return Array.from(new Set(addresses));
+}
+
+export function getLanUrls(port: number, protocol: 'http' | 'https' = 'http'): string[] {
+  return getLanIpv4Addresses().map((address) => `${protocol}://${address}:${port}`);
 }
 
 function encodeDnsName(name: string): Buffer {
@@ -81,8 +89,7 @@ export interface MdnsHandle {
 }
 
 export function startMdnsResponder(port: number): MdnsHandle {
-  const lanUrls = getLanUrls(port);
-  const primaryIp = lanUrls[0]?.replace(/^https?:\/\//, '').split(':')[0];
+  const primaryIp = getLanIpv4Addresses()[0];
   if (!primaryIp) {
     return { active: false, close: () => {} };
   }

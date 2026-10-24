@@ -20,6 +20,13 @@ function printHelp() {
     -p, --port <number>     Port to listen on (default: 3000)
     -d, --dir <path>        Auto-save directory (default: ~/Downloads/AirBridge)
     --reveal                Auto-reveal received files in macOS Finder
+    --http                  Plain HTTP only (NOT recommended: phone browsers block
+                            WebCrypto on Wi-Fi addresses; HTTPS is on by default)
+    --tls-cert <path>       PEM certificate to serve instead of the generated
+                            local CA's (e.g. mkcert). Requires --tls-key.
+    --tls-key <path>        PEM private key for --tls-cert
+    --tls-dir <path>        Where the generated local CA lives
+                            (default: ~/.airbridge/tls)
     -h, --help              Show this help message
 
   Examples:
@@ -54,6 +61,8 @@ async function main() {
   let port = Number.parseInt(process.env.PORT || '3000', 10);
   let downloadDir = path.join(os.homedir(), 'Downloads', 'AirBridge');
   let revealInFinder = false;
+  // Left undefined unless flagged so the server default (HTTPS on) applies.
+  const tlsOptions = {};
   const positional = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -64,13 +73,23 @@ async function main() {
       downloadDir = path.resolve(args[++i]);
     } else if (arg === '--reveal') {
       revealInFinder = true;
+    } else if (arg === '--http') {
+      tlsOptions.https = false;
+    } else if (arg === '--https') {
+      tlsOptions.https = true;
+    } else if (arg === '--tls-cert' && args[i + 1]) {
+      tlsOptions.tlsCertPath = args[++i];
+    } else if (arg === '--tls-key' && args[i + 1]) {
+      tlsOptions.tlsKeyPath = args[++i];
+    } else if (arg === '--tls-dir' && args[i + 1]) {
+      tlsOptions.tlsDir = args[++i];
     } else {
       positional.push(arg);
     }
   }
 
   const subcommand = positional[0] || 'daemon';
-  const { createAirBridgeServer, createCliBeamSession } = await loadServerModules();
+  const { createAirBridgeServer, createCliBeamSession, describeTlsSetup } = await loadServerModules();
   const hasBuiltClient = fs.existsSync(path.join(rootDir, 'dist/client/index.html'));
   const mode = hasBuiltClient ? 'production' : 'development';
 
@@ -88,12 +107,20 @@ async function main() {
       port: 0,
       mode,
       cliSessions: sessions,
+      ...tlsOptions,
       onCliDownload: (fileName, ip) => {
         console.log(`  ✅ Delivered "${fileName}" to ${ip}`);
       },
     });
 
-    const baseUrl = server.lanUrls[0] || `http://127.0.0.1:${server.port}`;
+    // Beam links are one-purpose token downloads that need no secure-context
+    // browser APIs, so keep the QR on plain HTTP (the server still accepts
+    // HTTPS on the same port for anyone who prefers it) — scanning it must
+    // not interrupt a simple file download with a certificate warning.
+    const baseUrl = (server.lanUrls[0] || `http://127.0.0.1:${server.port}`).replace(
+      /^https:/,
+      'http:'
+    );
     const directUrl =
       session.files.length === 1
         ? `${baseUrl}/api/beam/${session.token}/file/0`
@@ -112,6 +139,7 @@ async function main() {
   const server = await createAirBridgeServer({
     port,
     mode,
+    ...tlsOptions,
     daemonConfig: {
       enabled: true,
       downloadDir,
@@ -126,7 +154,9 @@ async function main() {
 
   console.log(`\n  ⚡ AirBridge Daemon Active on Port ${server.port}`);
   console.log(`  📂 Auto-Save Folder: ${downloadDir}`);
-  console.log(`  💻 Open on MacBook:  http://localhost:${server.port}`);
+  for (const line of describeTlsSetup(server)) {
+    console.log(`  ${line}`);
+  }
   console.log(`  📱 Scan on Android (${targetUrl}):\n`);
   console.log(qrAscii);
 }
