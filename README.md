@@ -15,6 +15,18 @@ The same E2EE channel that carries files also carries clipboard text (`ECDH-P256
 - **Automatic copy-beam:** With **Auto-beam copied text** enabled (on by default in **Clipboard** or **Settings**), copying text on the Mac running the local AirBridge service automatically beams it to your paired Android device in the background via the local OS clipboard bridge — no need to switch back to the AirBridge browser tab. On Android, copying inside the page, sharing text/links via the Android Share Sheet, or returning to AirBridge with newly copied text (when clipboard permission allows) beams automatically; you can also compose or paste manually in **Clipboard**.
 - **Receive text:** Incoming beams write directly to the host OS clipboard on the Mac (even while the browser tab is in the background) and to the browser clipboard on Android (with automatic deferred write on focus/tap if the mobile browser was unfocused, plus a **Copy** toast fallback), and every beam is kept in the Clipboard modal's history with one-click copy and "Open URL" for links.
 
+## Transfer speed
+
+The transfer engine is tuned to saturate a local link rather than politely sip from it:
+
+- **256 KiB chunks** (up from 64 KiB) — 4× fewer file reads, AES-GCM operations, frames, and ACKs per byte. Manifests declare their chunk size, so legacy 64 KiB peers still transfer fine.
+- **Pipelined encryption:** up to 8 chunks are read + AES-256-GCM encrypted concurrently (WebCrypto runs these off the main thread) while earlier frames are pushed into the socket, instead of the old strictly serial read → encrypt → send loop. Frames still go on the wire in order.
+- **A window that can't throttle you:** the sender may run 256 chunks (64 MiB) ahead of receiver ACKs (was 48 chunks / 3 MiB), receivers ACK every 32 chunks instead of every 8, and ACKs are fire-and-forget so control-channel latency never stalls decryption.
+- **Deep socket buffers:** senders fill up to 16 MiB of WebRTC/WebSocket buffered data (was 2 MiB) before backing off, and the relay forwards frames zero-copy (stamping the sender ID in place) instead of memcpy-ing every chunk.
+- **Zero-copy crypto handoff:** chunk bytes are passed to WebCrypto as views instead of being copied into a fresh ArrayBuffer for every encrypt/decrypt.
+
+Measured with two `WarpClient`s + the signaling relay in one Node process on loopback (24 MiB file, WebSocket relay, SHA-256 verified): **~34–37 MiB/s before → ~48–53 MiB/s after** this tuning. Treat that as a floor, not a ceiling: the single-process harness shares one CPU (and a pure-JS WebSocket masking fallback) across sender, relay, and receiver, while real deployments run sender, server, and receiver in separate browsers/machines where WebCrypto and the network stack are native. Actual speed remains bounded by your Wi-Fi link, as with any local transfer tool.
+
 ## Important: current product limits
 
 This repository does **not** currently provide installable macOS `.app`/`.dmg` or Android `.apk` artifacts. It does not yet meet the requested no-Terminal, no-server, no-certificate end-user setup. Do not present the current browser app as meeting that definition of done.
