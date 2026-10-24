@@ -60,9 +60,13 @@ that folder in Finder, Explorer, or your Linux file manager. Folder browsing for
 picker, creating a folder, and opening one are all loopback-only, so a phone can't move
 your save location or pop windows open on your desktop.
 
-On the phone, or when direct-to-disk saving is disabled, the browser saves the file
-instead. Multi-file transfers are packed into a zip in the browser using a small
-built-in ZIP writer and downloaded as one archive.
+On a phone (or any browser without the local daemon), received chunks are streamed
+straight to a file in a directory you pick via the browser's File System Access API —
+the same incremental, memory-bounded write, just pointed at the phone's storage instead
+of the host's Downloads folder. The file is hash-verified as it closes. If the browser
+doesn't support that API, or you cancel the picker, it falls back to reassembling in
+browser memory and downloading; multi-file transfers in that fallback are packed into a
+zip by a small built-in ZIP writer and downloaded as one archive.
 
 ### Clipboard
 
@@ -281,9 +285,10 @@ browser works over the LAN IP too). From anywhere else they return 403.
   set to *Nearby*, or a shared pair code. Guest Wi-Fi and client-isolated networks block
   this; use a phone hotspot if you're stuck.
 - **Transfers stall on a large file.** On the machine running the server, chunks stream
-  to disk as they arrive, so size is bounded by disk, not RAM. On a phone (or when
-  direct-to-disk saving is off), the file is still reassembled in browser memory first —
-  try smaller batches, or send from the CLI where no per-chunk browser buffer is involved.
+  to disk as they arrive, so size is bounded by disk, not RAM. A phone does the same via
+  the File System Access API. Only when that API is unavailable does the browser fall back
+  to reassembling the file in memory first — try smaller batches, or send from the CLI
+  where no per-chunk browser buffer is involved.
 - **Both pages still have to stay open.** The host daemon writes chunks to disk in the
   background as they arrive and a re-established transfer resumes from its partial, but
   the receiving browser must stay connected to decrypt and forward chunks. A backgrounded
@@ -372,10 +377,12 @@ These are real gaps, not TODO padding:
   "across networks" means you've made the server reachable somehow.
 - **The phone certificate install is manual.** That's a browser/OS trust requirement no
   web app can automate away.
-- **The phone still buffers in memory.** The host streams received chunks straight to
-  disk, but a phone (or any client without the local daemon) reassembles the file in
-  browser memory before saving, so a many-gigabyte file sent *to* a phone can still
-  exhaust it. Sending *from* a phone is unaffected.
+- **The phone's disk path depends on the browser.** The host streams received chunks
+  straight to disk, and a phone does the same through the File System Access API — but
+  that API is Chromium-only and requires you to pick a directory once per transfer. On a
+  browser without it (or if you cancel the picker), the phone falls back to reassembling
+  the file in browser memory before downloading, so a many-gigabyte file sent *to* such
+  a browser can still exhaust it. Sending *from* a phone is unaffected.
 - **A hash mismatch doesn't block the write.** The per-file hash is checked and shown as
   a shield icon in the transfer list, but the file is still handed to the save path. If
   integrity matters for what you're moving, look for that icon (its tooltip carries the

@@ -31,6 +31,7 @@ import {
   sha256Hex,
 } from './crypto.js';
 import { loadOrCreateDeviceId } from './deviceDetect.js';
+import { hashStream } from './sha256Stream.js';
 
 export const CHUNK_SIZE = 256 * 1024; // 256 KiB — 4× fewer read/encrypt/frame/ACK round-trips per byte than the old 64 KiB
 export const MIN_CHUNK_SIZE = 16 * 1024; // smallest per-file chunk size a peer may declare (legacy peers use 64 KiB)
@@ -100,6 +101,8 @@ export interface ReceivedFileRecord {
   sha256: string;
   verified: boolean;
   savedToMacPath?: string;
+  /** Path of a file written straight to disk via the File System Access API (phone/browser). */
+  savedToDiskPath?: string;
 }
 
 export type TransferDirection = 'incoming' | 'outgoing';
@@ -199,7 +202,9 @@ interface InternalReceiveState {
   finalizeChain: Promise<void>;
   fallbackTimer?: ReturnType<typeof setTimeout>;
   /** Disk-backed receivers, one per file, when the host daemon is enabled. */
-  diskReceivers?: Map<number, DiskFileReceiver>;
+  diskReceivers?: Map<number, DaemonReceiver>;
+  /** File-System-Access-API receivers, one per file, when the browser can write to disk directly. */
+  fileSystemReceivers?: Map<number, FileSystemReceiver>;
 }
 
 interface InternalSendState {
@@ -313,28 +318,52 @@ export interface DiskFinalizeResult {
   bytes: number;
 }
 
+// ---- File System Access API (browser-side disk receive, e.g. the phone) ----
+// Structural interfaces so the browser's FileSystemDirectoryHandle etc. satisfy
+// them, and tests can supply in-memory mocks.
+
+interface FsWritableStream {
+  write(data: Uint8Array, options?: { at?: number }): Promise<void>;
+  close(): Promise<void>;
+}
+interface FsFileHandle {
+  readonly name: string;
+  createWritable(): Promise<FsWritableStream>;
+  getFile(): Promise<FsFile>;
+}
+interface FsFile {
+  readonly size: number;
+  stream(): ReadableStream<Uint8Array>;
+}
+interface FsDirectoryHandle {
+  readonly name: string;
+  getFileHandle(name: string, options?: { create?: boolean }): Promise<FsFileHandle>;
+  removeEntry(name: string, options?: { recursive?: boolean }): Promise<void>;
+}
+type ShowDirectoryPicker = (options?: {
+  mode?: 'read' | 'readwrite';
+  id?: string;
+}) => Promise<FsDirectoryHandle>;
+
 /**
- * Streams decrypted chunks to the local AirBridge daemon over loopback as
- * they arrive, so a large inbound file is written to disk incrementally
- * instead of being buffered in browser memory. Writes are idempotent and
- * resumable: a chunk already on disk is a no-op, and the daemon keeps a
- * manifest of what landed so a re-established transfer can skip the prefix.
+ * Shared chunk-queueing / concurrency / idle / finalize logic for the two
+ * disk receive backends. Subclasses supply how a chunk is written and how the
+ * file is finalized.
  */
-class DiskFileReceiver {
-  private readonly queue: Array<{ chunkIndex: number; data: Uint8Array }> = [];
-  private readonly received = new Set<number>();
-  private pending = 0;
-  private complete = false;
-  private finalized = false;
-  private result?: DiskFinalizeResult;
-  private error?: string;
-  private finalizePromise?: Promise<DiskFinalizeResult | null>;
+abstract class ChunkStreamReceiver {
+  protected readonly queue: Array<{ chunkIndex: number; data: Uint8Array }> = [];
+  protected readonly received = new Set<number>();
+  protected pending = 0;
+  protected complete = false;
+  protected finalized = false;
+  protected result?: DiskFinalizeResult;
+  protected error?: string;
+  protected finalizePromise?: Promise<DiskFinalizeResult | null>;
   private idleResolvers: Array<() => void> = [];
 
   constructor(
-    private readonly meta: DiskReceiveMeta,
-    private readonly senderName: string,
-    private readonly apiBase: string,
+    protected readonly meta: DiskReceiveMeta,
+    protected readonly windowSize: number,
   ) {}
 
   hasReceived(chunkIndex: number): boolean {
@@ -349,6 +378,10 @@ class DiskFileReceiver {
     this.complete = true;
   }
 
+  getError(): string | undefined {
+    return this.error;
+  }
+
   push(chunkIndex: number, data: Uint8Array): void {
     if (this.received.has(chunkIndex)) return;
     this.received.add(chunkIndex);
@@ -356,11 +389,16 @@ class DiskFileReceiver {
     this.pump();
   }
 
-  private pump(): void {
-    while (this.queue.length > 0 && this.pending < DISK_SEND_WINDOW) {
+  protected abstract writeChunk(chunkIndex: number, data: Uint8Array): Promise<void>;
+  protected abstract finalize(): Promise<DiskFinalizeResult | null>;
+  /** Close any open resources (streams/handles). Safe to call multiple times. */
+  async dispose(): Promise<void> {}
+
+  protected pump(): void {
+    while (this.queue.length > 0 && this.pending < this.windowSize) {
       const item = this.queue.shift()!;
       this.pending++;
-      void this.sendChunk(item)
+      void this.writeChunk(item.chunkIndex, item.data)
         .catch((err) => {
           // A chunk that never landed on disk must not count as received,
           // or finalization would hash a truncated file as complete.
@@ -374,28 +412,6 @@ class DiskFileReceiver {
           this.pump();
           this.maybeNotifyIdle();
         });
-    }
-  }
-
-  private async sendChunk(item: { chunkIndex: number; data: Uint8Array }): Promise<void> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/octet-stream',
-      'X-AirBridge-Transfer': this.meta.transferId,
-      'X-AirBridge-File': String(this.meta.fileIndex),
-      'X-AirBridge-Chunk': String(item.chunkIndex),
-      'X-AirBridge-Name': encodeURIComponent(this.meta.name),
-      'X-AirBridge-Size': String(this.meta.size),
-      'X-AirBridge-Chunk-Size': String(this.meta.chunkSize),
-      'X-AirBridge-Total-Chunks': String(this.meta.totalChunks),
-    };
-    if (this.senderName) headers['X-AirBridge-Sender'] = encodeURIComponent(this.senderName);
-    const resp = await fetch(`${this.apiBase}/api/daemon/receive-chunk`, {
-      method: 'POST',
-      headers,
-      body: item.data as unknown as BodyInit,
-    });
-    if (!resp.ok) {
-      throw new Error(`chunk ${item.chunkIndex} rejected (HTTP ${resp.status})`);
     }
   }
 
@@ -428,12 +444,44 @@ class DiskFileReceiver {
     }
     return result;
   }
+}
 
-  getError(): string | undefined {
-    return this.error;
+/**
+ * Streams decrypted chunks to the local AirBridge daemon over loopback as
+ * they arrive (host / macOS path). Writes are idempotent and resumable.
+ */
+class DaemonReceiver extends ChunkStreamReceiver {
+  constructor(
+    meta: DiskReceiveMeta,
+    private readonly senderName: string,
+    private readonly apiBase: string,
+  ) {
+    super(meta, DISK_SEND_WINDOW);
   }
 
-  private async finalize(): Promise<DiskFinalizeResult | null> {
+  protected async writeChunk(chunkIndex: number, data: Uint8Array): Promise<void> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/octet-stream',
+      'X-AirBridge-Transfer': this.meta.transferId,
+      'X-AirBridge-File': String(this.meta.fileIndex),
+      'X-AirBridge-Chunk': String(chunkIndex),
+      'X-AirBridge-Name': encodeURIComponent(this.meta.name),
+      'X-AirBridge-Size': String(this.meta.size),
+      'X-AirBridge-Chunk-Size': String(this.meta.chunkSize),
+      'X-AirBridge-Total-Chunks': String(this.meta.totalChunks),
+    };
+    if (this.senderName) headers['X-AirBridge-Sender'] = encodeURIComponent(this.senderName);
+    const resp = await fetch(`${this.apiBase}/api/daemon/receive-chunk`, {
+      method: 'POST',
+      headers,
+      body: data as unknown as BodyInit,
+    });
+    if (!resp.ok) {
+      throw new Error(`chunk ${chunkIndex} rejected (HTTP ${resp.status})`);
+    }
+  }
+
+  protected async finalize(): Promise<DiskFinalizeResult | null> {
     if (this.finalizePromise) return this.finalizePromise;
     this.finalizePromise = (async () => {
       try {
@@ -462,6 +510,75 @@ class DiskFileReceiver {
       }
     })();
     return this.finalizePromise;
+  }
+}
+
+/**
+ * Streams decrypted chunks straight to a file in a directory the user picked
+ * via the File System Access API — the phone/browser equivalent of the host
+ * daemon. Chunks are written at their declared offset (out-of-order arrival is
+ * fine), and the file is hash-verified by reading it back incrementally.
+ */
+class FileSystemReceiver extends ChunkStreamReceiver {
+  private stream?: FsWritableStream;
+  private fileHandle?: FsFileHandle;
+  private readonly directoryHandle: FsDirectoryHandle;
+
+  constructor(meta: DiskReceiveMeta, directoryHandle: FsDirectoryHandle) {
+    // Writes to a single WritableFileStream must be serialized.
+    super(meta, 1);
+    this.directoryHandle = directoryHandle;
+  }
+
+  async open(): Promise<void> {
+    this.fileHandle = await this.directoryHandle.getFileHandle(this.meta.name, { create: true });
+    this.stream = await this.fileHandle.createWritable();
+  }
+
+  protected async writeChunk(chunkIndex: number, data: Uint8Array): Promise<void> {
+    await this.stream!.write(data, { at: chunkIndex * this.meta.chunkSize });
+  }
+
+  protected async finalize(): Promise<DiskFinalizeResult | null> {
+    if (this.finalizePromise) return this.finalizePromise;
+    this.finalizePromise = (async () => {
+      try {
+        await this.stream?.close();
+        this.stream = undefined;
+        const file = await this.fileHandle!.getFile();
+        const sha256 = await hashStream(file.stream());
+        const finalName = this.fileHandle!.name || this.meta.name;
+        return {
+          savedPath: `${this.directoryHandle.name}/${finalName}`,
+          finalName,
+          sha256,
+          bytes: this.meta.size,
+        };
+      } catch (err) {
+        this.error = err instanceof Error ? err.message : 'Failed to save to disk.';
+        return null;
+      }
+    })();
+    return this.finalizePromise;
+  }
+
+  async dispose(): Promise<void> {
+    try {
+      await this.stream?.close();
+    } catch {
+      // ignore
+    }
+    this.stream = undefined;
+  }
+
+  /** Remove the partial file (used when a transfer is cancelled/declined). */
+  async discard(): Promise<void> {
+    await this.dispose();
+    try {
+      await this.directoryHandle.removeEntry(this.fileHandle?.name ?? this.meta.name);
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -1312,6 +1429,15 @@ export class WarpClient {
     let resumeFromChunks;
     if (this.canReceiveToDisk() && (await this.probeDiskApi())) {
       resumeFromChunks = await this.prepareDiskReceivers(recvState);
+    } else if (this.canReceiveViaFileSystem()) {
+      // Must be called synchronously within the user gesture — show the
+      // picker before any other await so the browser treats it as a user
+      // activation. If the user cancels or the API is unavailable, we fall
+      // back to the in-memory browser download.
+      const directoryHandle = await this.showDirectoryPicker();
+      if (directoryHandle) {
+        await this.prepareFileSystemReceivers(recvState, directoryHandle);
+      }
     }
 
     await this.sendControlMessage(
@@ -1409,12 +1535,12 @@ export class WarpClient {
   private async prepareDiskReceivers(
     recvState: InternalReceiveState
   ): Promise<Record<number, number> | undefined> {
-    const receivers = new Map<number, DiskFileReceiver>();
+    const receivers = new Map<number, DaemonReceiver>();
     const resume: Record<number, number> = {};
     let anyResume = false;
 
     for (const file of recvState.session.files) {
-      const receiver = new DiskFileReceiver(
+      const receiver = new DaemonReceiver(
         {
           transferId: recvState.session.transferId,
           fileIndex: file.index,
@@ -1448,10 +1574,91 @@ export class WarpClient {
     return anyResume ? resume : undefined;
   }
 
+  /** True when the browser can write received chunks to a real file via the File System Access API. */
+  private canReceiveViaFileSystem(): boolean {
+    return (
+      typeof window !== 'undefined' &&
+      typeof (
+        window as unknown as { showDirectoryPicker?: ShowDirectoryPicker }
+      ).showDirectoryPicker === 'function'
+    );
+  }
+
+  /**
+   * Show the directory picker. Returns null if the user cancels or the API
+   * throws (e.g. permission denied), in which case we fall back to the
+   * in-memory browser download.
+   */
+  private async showDirectoryPicker(): Promise<FsDirectoryHandle | null> {
+    try {
+      const picker = (
+        window as unknown as { showDirectoryPicker: ShowDirectoryPicker }
+      ).showDirectoryPicker;
+      return await picker({ mode: 'readwrite' });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Create one FileSystemReceiver per file, opening a writable stream in the
+   * picked directory.
+   */
+  private async prepareFileSystemReceivers(
+    recvState: InternalReceiveState,
+    directoryHandle: FsDirectoryHandle,
+  ): Promise<void> {
+    const receivers = new Map<number, FileSystemReceiver>();
+    for (const file of recvState.session.files) {
+      const receiver = new FileSystemReceiver(
+        {
+          transferId: recvState.session.transferId,
+          fileIndex: file.index,
+          name: file.name,
+          size: file.size,
+          chunkSize: file.chunkSize,
+          totalChunks: file.totalChunks,
+        },
+        directoryHandle,
+      );
+      await receiver.open();
+      receivers.set(file.index, receiver);
+    }
+    recvState.fileSystemReceivers = receivers;
+  }
+
+  /**
+   * Close (and optionally remove) any open disk receivers for a transfer that
+   * is being cancelled or declined. File-System-Access receivers discard their
+   * partial file from the user's picked directory; daemon receivers just close
+   * their handles (the .part + manifest stay for partial recovery).
+   */
+  private async disposeReceivers(
+    recvState: InternalReceiveState,
+    discardFiles: boolean,
+  ): Promise<void> {
+    for (const r of recvState.fileSystemReceivers?.values() ?? []) {
+      try {
+        if (discardFiles) await r.discard();
+        else await r.dispose();
+      } catch {
+        // ignore
+      }
+    }
+    for (const r of recvState.diskReceivers?.values() ?? []) {
+      try {
+        await r.dispose();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   public async declineIncomingTransfer(transferId: string): Promise<void> {
     const recvState = this.incomingStates.get(transferId);
     if (!recvState) return;
     if (recvState.fallbackTimer) clearTimeout(recvState.fallbackTimer);
+    await this.disposeReceivers(recvState, true);
     recvState.session.status = 'declined';
     recvState.session.completedAt = Date.now();
     this.incomingStates.delete(transferId);
@@ -1492,6 +1699,7 @@ export class WarpClient {
     const recvState = this.incomingStates.get(transferId);
     if (recvState) {
       if (recvState.fallbackTimer) clearTimeout(recvState.fallbackTimer);
+      await this.disposeReceivers(recvState, true);
       recvState.session.status = 'cancelled';
       recvState.session.completedAt = Date.now();
       this.incomingStates.delete(transferId);
@@ -1928,6 +2136,7 @@ export class WarpClient {
         const recvState = this.incomingStates.get(payload.transferId);
         if (recvState) {
           if (recvState.fallbackTimer) clearTimeout(recvState.fallbackTimer);
+          await this.disposeReceivers(recvState, true);
           recvState.session.status = 'cancelled';
           recvState.session.completedAt = Date.now();
           this.incomingStates.delete(payload.transferId);
@@ -1969,6 +2178,7 @@ export class WarpClient {
           sha256: payload.sha256,
         });
         recvState.diskReceivers?.get(payload.fileIndex)?.markComplete();
+        recvState.fileSystemReceivers?.get(payload.fileIndex)?.markComplete();
         await this.scheduleReceiveFinalization(payload.transferId, false);
         break;
       }
@@ -2022,14 +2232,16 @@ export class WarpClient {
       if (!allChunksArrived && !forceFallback) continue;
 
       const diskReceiver = recvState.diskReceivers?.get(fileIndex);
-      if (diskReceiver) {
-        const diskResult = await diskReceiver.finalizeIfReady(forceFallback);
+      const fsReceiver = recvState.fileSystemReceivers?.get(fileIndex);
+      if (diskReceiver || fsReceiver) {
+        const receiver = diskReceiver ?? fsReceiver!;
+        const diskResult = await receiver.finalizeIfReady(forceFallback);
         if (!this.incomingStates.has(transferId)) return;
         if (!diskResult) {
           if (forceFallback) {
             hadDiskError = true;
             recvState.session.errorMessage =
-              diskReceiver.getError() || 'Transfer incomplete: some chunks never arrived.';
+              receiver.getError() || 'Transfer incomplete: some chunks never arrived.';
           }
           continue;
         }
@@ -2046,7 +2258,8 @@ export class WarpClient {
           blobUrl: undefined,
           sha256: diskResult.sha256,
           verified,
-          savedToMacPath: diskResult.savedPath,
+          savedToMacPath: diskReceiver ? diskResult.savedPath : undefined,
+          savedToDiskPath: fsReceiver ? diskResult.savedPath : undefined,
         });
         recvState.session.receivedFiles.sort((a, b) => a.index - b.index);
         recvState.finalizedFiles.add(fileIndex);
@@ -2194,9 +2407,16 @@ export class WarpClient {
     recvState.session.transport = transport;
 
     const diskReceiver = recvState.diskReceivers?.get(decoded.fileIndex);
+    const fsReceiver = recvState.fileSystemReceivers?.get(decoded.fileIndex);
     if (diskReceiver) {
       if (!diskReceiver.hasReceived(decoded.chunkIndex)) {
         diskReceiver.push(decoded.chunkIndex, plainBytes);
+        recvState.receivedChunkCounts[decoded.fileIndex]++;
+        recvState.bytesReceived += plainBytes.byteLength;
+      }
+    } else if (fsReceiver) {
+      if (!fsReceiver.hasReceived(decoded.chunkIndex)) {
+        fsReceiver.push(decoded.chunkIndex, plainBytes);
         recvState.receivedChunkCounts[decoded.fileIndex]++;
         recvState.bytesReceived += plainBytes.byteLength;
       }
