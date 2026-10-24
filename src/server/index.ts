@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import type { TLSSocket } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
-import { SignalingHub } from './signalingHub.js';
+import { SignalingHub, isLocalMachineAddress } from './signalingHub.js';
 import { getLanUrls, startMdnsResponder, type MdnsHandle } from './mdnsService.js';
 import {
   isLoopbackAddress,
@@ -22,9 +22,11 @@ import {
   openFolderInFileManager,
   persistDownloadDir,
   saveBufferToLocalDownloads,
+  sanitizeFilename,
   setDownloadDir,
   type MacDaemonConfig,
 } from './macIntegration.js';
+import { PartialReceiveStore } from './partialReceive.js';
 import {
   createSystemClipboardProvider,
   type HostClipboardProvider,
@@ -205,6 +207,11 @@ export async function createAirBridgeServer(
   // device / website reaching this port) must not be able to move where the
   // host saves files or pop open folders on the host's screen.
   const isLoopbackRequest = (req: Request) => isLoopbackAddress(req.socket.remoteAddress);
+  // The daemon save/stream routes are restricted to this machine, not just
+  // loopback: the host's own browser is often reached over a LAN IP, and the
+  // WebSocket layer already treats that as a host client. Remote devices (a
+  // phone, another laptop) have an address that is not one of our interfaces.
+  const isLocalMachineRequest = (req: Request) => isLocalMachineAddress(req.socket.remoteAddress);
   const receivedSettingsPath = options.receivedFolderSettingsPath === null || (options.receivedFolderSettingsPath === undefined && mode === 'test')
     ? null
     : options.receivedFolderSettingsPath ?? path.join(path.dirname(tls?.certDir ?? path.join(process.env.HOME ?? '', '.airbridge', 'tls')), 'settings.json');
@@ -216,6 +223,10 @@ export async function createAirBridgeServer(
   if (daemonCfg.enabled) {
     await fs.promises.mkdir(daemonCfg.downloadDir, { recursive: true }).catch(() => {});
   }
+  // Disk-backed streaming receive: chunk-level .part files + persisted manifests
+  // so a huge inbound file never lives entirely in browser memory and an
+  // interrupted transfer can resume from disk.
+  const receiveStore = new PartialReceiveStore(daemonCfg);
   app.get('/api/received-folder', (req, res) => {
     if (!isLoopbackRequest(req)) { res.status(403).json({ error: 'Received-folder settings are restricted to this device.' }); return; }
     res.json({ downloadDir: daemonCfg.downloadDir, autoSaveToDownloads: daemonCfg.enabled && daemonCfg.autoSaveToDownloads, enabled: daemonCfg.enabled });
@@ -307,7 +318,7 @@ export async function createAirBridgeServer(
       requestProtocol: (req.socket as TLSSocket).encrypted ? 'https' : 'http',
       mdnsActive: mdns?.active ?? false,
       // Full daemon status (incl. the local download path) only for the host itself.
-      localDaemon: isLoopbackAddress(req.socket.remoteAddress) ? getDaemonStatus(daemonCfg) : { ...getDaemonStatus(daemonCfg), downloadDir: undefined },
+      localDaemon: isLocalMachineAddress(req.socket.remoteAddress) ? getDaemonStatus(daemonCfg) : { ...getDaemonStatus(daemonCfg), downloadDir: undefined },
     });
   });
 
@@ -320,9 +331,8 @@ export async function createAirBridgeServer(
         res.status(403).json({ error: 'Local daemon mode is disabled.' });
         return;
       }
-      const remote = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
-      if (remote !== '127.0.0.1' && remote !== '::1') {
-        res.status(403).json({ error: 'Direct disk save is restricted to local loopback.' });
+      if (!isLocalMachineAddress(req.socket.remoteAddress)) {
+        res.status(403).json({ error: 'Direct disk save is restricted to this machine.' });
         return;
       }
       const rawName = String(req.headers['x-airbridge-filename'] || 'download.bin');
@@ -339,6 +349,150 @@ export async function createAirBridgeServer(
           error: err instanceof Error ? err.message : 'Failed to save to local Downloads',
         });
       }
+    }
+  );
+
+  // Streaming, disk-backed chunk receive (loopback + opt-in daemon). The host
+  // browser decrypts each chunk and posts it here; the server writes it to a
+  // .part file at its declared offset. Keeps huge files off browser memory and
+  // makes an interrupted transfer resumable from disk.
+  app.post(
+    '/api/daemon/receive-chunk',
+    express.raw({ type: 'application/octet-stream', limit: '4mb' }),
+    async (req: Request, res: Response) => {
+      if (!daemonCfg.enabled) {
+        res.status(403).json({ error: 'Local daemon mode is disabled.' });
+        return;
+      }
+      if (!isLocalMachineRequest(req)) {
+        res.status(403).json({ error: 'Direct disk save is restricted to this machine.' });
+        return;
+      }
+      const h = req.headers;
+      const transferId = String(h['x-airbridge-transfer'] || '');
+      const fileIndex = Number(h['x-airbridge-file']);
+      const chunkIndex = Number(h['x-airbridge-chunk']);
+      const rawName = decodeURIComponent(String(h['x-airbridge-name'] || ''));
+      const senderName = h['x-airbridge-sender']
+        ? decodeURIComponent(String(h['x-airbridge-sender']))
+        : undefined;
+      const size = Number(h['x-airbridge-size']);
+      const chunkSize = Number(h['x-airbridge-chunk-size']);
+      const totalChunks = Number(h['x-airbridge-total-chunks']);
+      if (
+        !/^[0-9a-f]{16}$/.test(transferId) ||
+        !Number.isInteger(fileIndex) ||
+        fileIndex < 0 ||
+        !Number.isInteger(chunkIndex) ||
+        chunkIndex < 0 ||
+        !rawName ||
+        !Number.isFinite(size) ||
+        size < 0 ||
+        !Number.isFinite(chunkSize) ||
+        chunkSize <= 0 ||
+        !Number.isInteger(totalChunks) ||
+        totalChunks < 1
+      ) {
+        res.status(400).json({ error: 'Invalid chunk request.' });
+        return;
+      }
+      const body = Buffer.isBuffer(req.body) ? req.body : Buffer.from([]);
+      try {
+        await receiveStore.writeChunk(
+          {
+            transferId,
+            fileIndex,
+            name: sanitizeFilename(rawName),
+            senderName,
+            size,
+            chunkSize,
+            totalChunks,
+          },
+          chunkIndex,
+          new Uint8Array(body),
+        );
+        res.json({ ok: true });
+      } catch (err) {
+        res.status(400).json({
+          error: err instanceof Error ? err.message : 'Failed to write chunk.',
+        });
+      }
+    }
+  );
+
+  // Query what a resumable receive has already landed on disk (loopback only).
+  app.get('/api/daemon/received', async (req: Request, res: Response) => {
+    if (!daemonCfg.enabled) {
+      res.status(403).json({ error: 'Local daemon mode is disabled.' });
+      return;
+    }
+    if (!isLocalMachineRequest(req)) {
+      res.status(403).json({ error: 'Received-files state is restricted to this machine.' });
+      return;
+    }
+    const transferId = String(req.query.transferId || '');
+    const fileIndex = Number(req.query.fileIndex);
+    const summary = await receiveStore.listReceived(transferId, fileIndex);
+    if (!summary) {
+      res.json({ ok: true, complete: false });
+      return;
+    }
+    res.json({ ok: true, ...summary });
+  });
+
+  // Finalize a complete .part file: verify, hash, rename, notify (loopback only).
+  app.post(
+    '/api/daemon/finalize',
+    express.json({ limit: '16kb' }),
+    async (req: Request, res: Response) => {
+      if (!daemonCfg.enabled) {
+        res.status(403).json({ error: 'Local daemon mode is disabled.' });
+        return;
+      }
+      if (!isLocalMachineRequest(req)) {
+        res.status(403).json({ error: 'Received-files state is restricted to this machine.' });
+        return;
+      }
+      const body = req.body as { transferId?: unknown; fileIndex?: unknown };
+      const transferId = typeof body.transferId === 'string' ? body.transferId : '';
+      const fileIndex = Number(body.fileIndex);
+      if (!/^[0-9a-f]{16}$/.test(transferId) || !Number.isInteger(fileIndex) || fileIndex < 0) {
+        res.status(400).json({ error: 'transferId and fileIndex are required.' });
+        return;
+      }
+      try {
+        const result = await receiveStore.finalize(transferId, fileIndex);
+        res.json({ ok: true, ...result });
+      } catch (err) {
+        res.status(400).json({
+          error: err instanceof Error ? err.message : 'Failed to finalize file.',
+        });
+      }
+    }
+  );
+
+  // Drop a partial receive (used when a transfer is cancelled/declined).
+  app.post(
+    '/api/daemon/discard',
+    express.json({ limit: '16kb' }),
+    async (req: Request, res: Response) => {
+      if (!daemonCfg.enabled) {
+        res.status(403).json({ error: 'Local daemon mode is disabled.' });
+        return;
+      }
+      if (!isLocalMachineRequest(req)) {
+        res.status(403).json({ error: 'Received-files state is restricted to this machine.' });
+        return;
+      }
+      const body = req.body as { transferId?: unknown; fileIndex?: unknown };
+      const transferId = typeof body.transferId === 'string' ? body.transferId : '';
+      const fileIndex = Number(body.fileIndex);
+      if (!/^[0-9a-f]{16}$/.test(transferId) || !Number.isInteger(fileIndex) || fileIndex < 0) {
+        res.status(400).json({ error: 'transferId and fileIndex are required.' });
+        return;
+      }
+      await receiveStore.discard(transferId, fileIndex);
+      res.json({ ok: true });
     }
   );
 
@@ -459,6 +613,7 @@ export async function createAirBridgeServer(
     async close() {
       mdns?.close();
       hub.close();
+      await receiveStore.dispose();
       // The internal HTTP/HTTPS servers don't listen directly in TLS mode;
       // drop their live connections so the dispatcher's close can finish.
       httpServer.closeAllConnections?.();

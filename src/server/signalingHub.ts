@@ -106,7 +106,7 @@ function generatePeerId(): string {
   return crypto.randomBytes(8).toString('hex'); // 16 hex chars
 }
 
-function isLocalMachineAddress(remoteAddress: string | undefined): boolean {
+export function isLocalMachineAddress(remoteAddress: string | undefined): boolean {
   if (!remoteAddress) return false;
   if (isLoopbackAddress(remoteAddress)) return true;
   const normalized = remoteAddress.replace(/^::ffff:/, '');
