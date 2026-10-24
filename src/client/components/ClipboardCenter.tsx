@@ -5,10 +5,14 @@ import type { ClipboardBeamItem } from "../engine/warpClient.js";
 interface ClipboardCenterProps {
   peers: PeerSummary[];
   items: ClipboardBeamItem[];
+  autoSync: boolean;
+  hostClipboardActive: boolean;
   /** Preselect this peer when opened from a device row. */
   initialPeerId?: string | null;
   /** Text shared via the Android Share Sheet arrives prefilled. */
   prefill?: string;
+  onToggleAutoSync: (enabled: boolean) => void;
+  onMarkCopied?: (text: string) => void;
   onSend: (peerId: string, text: string) => Promise<void>;
   onClose: () => void;
 }
@@ -24,8 +28,12 @@ function formatTimestamp(ts: number): string {
 export function ClipboardCenter({
   peers,
   items,
+  autoSync,
+  hostClipboardActive,
   initialPeerId,
   prefill,
+  onToggleAutoSync,
+  onMarkCopied,
   onSend,
   onClose,
 }: ClipboardCenterProps) {
@@ -83,6 +91,7 @@ export function ClipboardCenter({
   };
 
   const copyItem = (item: ClipboardBeamItem) => {
+    onMarkCopied?.(item.text);
     try {
       navigator.clipboard?.writeText(item.text).catch(() => {});
     } catch {
@@ -129,6 +138,22 @@ export function ClipboardCenter({
           AES-256-GCM session as file transfers). Incoming text is copied to this
           device&apos;s clipboard automatically.
         </p>
+
+        <label className="setting-toggle clipboard-auto-toggle">
+          <span>
+            <strong>Auto-beam copied text</strong>
+            <small>
+              {hostClipboardActive
+                ? "Copies anywhere on this computer beam automatically in the background without returning to this page."
+                : "Automatically beam newly copied or shared text to your connected device."}
+            </small>
+          </span>
+          <input
+            type="checkbox"
+            checked={autoSync}
+            onChange={(event) => onToggleAutoSync(event.target.checked)}
+          />
+        </label>
 
         <form className="clipboard-compose" onSubmit={handleSubmit}>
           <textarea

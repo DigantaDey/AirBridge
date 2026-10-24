@@ -196,11 +196,17 @@ export async function decryptBinaryChunk(
   return new Uint8Array(plainBuf);
 }
 
-export async function sha256Hex(chunks: Uint8Array[]): Promise<string> {
-  const totalLen = chunks.reduce((sum, c) => sum + c.byteLength, 0);
+export async function sha256Hex(chunks: Array<Uint8Array | undefined>): Promise<string> {
+  let totalLen = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i];
+    if (c) totalLen += c.byteLength;
+  }
   const merged = new Uint8Array(totalLen);
   let offset = 0;
-  for (const c of chunks) {
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i];
+    if (!c) continue;
     merged.set(c, offset);
     offset += c.byteLength;
   }

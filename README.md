@@ -6,10 +6,10 @@ The interface is a focused transfer screen: device/service status, discovered de
 
 ## Universal clipboard (copy-paste between devices)
 
-The same E2EE channel that carries files also carries clipboard text (`ECDH-P256` + `AES-256-GCM`; nothing is stored on the server):
+The same E2EE channel that carries files also carries clipboard text (`ECDH-P256` + `AES-256-GCM`; encrypted peer-to-peer between devices):
 
-- **Send text:** open **Clipboard** from the header (or tap **Clipboard** on a device row), paste or type the text/link/code, pick the destination device, and tap **Beam text**. On Android you can also share text or a link from any app via the system Share Sheet — it opens the composer prefilled.
-- **Receive text:** incoming beams are copied to the device's system clipboard automatically (so a normal paste/Cmd+V/long-press-paste just works), a notification with a **Copy** fallback is shown, and every beam is kept in the Clipboard modal's history with one-click copy and "Open URL" for links.
+- **Automatic copy-beam:** With **Auto-beam copied text** enabled (on by default in **Clipboard** or **Settings**), copying text on the Mac running the local AirBridge service automatically beams it to your paired Android device in the background via the local OS clipboard bridge — no need to switch back to the AirBridge browser tab. On Android, copying inside the page, sharing text/links via the Android Share Sheet, or returning to AirBridge with newly copied text (when clipboard permission allows) beams automatically; you can also compose or paste manually in **Clipboard**.
+- **Receive text:** Incoming beams write directly to the host OS clipboard on the Mac (even while the browser tab is in the background) and to the browser clipboard on Android (with automatic deferred write on focus/tap if the mobile browser was unfocused, plus a **Copy** toast fallback), and every beam is kept in the Clipboard modal's history with one-click copy and "Open URL" for links.
 
 ## Important: current product limits
 

@@ -95,6 +95,30 @@ export function detectHardwareProfile(uaInput?: string): {
   };
 }
 
+export function loadOrCreateDeviceId(storageKeyPrefix = 'airbridge'): string {
+  let deviceId = '';
+  try {
+    deviceId = localStorage.getItem(`${storageKeyPrefix}:deviceId`) || '';
+  } catch {
+    // ignore storage errors
+  }
+
+  if (!/^[0-9a-f]{16}$/.test(deviceId)) {
+    const bytes = new Uint8Array(8);
+    globalThis.crypto.getRandomValues(bytes);
+    deviceId = Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    try {
+      localStorage.setItem(`${storageKeyPrefix}:deviceId`, deviceId);
+    } catch {
+      // ignore
+    }
+  }
+
+  return deviceId;
+}
+
 export function loadOrCreateDeviceProfile(
   publicKeyB64: string,
   storageKeyPrefix = 'airbridge'
@@ -122,6 +146,7 @@ export function loadOrCreateDeviceProfile(
     model: hw.model,
     formFactor: hw.formFactor,
     publicKey: publicKeyB64,
+    deviceId: loadOrCreateDeviceId(storageKeyPrefix),
   };
 }
 

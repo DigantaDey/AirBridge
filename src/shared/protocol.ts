@@ -9,6 +9,7 @@ export interface DeviceProfile {
   model: string;
   formFactor: FormFactor;
   publicKey: string; // base64url raw ECDH P-256 public key (65 bytes)
+  deviceId?: string; // persistent identifier for cross-reload history reconciliation
 }
 
 export interface PeerSummary {
@@ -24,6 +25,7 @@ export interface LocalDaemonStatus {
   hostname: string;
   downloadDir?: string;
   autoSaveToDownloads: boolean;
+  clipboardBridge?: boolean;
 }
 
 export interface FileManifestItem {
@@ -41,6 +43,22 @@ export interface EncryptedEnvelope {
   encrypted: true;
   iv: string; // base64url 12-byte IV
   ciphertext: string; // base64url AES-GCM ciphertext
+}
+
+export interface HistoricalTransferSummary {
+  transferId: string;
+  peerDeviceId?: string;
+  peerName: string;
+  peerPlatform: PlatformType;
+  direction: 'incoming' | 'outgoing';
+  status: 'completed' | 'declined' | 'cancelled' | 'error';
+  transport: TransportKind;
+  files: FileManifestItem[];
+  totalBytes: number;
+  transferredBytes: number;
+  startedAt: number;
+  completedAt?: number;
+  sasCode: string;
 }
 
 export type ControlPayload =
@@ -90,6 +108,10 @@ export type ControlPayload =
       timestamp: number;
     }
   | {
+      kind: 'history-sync';
+      transfers: HistoricalTransferSummary[];
+    }
+  | {
       kind: 'ping';
       ts: number;
     }
@@ -127,6 +149,10 @@ export type ClientToServerMessage =
       type: 'transfer-control';
       to: string;
       envelope: EncryptedEnvelope | { encrypted: false; payload: ControlPayload };
+    }
+  | {
+      type: 'set-host-clipboard';
+      text: string;
     };
 
 export type ServerToClientMessage =
@@ -156,6 +182,11 @@ export type ServerToClientMessage =
       type: 'transfer-control';
       from: string;
       envelope: EncryptedEnvelope | { encrypted: false; payload: ControlPayload };
+    }
+  | {
+      type: 'host-clipboard';
+      text: string;
+      timestamp: number;
     }
   | {
       type: 'error';

@@ -3,6 +3,7 @@ import {
   type ControlPayload,
   type DeviceProfile,
   type FileManifestItem,
+  type HistoricalTransferSummary,
   type LocalDaemonStatus,
   type PeerSummary,
   type ServerToClientMessage,
@@ -27,6 +28,7 @@ import {
   generateIdentityKeyPair,
   sha256Hex,
 } from './crypto.js';
+import { loadOrCreateDeviceId } from './deviceDetect.js';
 
 export const CHUNK_SIZE = 64 * 1024; // 64 KB optimal for both WebRTC SCTP & WS Binary Relay
 const MAX_UNACKED_CHUNKS = 48; // 3 MB sliding window
@@ -82,6 +84,8 @@ export type TransferStatus =
 export interface TransferSessionView {
   transferId: string;
   peerId: string;
+  peerDeviceId?: string;
+  pairCode?: string;
   peerName: string;
   peerPlatform: PeerSummary['device']['platform'];
   sasCode: string;
@@ -131,6 +135,7 @@ export interface WarpClientSnapshot {
   transfers: TransferSessionView[];
   clipboardItems: ClipboardBeamItem[];
   trustedPeerKeys: string[];
+  autoClipboardSync: boolean;
 }
 
 export interface WarpClientOptions {
@@ -140,18 +145,25 @@ export interface WarpClientOptions {
   deviceOverride?: Omit<DeviceProfile, 'publicKey'>;
   enableWebRtc?: boolean;
   autoAcceptAll?: boolean;
+  autoClipboardSync?: boolean;
   onIncomingTransfer?: (transfer: TransferSessionView) => void;
   onIncomingClipboard?: (item: ClipboardBeamItem) => void;
+  onOutgoingAutoClipboard?: (item: ClipboardBeamItem) => void;
   onTransferCompleted?: (transfer: TransferSessionView) => void;
 }
 
 interface InternalReceiveState {
   session: TransferSessionView;
-  fileChunks: Uint8Array[][];
+  fileChunks: Array<Array<Uint8Array | undefined>>;
   receivedChunkCounts: number[];
   bytesReceived: number;
   lastSpeedTs: number;
   lastSpeedBytes: number;
+  fileCompletePayloads: Map<number, { sha256?: string }>;
+  finalizedFiles: Set<number>;
+  transferCompleteReceived: boolean;
+  finalizeChain: Promise<void>;
+  fallbackTimer?: ReturnType<typeof setTimeout>;
 }
 
 interface InternalSendState {
@@ -162,6 +174,17 @@ interface InternalSendState {
   cancelled: boolean;
   acceptResolver?: (transport: TransportKind) => void;
   acceptRejecter?: (reason: Error) => void;
+}
+
+function isTerminalTransferStatus(
+  status: TransferStatus
+): status is HistoricalTransferSummary['status'] {
+  return (
+    status === 'completed' ||
+    status === 'declined' ||
+    status === 'cancelled' ||
+    status === 'error'
+  );
 }
 
 async function generateThumbnailIfImage(input: SendableFileInput): Promise<string | undefined> {
@@ -214,6 +237,22 @@ function randomHex16(): string {
     .join('');
 }
 
+function getSafeLocalStorage(): Storage | null {
+  try {
+    if (
+      typeof localStorage !== 'undefined' &&
+      localStorage !== null &&
+      typeof localStorage.getItem === 'function' &&
+      typeof localStorage.setItem === 'function'
+    ) {
+      return localStorage;
+    }
+  } catch {
+    // ignore (e.g. Node experimental localStorage getter without file or sandboxed frame)
+  }
+  return null;
+}
+
 export class WarpClient {
   private readonly opts: WarpClientOptions;
   private readonly storagePrefix: string;
@@ -242,6 +281,7 @@ export class WarpClient {
   private cryptoSessions = new Map<string, PeerCryptoSession>(); // key: peerId
   private cryptoKeyFingerprints = new Map<string, string>(); // peerId -> publicKeyB64
   private peerRttMs = new Map<string, number>();
+  private peerControlQueues = new Map<string, Promise<void>>();
 
   // WebRTC PeerConnections & DataChannels
   private rtcPeers = new Map<string, RTCPeerConnection>();
@@ -255,23 +295,71 @@ export class WarpClient {
   private clipboardItems: ClipboardBeamItem[] = [];
   private trustedPeerKeys = new Set<string>();
 
+  // Automatic universal clipboard sync state
+  private autoClipboardSync = true;
+  private lastSyncedClipboardText = '';
+  private seenBeamIds = new Set<string>();
+  private lastIncomingClip: { peerId: string; text: string; ts: number } | null = null;
+  private pendingAutoClipboard: { text: string; capturedAt: number } | null = null;
+
   constructor(opts: WarpClientOptions = {}) {
     this.opts = opts;
     this.storagePrefix = opts.storagePrefix ?? 'airbridge';
+    if (opts.autoClipboardSync !== undefined) {
+      this.autoClipboardSync = opts.autoClipboardSync;
+    }
 
-    // Restore persisted pairCode & trusted devices if in browser
+    // Restore persisted pairCode, trusted devices, auto-clipboard pref & transfer/clipboard history
     try {
-      if (typeof localStorage !== 'undefined') {
-        const storedPair = localStorage.getItem(`${this.storagePrefix}:pairCode`);
+      const storage = getSafeLocalStorage();
+      if (storage) {
+        const storedPair = storage.getItem(`${this.storagePrefix}:pairCode`);
         if (opts.initialPairCode) {
           this.pairCode = normalizePairCode(opts.initialPairCode);
         } else if (storedPair) {
           this.pairCode = normalizePairCode(storedPair);
         }
-        const trustedRaw = localStorage.getItem(`${this.storagePrefix}:trustedKeys`);
+        const trustedRaw = storage.getItem(`${this.storagePrefix}:trustedKeys`);
         if (trustedRaw) {
           for (const k of JSON.parse(trustedRaw) as string[]) {
             this.trustedPeerKeys.add(k);
+          }
+        }
+        if (opts.autoClipboardSync === undefined) {
+          const autoRaw = storage.getItem(`${this.storagePrefix}:autoClipboard`);
+          if (autoRaw === '0' || autoRaw === 'false') {
+            this.autoClipboardSync = false;
+          }
+        }
+        const historyRaw = storage.getItem(`${this.storagePrefix}:transferHistory`);
+        if (historyRaw) {
+          const parsed = JSON.parse(historyRaw) as TransferSessionView[];
+          if (Array.isArray(parsed)) {
+            this.transfers = parsed
+              .filter(
+                (t) =>
+                  t &&
+                  typeof t.transferId === 'string' &&
+                  Array.isArray(t.files) &&
+                  isTerminalTransferStatus(t.status)
+              )
+              .map((t) => ({ ...t, receivedFiles: [] }));
+            this.sortTransfers();
+          }
+        }
+        const clipRaw = storage.getItem(`${this.storagePrefix}:clipboardHistory`);
+        if (clipRaw) {
+          const parsedClips = JSON.parse(clipRaw) as ClipboardBeamItem[];
+          if (Array.isArray(parsedClips)) {
+            this.clipboardItems = parsedClips
+              .filter((c) => c && typeof c.beamId === 'string' && typeof c.text === 'string')
+              .slice(0, 50);
+            for (const c of this.clipboardItems) {
+              this.seenBeamIds.add(c.beamId);
+            }
+            if (this.clipboardItems[0]) {
+              this.lastSyncedClipboardText = this.clipboardItems[0].text.trim();
+            }
           }
         }
       } else if (opts.initialPairCode) {
@@ -291,13 +379,21 @@ export class WarpClient {
     // A stopped client must not open a socket or install a heartbeat.
     if (this.destroyed) return;
 
+    const fallbackDeviceId =
+      typeof window !== 'undefined' ? loadOrCreateDeviceId(this.storagePrefix) : this.peerId;
+
     if (this.opts.deviceOverride) {
       this.myDevice = {
+        deviceId: fallbackDeviceId,
         ...this.opts.deviceOverride,
         publicKey: this.keys.publicKeyB64,
       };
     } else if (deviceFactory) {
-      this.myDevice = deviceFactory(this.keys.publicKeyB64);
+      const profile = deviceFactory(this.keys.publicKeyB64);
+      this.myDevice = {
+        deviceId: fallbackDeviceId,
+        ...profile,
+      };
     } else {
       this.myDevice = {
         name: 'AirBridge Peer',
@@ -305,6 +401,7 @@ export class WarpClient {
         model: 'Device',
         formFactor: 'laptop',
         publicKey: this.keys.publicKeyB64,
+        deviceId: fallbackDeviceId,
       };
     }
 
@@ -323,6 +420,9 @@ export class WarpClient {
     this.destroyed = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.pingInterval) clearInterval(this.pingInterval);
+    for (const recv of this.incomingStates.values()) {
+      if (recv.fallbackTimer) clearTimeout(recv.fallbackTimer);
+    }
     for (const dc of this.rtcChannels.values()) {
       try {
         dc.close();
@@ -386,6 +486,7 @@ export class WarpClient {
       transfers: [...this.transfers],
       clipboardItems: [...this.clipboardItems],
       trustedPeerKeys: Array.from(this.trustedPeerKeys),
+      autoClipboardSync: this.autoClipboardSync,
     };
   }
 
@@ -433,8 +534,9 @@ export class WarpClient {
       this.trustedPeerKeys.delete(publicKey);
     }
     try {
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(
+      const storage = getSafeLocalStorage();
+      if (storage) {
+        storage.setItem(
           `${this.storagePrefix}:trustedKeys`,
           JSON.stringify(Array.from(this.trustedPeerKeys))
         );
@@ -445,11 +547,75 @@ export class WarpClient {
     this.emit();
   }
 
+  public setAutoClipboardSync(enabled: boolean): void {
+    this.autoClipboardSync = enabled;
+    if (!enabled) {
+      this.pendingAutoClipboard = null;
+    }
+    try {
+      const storage = getSafeLocalStorage();
+      if (storage) {
+        storage.setItem(`${this.storagePrefix}:autoClipboard`, enabled ? '1' : '0');
+      }
+    } catch {
+      // ignore
+    }
+    this.emit();
+  }
+
+  public markClipboardSynced(text: string): void {
+    const trimmed = text.trim();
+    if (trimmed) {
+      this.lastSyncedClipboardText = trimmed;
+    }
+  }
+
+  public getLastSyncedClipboardText(): string {
+    return this.lastSyncedClipboardText;
+  }
+
+  /**
+   * Automatically beams newly copied clipboard text to connected peer(s)
+   * (preferring paired devices when present) without requiring manual interaction.
+   */
+  public async handleDetectedLocalClipboard(rawText: string): Promise<ClipboardBeamItem[]> {
+    if (!this.autoClipboardSync || this.destroyed) return [];
+    const trimmed = rawText.trim();
+    if (!trimmed || trimmed.length > 256_000) return [];
+    if (trimmed === this.lastSyncedClipboardText) return [];
+
+    const pairedPeers = this.peers.filter((p) => p.discoveryScope === 'paired');
+    const targets = pairedPeers.length > 0 ? pairedPeers : [...this.peers];
+
+    if (this.connectionState !== 'connected' || targets.length === 0) {
+      this.pendingAutoClipboard = { text: trimmed, capturedAt: Date.now() };
+      return [];
+    }
+
+    this.lastSyncedClipboardText = trimmed;
+    this.pendingAutoClipboard = null;
+
+    const results: ClipboardBeamItem[] = [];
+    for (const peer of targets) {
+      try {
+        const sent = await this.sendClipboard(peer.peerId, trimmed, { isAuto: true });
+        results.push(sent);
+      } catch {
+        // ignore transient send failure on individual peer
+      }
+    }
+    return results;
+  }
+
   // ==========================================================================
   // Universal Clipboard / Text & Link Instant Beam
   // ==========================================================================
 
-  public async sendClipboard(peerId: string, text: string): Promise<ClipboardBeamItem> {
+  public async sendClipboard(
+    peerId: string,
+    text: string,
+    options?: { isAuto?: boolean }
+  ): Promise<ClipboardBeamItem> {
     const peer = this.peers.find((p) => p.peerId === peerId);
     if (!peer) {
       throw new Error('Selected peer is no longer online.');
@@ -463,6 +629,9 @@ export class WarpClient {
     const beamId = randomHex16();
     const contentType = classifyTextPayload(trimmed);
     const timestamp = Date.now();
+
+    this.lastSyncedClipboardText = trimmed;
+    this.seenBeamIds.add(beamId);
 
     await this.sendControlMessage(
       peerId,
@@ -487,7 +656,11 @@ export class WarpClient {
       sasCode: cryptoSession.sasCode,
     };
     this.clipboardItems = [item, ...this.clipboardItems].slice(0, 50);
+    this.persistClipboardHistory();
     this.emit();
+    if (options?.isAuto) {
+      this.opts.onOutgoingAutoClipboard?.(item);
+    }
     return item;
   }
 
@@ -535,6 +708,8 @@ export class WarpClient {
     const session: TransferSessionView = {
       transferId,
       peerId,
+      peerDeviceId: peer.device.deviceId,
+      pairCode: this.pairCode || undefined,
       peerName: peer.device.name,
       peerPlatform: peer.device.platform,
       sasCode: cryptoSession.sasCode,
@@ -560,6 +735,7 @@ export class WarpClient {
 
     this.outgoingStates.set(transferId, sendState);
     this.transfers = [session, ...this.transfers];
+    this.sortTransfers();
     this.emit();
 
     const acceptPromise = new Promise<TransportKind>((resolve, reject) => {
@@ -603,7 +779,10 @@ export class WarpClient {
     } catch (err) {
       if (!sendState.cancelled) {
         session.status = 'error';
+        session.completedAt = Date.now();
         session.errorMessage = err instanceof Error ? err.message : 'Transfer interrupted';
+        this.sortTransfers();
+        this.persistTransferHistory();
         this.emit();
       }
     }
@@ -714,6 +893,24 @@ export class WarpClient {
       );
     }
 
+    // When chunks streamed over WebRTC DataChannel, wait briefly for final receiver ACK
+    // so control finalization over WebSocket does not outrace in-flight SCTP packets.
+    if (transport === 'webrtc' && !sendState.cancelled && sendState.ackedGlobalChunks < globalSentChunks) {
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(resolve, 1_200);
+        const checkAck = () => {
+          if (sendState.cancelled || sendState.ackedGlobalChunks >= globalSentChunks) {
+            clearTimeout(timeout);
+            resolve();
+          } else {
+            sendState.ackWaiters.push(checkAck);
+          }
+        };
+        sendState.ackWaiters.push(checkAck);
+      });
+    }
+    if (sendState.cancelled) return;
+
     await this.sendControlMessage(
       peer.peerId,
       {
@@ -728,8 +925,11 @@ export class WarpClient {
     session.status = 'completed';
     session.completedAt = Date.now();
     this.outgoingStates.delete(session.transferId);
+    this.sortTransfers();
+    this.persistTransferHistory();
     this.emit();
     this.opts.onTransferCompleted?.(session);
+    this.syncHistoryWithPeer(peer).catch(() => {});
   }
 
   public async acceptIncomingTransfer(transferId: string): Promise<void> {
@@ -761,8 +961,12 @@ export class WarpClient {
   public async declineIncomingTransfer(transferId: string): Promise<void> {
     const recvState = this.incomingStates.get(transferId);
     if (!recvState) return;
+    if (recvState.fallbackTimer) clearTimeout(recvState.fallbackTimer);
     recvState.session.status = 'declined';
+    recvState.session.completedAt = Date.now();
     this.incomingStates.delete(transferId);
+    this.sortTransfers();
+    this.persistTransferHistory();
     this.emit();
 
     await this.sendControlMessage(
@@ -780,9 +984,12 @@ export class WarpClient {
     if (sendState) {
       sendState.cancelled = true;
       sendState.session.status = 'cancelled';
+      sendState.session.completedAt = Date.now();
       sendState.acceptRejecter?.(new Error('Cancelled'));
       for (const w of sendState.ackWaiters) w();
       this.outgoingStates.delete(transferId);
+      this.sortTransfers();
+      this.persistTransferHistory();
       this.emit();
       await this.sendControlMessage(
         sendState.session.peerId,
@@ -794,8 +1001,12 @@ export class WarpClient {
 
     const recvState = this.incomingStates.get(transferId);
     if (recvState) {
+      if (recvState.fallbackTimer) clearTimeout(recvState.fallbackTimer);
       recvState.session.status = 'cancelled';
+      recvState.session.completedAt = Date.now();
       this.incomingStates.delete(transferId);
+      this.sortTransfers();
+      this.persistTransferHistory();
       this.emit();
       await this.sendControlMessage(
         recvState.session.peerId,
@@ -898,7 +1109,16 @@ export class WarpClient {
       }
 
       case 'transfer-control': {
-        this.handleIncomingControl(msg.from, msg.envelope).catch(() => {});
+        const prev = this.peerControlQueues.get(msg.from) ?? Promise.resolve();
+        const next = prev
+          .then(() => this.handleIncomingControl(msg.from, msg.envelope))
+          .catch(() => {});
+        this.peerControlQueues.set(msg.from, next);
+        break;
+      }
+
+      case 'host-clipboard': {
+        this.handleDetectedLocalClipboard(msg.text).catch(() => {});
         break;
       }
 
@@ -932,6 +1152,18 @@ export class WarpClient {
           // Deterministically warm up P2P WebRTC DataChannel from the lower-peerId side
           if (this.canUseWebRtc() && this.peerId < peer.peerId) {
             this.initiateWebRtcIfPossible(peer.peerId);
+          }
+          // Reconcile recent transfer history over E2EE so Android & MacBook always match
+          this.syncHistoryWithPeer(peer).catch(() => {});
+          // Flush any clipboard text copied shortly before this peer woke up / reconnected
+          if (
+            this.pendingAutoClipboard &&
+            this.autoClipboardSync &&
+            Date.now() - this.pendingAutoClipboard.capturedAt <= 60_000
+          ) {
+            const pendingText = this.pendingAutoClipboard.text;
+            this.pendingAutoClipboard = null;
+            this.handleDetectedLocalClipboard(pendingText).catch(() => {});
           }
           this.emit();
         })
@@ -1026,6 +1258,32 @@ export class WarpClient {
       }
 
       case 'clipboard-beam': {
+        const trimmed = payload.text.trim();
+        if (!trimmed) break;
+        if (this.seenBeamIds.has(payload.beamId)) break;
+        const now = Date.now();
+        if (
+          this.lastIncomingClip &&
+          this.lastIncomingClip.peerId === fromPeerId &&
+          this.lastIncomingClip.text === trimmed &&
+          now - this.lastIncomingClip.ts < 1_500
+        ) {
+          break;
+        }
+        this.seenBeamIds.add(payload.beamId);
+        if (this.seenBeamIds.size > 200) {
+          const oldest = this.seenBeamIds.values().next().value;
+          if (oldest) this.seenBeamIds.delete(oldest);
+        }
+        this.lastIncomingClip = { peerId: fromPeerId, text: trimmed, ts: now };
+        this.lastSyncedClipboardText = trimmed;
+
+        // Also update the host OS clipboard (e.g. macOS pbcopy) via loopback so
+        // pasting works immediately in any app even if this browser tab is unfocused.
+        if (this.localDaemon.clipboardBridge) {
+          this.sendServer({ type: 'set-host-clipboard', text: payload.text });
+        }
+
         const session = this.cryptoSessions.get(fromPeerId);
         const item: ClipboardBeamItem = {
           beamId: payload.beamId,
@@ -1038,16 +1296,25 @@ export class WarpClient {
           sasCode: session?.sasCode ?? '··· ···',
         };
         this.clipboardItems = [item, ...this.clipboardItems].slice(0, 50);
+        this.persistClipboardHistory();
         this.emit();
         this.opts.onIncomingClipboard?.(item);
         break;
       }
 
+      case 'history-sync': {
+        this.mergeSyncedHistory(fromPeerId, peer, payload.transfers);
+        break;
+      }
+
       case 'transfer-offer': {
+        if (this.incomingStates.has(payload.transferId)) break;
         const session = this.cryptoSessions.get(fromPeerId);
         const view: TransferSessionView = {
           transferId: payload.transferId,
           peerId: fromPeerId,
+          peerDeviceId: peer?.device.deviceId,
+          pairCode: this.pairCode || undefined,
           peerName: peer?.device.name ?? 'Nearby Device',
           peerPlatform: peer?.device.platform ?? 'unknown',
           sasCode: session?.sasCode ?? '··· ···',
@@ -1065,15 +1332,25 @@ export class WarpClient {
 
         const recvState: InternalReceiveState = {
           session: view,
-          fileChunks: payload.files.map((f) => new Array<Uint8Array>(f.totalChunks)),
+          fileChunks: payload.files.map((f) =>
+            Array.from({ length: f.totalChunks }, () => undefined)
+          ),
           receivedChunkCounts: payload.files.map(() => 0),
           bytesReceived: 0,
           lastSpeedTs: Date.now(),
           lastSpeedBytes: 0,
+          fileCompletePayloads: new Map(),
+          finalizedFiles: new Set(),
+          transferCompleteReceived: false,
+          finalizeChain: Promise.resolve(),
         };
 
         this.incomingStates.set(payload.transferId, recvState);
-        this.transfers = [view, ...this.transfers];
+        this.transfers = [
+          view,
+          ...this.transfers.filter((t) => t.transferId !== payload.transferId),
+        ];
+        this.sortTransfers();
         this.emit();
         this.opts.onIncomingTransfer?.(view);
 
@@ -1100,8 +1377,11 @@ export class WarpClient {
         if (sendState) {
           sendState.cancelled = true;
           sendState.session.status = 'declined';
+          sendState.session.completedAt = Date.now();
           sendState.acceptRejecter?.(new Error('Declined by recipient'));
           this.outgoingStates.delete(payload.transferId);
+          this.sortTransfers();
+          this.persistTransferHistory();
           this.emit();
         }
         break;
@@ -1112,15 +1392,22 @@ export class WarpClient {
         if (sendState) {
           sendState.cancelled = true;
           sendState.session.status = 'cancelled';
+          sendState.session.completedAt = Date.now();
           sendState.acceptRejecter?.(new Error('Cancelled'));
           for (const w of sendState.ackWaiters) w();
           this.outgoingStates.delete(payload.transferId);
+          this.sortTransfers();
+          this.persistTransferHistory();
           this.emit();
         }
         const recvState = this.incomingStates.get(payload.transferId);
         if (recvState) {
+          if (recvState.fallbackTimer) clearTimeout(recvState.fallbackTimer);
           recvState.session.status = 'cancelled';
+          recvState.session.completedAt = Date.now();
           this.incomingStates.delete(payload.transferId);
+          this.sortTransfers();
+          this.persistTransferHistory();
           this.emit();
         }
         break;
@@ -1150,67 +1437,149 @@ export class WarpClient {
       case 'file-complete': {
         const recvState = this.incomingStates.get(payload.transferId);
         if (!recvState) break;
-        const meta = recvState.session.files[payload.fileIndex];
-        const chunks = recvState.fileChunks[payload.fileIndex] ?? [];
-        const cleanChunks = chunks.map((c) => c ?? new Uint8Array(0));
-        const computedHash = await sha256Hex(cleanChunks);
-        const verified = payload.sha256 ? computedHash === payload.sha256 : true;
-
-        let blobUrl: string | undefined;
-        if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' && typeof document !== 'undefined') {
-          const blob = new Blob(cleanChunks as BlobPart[], { type: meta.mimeType });
-          blobUrl = URL.createObjectURL(blob);
-        }
-
-        let savedToMacPath: string | undefined;
-        if (this.localDaemon.enabled && this.localDaemon.autoSaveToDownloads && typeof fetch === 'function') {
-          try {
-            const blob = new Blob(cleanChunks as BlobPart[], { type: 'application/octet-stream' });
-            const resp = await fetch('/api/daemon/save', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/octet-stream',
-                'X-AirBridge-Filename': encodeURIComponent(meta.name),
-                'X-AirBridge-Sender': encodeURIComponent(recvState.session.peerName),
-              },
-              body: blob,
-            });
-            if (resp.ok) {
-              const json = (await resp.json()) as { savedPath?: string };
-              savedToMacPath = json.savedPath;
-            }
-          } catch {
-            // fallback to standard browser download
-          }
-        }
-
-        recvState.session.receivedFiles.push({
-          index: payload.fileIndex,
-          name: meta.name,
-          relativePath: meta.relativePath,
-          size: meta.size,
-          mimeType: meta.mimeType,
-          chunks: cleanChunks,
-          blobUrl,
-          sha256: computedHash,
-          verified,
-          savedToMacPath,
+        recvState.fileCompletePayloads.set(payload.fileIndex, {
+          sha256: payload.sha256,
         });
-        this.emit();
+        await this.scheduleReceiveFinalization(payload.transferId, false);
         break;
       }
 
       case 'transfer-complete': {
         const recvState = this.incomingStates.get(payload.transferId);
         if (!recvState) break;
-        recvState.session.transferredBytes = recvState.session.totalBytes;
-        recvState.session.etaSeconds = 0;
-        recvState.session.status = 'completed';
-        recvState.session.completedAt = Date.now();
-        this.incomingStates.delete(payload.transferId);
-        this.emit();
-        this.opts.onTransferCompleted?.(recvState.session);
+        recvState.transferCompleteReceived = true;
+        if (!recvState.fallbackTimer) {
+          recvState.fallbackTimer = setTimeout(() => {
+            this.scheduleReceiveFinalization(payload.transferId, true).catch(() => {});
+          }, 4_000);
+        }
+        await this.scheduleReceiveFinalization(payload.transferId, false);
         break;
+      }
+    }
+  }
+
+  private scheduleReceiveFinalization(transferId: string, forceFallback: boolean): Promise<void> {
+    const recvState = this.incomingStates.get(transferId);
+    if (!recvState) return Promise.resolve();
+
+    const next = recvState.finalizeChain
+      .then(() => this.runReceiveFinalization(transferId, forceFallback))
+      .catch(() => {});
+    recvState.finalizeChain = next;
+    return next;
+  }
+
+  private async runReceiveFinalization(
+    transferId: string,
+    forceFallback: boolean
+  ): Promise<void> {
+    const recvState = this.incomingStates.get(transferId);
+    if (!recvState) return;
+
+    const totalFiles = recvState.session.files.length;
+    for (let fileIndex = 0; fileIndex < totalFiles; fileIndex++) {
+      if (recvState.finalizedFiles.has(fileIndex)) continue;
+
+      const completeMeta = recvState.fileCompletePayloads.get(fileIndex);
+      if (!completeMeta && !forceFallback) continue;
+
+      const meta = recvState.session.files[fileIndex];
+      if (!meta) continue;
+
+      const allChunksArrived =
+        meta.size === 0 || recvState.receivedChunkCounts[fileIndex] >= meta.totalChunks;
+      if (!allChunksArrived && !forceFallback) continue;
+
+      const rawChunks = recvState.fileChunks[fileIndex] ?? [];
+      const cleanChunks: Uint8Array[] = new Array(meta.totalChunks);
+      for (let i = 0; i < meta.totalChunks; i++) {
+        cleanChunks[i] = rawChunks[i] ?? new Uint8Array(0);
+      }
+
+      const computedHash = await sha256Hex(cleanChunks);
+      if (!this.incomingStates.has(transferId)) return;
+
+      const verified = completeMeta?.sha256
+        ? computedHash === completeMeta.sha256
+        : allChunksArrived;
+
+      let blobUrl: string | undefined;
+      if (
+        typeof URL !== 'undefined' &&
+        typeof URL.createObjectURL === 'function' &&
+        typeof document !== 'undefined'
+      ) {
+        const blob = new Blob(cleanChunks as BlobPart[], { type: meta.mimeType });
+        blobUrl = URL.createObjectURL(blob);
+      }
+
+      let savedToMacPath: string | undefined;
+      if (
+        this.localDaemon.enabled &&
+        this.localDaemon.autoSaveToDownloads &&
+        typeof fetch === 'function'
+      ) {
+        try {
+          const blob = new Blob(cleanChunks as BlobPart[], { type: 'application/octet-stream' });
+          const resp = await fetch('/api/daemon/save', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/octet-stream',
+              'X-AirBridge-Filename': encodeURIComponent(meta.name),
+              'X-AirBridge-Sender': encodeURIComponent(recvState.session.peerName),
+            },
+            body: blob,
+          });
+          if (resp.ok) {
+            const json = (await resp.json()) as { savedPath?: string };
+            savedToMacPath = json.savedPath;
+          }
+        } catch {
+          // fallback to standard browser download
+        }
+      }
+
+      if (!this.incomingStates.has(transferId)) return;
+
+      recvState.session.receivedFiles.push({
+        index: fileIndex,
+        name: meta.name,
+        relativePath: meta.relativePath,
+        size: meta.size,
+        mimeType: meta.mimeType,
+        chunks: cleanChunks,
+        blobUrl,
+        sha256: computedHash,
+        verified,
+        savedToMacPath,
+      });
+      recvState.session.receivedFiles.sort((a, b) => a.index - b.index);
+      recvState.finalizedFiles.add(fileIndex);
+      this.emit();
+    }
+
+    if (
+      recvState.transferCompleteReceived &&
+      recvState.finalizedFiles.size === totalFiles &&
+      this.incomingStates.has(transferId)
+    ) {
+      if (recvState.fallbackTimer) {
+        clearTimeout(recvState.fallbackTimer);
+        recvState.fallbackTimer = undefined;
+      }
+      recvState.session.transferredBytes = recvState.session.totalBytes;
+      recvState.session.etaSeconds = 0;
+      recvState.session.status = 'completed';
+      recvState.session.completedAt = Date.now();
+      this.incomingStates.delete(transferId);
+      this.sortTransfers();
+      this.persistTransferHistory();
+      this.emit();
+      this.opts.onTransferCompleted?.(recvState.session);
+      const senderPeer = this.peers.find((p) => p.peerId === recvState.session.peerId);
+      if (senderPeer) {
+        this.syncHistoryWithPeer(senderPeer).catch(() => {});
       }
     }
   }
@@ -1232,6 +1601,8 @@ export class WarpClient {
       decoded.iv,
       decoded.ciphertext
     );
+
+    if (!this.incomingStates.has(decoded.transferId)) return;
 
     recvState.session.transport = transport;
     const fileArr = recvState.fileChunks[decoded.fileIndex];
@@ -1277,6 +1648,14 @@ export class WarpClient {
         },
         true
       );
+    }
+
+    if (
+      meta &&
+      recvState.receivedChunkCounts[decoded.fileIndex] >= meta.totalChunks &&
+      (recvState.fileCompletePayloads.has(decoded.fileIndex) || recvState.transferCompleteReceived)
+    ) {
+      await this.scheduleReceiveFinalization(decoded.transferId, false);
     }
   }
 
@@ -1475,10 +1854,194 @@ export class WarpClient {
     }
   }
 
+  private async syncHistoryWithPeer(peer: PeerSummary): Promise<void> {
+    if (this.destroyed || this.connectionState !== 'connected') return;
+
+    const relevant = this.transfers.filter((t) => {
+      if (!isTerminalTransferStatus(t.status)) return false;
+      if (peer.device.deviceId && t.peerDeviceId === peer.device.deviceId) {
+        return true;
+      }
+      if (
+        peer.discoveryScope === 'paired' &&
+        (t.peerPlatform === peer.device.platform || t.peerName === peer.device.name)
+      ) {
+        return true;
+      }
+      if (t.peerName === peer.device.name && t.peerPlatform === peer.device.platform) {
+        return true;
+      }
+      return false;
+    });
+
+    if (relevant.length === 0) return;
+
+    const summaries: HistoricalTransferSummary[] = relevant.slice(0, 40).map((t) => ({
+      transferId: t.transferId,
+      peerDeviceId: t.peerDeviceId,
+      peerName: this.myDevice?.name ?? 'Paired Device',
+      peerPlatform: this.myDevice?.platform ?? 'unknown',
+      direction: t.direction,
+      status: t.status as HistoricalTransferSummary['status'],
+      transport: t.transport,
+      files: t.files.map(({ previewDataUrl: _preview, ...rest }) => rest),
+      totalBytes: t.totalBytes,
+      transferredBytes: t.transferredBytes,
+      startedAt: t.startedAt,
+      completedAt: t.completedAt,
+      sasCode: t.sasCode,
+    }));
+
+    await this.sendControlMessage(
+      peer.peerId,
+      {
+        kind: 'history-sync',
+        transfers: summaries,
+      },
+      true
+    );
+  }
+
+  private mergeSyncedHistory(
+    fromPeerId: string,
+    peer: PeerSummary | undefined,
+    incomingSummaries: HistoricalTransferSummary[]
+  ): void {
+    if (!Array.isArray(incomingSummaries) || incomingSummaries.length === 0) return;
+    let changed = false;
+
+    for (const item of incomingSummaries) {
+      if (!item || typeof item.transferId !== 'string' || !Array.isArray(item.files)) continue;
+      if (!isTerminalTransferStatus(item.status)) continue;
+
+      const localDirection: TransferDirection =
+        item.direction === 'outgoing' ? 'incoming' : 'outgoing';
+      const existingIdx = this.transfers.findIndex((t) => t.transferId === item.transferId);
+
+      if (existingIdx === -1) {
+        const reconstructed: TransferSessionView = {
+          transferId: item.transferId,
+          peerId: fromPeerId,
+          peerDeviceId: peer?.device.deviceId ?? item.peerDeviceId,
+          pairCode: this.pairCode || undefined,
+          peerName: peer?.device.name ?? item.peerName,
+          peerPlatform: peer?.device.platform ?? item.peerPlatform,
+          sasCode: item.sasCode || this.cryptoSessions.get(fromPeerId)?.sasCode || '··· ···',
+          direction: localDirection,
+          status: item.status,
+          transport: item.transport,
+          files: item.files,
+          totalBytes: item.totalBytes,
+          transferredBytes:
+            item.status === 'completed' ? item.totalBytes : item.transferredBytes,
+          speedBytesPerSec: 0,
+          etaSeconds: item.status === 'completed' ? 0 : null,
+          startedAt: item.startedAt,
+          completedAt: item.completedAt,
+          receivedFiles: [],
+        };
+        this.transfers.push(reconstructed);
+        changed = true;
+      } else {
+        const existing = this.transfers[existingIdx];
+        const isLocalNonTerminal = !isTerminalTransferStatus(existing.status);
+        const hasLiveSession =
+          this.incomingStates.has(item.transferId) ||
+          this.outgoingStates.has(item.transferId);
+
+        if (
+          isLocalNonTerminal &&
+          (!hasLiveSession || item.status === 'cancelled' || item.status === 'declined')
+        ) {
+          if (hasLiveSession && (item.status === 'cancelled' || item.status === 'declined')) {
+            const recv = this.incomingStates.get(item.transferId);
+            if (recv?.fallbackTimer) clearTimeout(recv.fallbackTimer);
+            this.incomingStates.delete(item.transferId);
+            const send = this.outgoingStates.get(item.transferId);
+            if (send) {
+              send.cancelled = true;
+              for (const w of send.ackWaiters) w();
+              this.outgoingStates.delete(item.transferId);
+            }
+          }
+          existing.status = item.status;
+          existing.completedAt = item.completedAt ?? Date.now();
+          if (item.status === 'completed') {
+            existing.transferredBytes = existing.totalBytes;
+            existing.etaSeconds = 0;
+          }
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) {
+      this.sortTransfers();
+      this.persistTransferHistory();
+      this.emit();
+    }
+  }
+
+  private sortTransfers(): void {
+    this.transfers.sort((a, b) => {
+      const aActive = !isTerminalTransferStatus(a.status);
+      const bActive = !isTerminalTransferStatus(b.status);
+      if (aActive !== bActive) {
+        return aActive ? -1 : 1;
+      }
+      const aTs = a.completedAt ?? a.startedAt;
+      const bTs = b.completedAt ?? b.startedAt;
+      return bTs - aTs;
+    });
+    if (this.transfers.length > 60) {
+      this.transfers = this.transfers.slice(0, 60);
+    }
+  }
+
+  private persistTransferHistory(): void {
+    try {
+      const storage = getSafeLocalStorage();
+      if (storage) {
+        const serializable = this.transfers
+          .filter((t) => isTerminalTransferStatus(t.status))
+          .slice(0, 50)
+          .map((t) => ({
+            ...t,
+            files: t.files.map(({ previewDataUrl: _preview, ...rest }) => rest),
+            receivedFiles: [],
+          }));
+        storage.setItem(
+          `${this.storagePrefix}:transferHistory`,
+          JSON.stringify(serializable)
+        );
+      }
+    } catch {
+      // ignore storage quota errors
+    }
+  }
+
+  private persistClipboardHistory(): void {
+    try {
+      const storage = getSafeLocalStorage();
+      if (storage) {
+        const serializable = this.clipboardItems
+          .filter((c) => c.text.length <= 32_000)
+          .slice(0, 50);
+        storage.setItem(
+          `${this.storagePrefix}:clipboardHistory`,
+          JSON.stringify(serializable)
+        );
+      }
+    } catch {
+      // ignore storage quota errors
+    }
+  }
+
   private persistPairCode(code: string): void {
     try {
-      if (typeof localStorage !== 'undefined' && code) {
-        localStorage.setItem(`${this.storagePrefix}:pairCode`, code);
+      const storage = getSafeLocalStorage();
+      if (storage && code) {
+        storage.setItem(`${this.storagePrefix}:pairCode`, code);
       }
     } catch {
       // ignore

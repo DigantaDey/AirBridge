@@ -110,10 +110,11 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .help-copy, .settings-info { margin-top: 15px; border-top: 1px solid var(--ab-border); padding-top: 11px; color: var(--ab-muted); font-size: 12px; }
 .help-copy p, .settings-info p { margin: 4px 0; }
 .recent-list { margin-top: 18px; border-top: 1px solid var(--ab-border); }
-.recent-row { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--ab-border); padding: 12px 0; font-size: 12px; }
-.recent-row span:first-child { display: flex; flex-direction: column; min-width: 0; }
+.recent-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-bottom: 1px solid var(--ab-border); padding: 12px 0; font-size: 12px; }
+.recent-row > span:first-child { display: flex; flex-direction: column; min-width: 0; }
 .recent-row strong { overflow-wrap: anywhere; font-weight: 550; }
 .recent-row small, .recent-state, .empty-history { color: var(--ab-muted); font-size: 11px; }
+.recent-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .empty-history { margin: 18px 0; }
 .setting-field { display: flex; flex-direction: column; gap: 7px; margin-top: 20px; font-size: 12px; color: var(--ab-secondary); }
 .setting-field input { border: 1px solid var(--ab-border-strong); border-radius: 5px; padding: 9px 10px; color: var(--ab-text); background: var(--ab-bg); }
@@ -129,6 +130,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .utility-toast .toast-action { position: static; align-self: flex-start; margin-top: 9px; border: 1px solid var(--ab-border-strong); border-radius: 6px; padding: 4px 12px; font-size: 11px; color: var(--ab-text); }
 .clipboard-device-button { flex-shrink: 0; }
 .clipboard-modal { width: min(100%, 560px); }
+.clipboard-auto-toggle { margin-top: 8px; padding: 11px 0; border-top: 1px solid var(--ab-border); }
 .clipboard-compose { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
 .clipboard-compose textarea { width: 100%; min-height: 104px; resize: vertical; border: 1px solid var(--ab-border-strong); border-radius: 6px; padding: 10px; background: var(--ab-bg); color: var(--ab-text); font: inherit; }
 .clipboard-error { color: #b91c1c; font-size: 11px; margin: 0; }
