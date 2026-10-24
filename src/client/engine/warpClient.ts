@@ -13,6 +13,8 @@ import {
   decodeEncryptedChunkFrame,
   encodeEncryptedChunkFrame,
   formatPairCode,
+  isValidClipboardImageDataUrl,
+  MAX_CLIPBOARD_IMAGE_DATAURL,
   normalizePairCode,
   unwrapRoutedRelayFrame,
   wrapRoutedRelayFrame,
@@ -34,6 +36,7 @@ export const CHUNK_SIZE = 64 * 1024; // 64 KB optimal for both WebRTC SCTP & WS 
 export const MAX_FILES_PER_TRANSFER = 100;
 export const MAX_CHUNKS_PER_TRANSFER = 262_144; // 16 GiB at 64 KiB chunks — a manifest sanity ceiling, not a product limit
 export const MAX_CLIPBOARD_TEXT = 256_000;
+export const MAX_CLIPBOARD_IMAGE_DATAURL_LENGTH = MAX_CLIPBOARD_IMAGE_DATAURL;
 
 export function isValidFileManifest(files: unknown, totalBytes: unknown): files is FileManifestItem[] {
   if (!Array.isArray(files) || files.length === 0 || files.length > MAX_FILES_PER_TRANSFER) return false;
@@ -130,7 +133,9 @@ export interface ClipboardBeamItem {
   peerName: string;
   direction: 'incoming' | 'outgoing';
   text: string;
-  contentType: 'url' | 'otp' | 'code' | 'text';
+  imageDataUrl?: string;
+  imageName?: string;
+  contentType: 'url' | 'otp' | 'code' | 'text' | 'image';
   timestamp: number;
   sasCode: string;
 }
@@ -157,6 +162,7 @@ export interface WarpClientSnapshot {
   clipboardItems: ClipboardBeamItem[];
   trustedPeerKeys: string[];
   autoClipboardSync: boolean;
+  clipboardReceiveEnabled: boolean;
 }
 
 export interface WarpClientOptions {
@@ -318,6 +324,7 @@ export class WarpClient {
 
   // Automatic universal clipboard sync state
   private autoClipboardSync = true;
+  private clipboardReceiveEnabled = true;
   private lastSyncedClipboardText = '';
   private seenBeamIds = new Set<string>();
   private lastIncomingClip: { peerId: string; text: string; ts: number } | null = null;
@@ -351,6 +358,10 @@ export class WarpClient {
           if (autoRaw === '0' || autoRaw === 'false') {
             this.autoClipboardSync = false;
           }
+        }
+        const receiveRaw = storage.getItem(`${this.storagePrefix}:clipboardReceive`);
+        if (receiveRaw === '0' || receiveRaw === 'false') {
+          this.clipboardReceiveEnabled = false;
         }
         const historyRaw = storage.getItem(`${this.storagePrefix}:transferHistory`);
         if (historyRaw) {
@@ -508,6 +519,7 @@ export class WarpClient {
       clipboardItems: [...this.clipboardItems],
       trustedPeerKeys: Array.from(this.trustedPeerKeys),
       autoClipboardSync: this.autoClipboardSync,
+      clipboardReceiveEnabled: this.clipboardReceiveEnabled,
     };
   }
 
@@ -577,6 +589,19 @@ export class WarpClient {
       const storage = getSafeLocalStorage();
       if (storage) {
         storage.setItem(`${this.storagePrefix}:autoClipboard`, enabled ? '1' : '0');
+      }
+    } catch {
+      // ignore
+    }
+    this.emit();
+  }
+
+  public setClipboardReceiveEnabled(enabled: boolean): void {
+    this.clipboardReceiveEnabled = enabled;
+    try {
+      const storage = getSafeLocalStorage();
+      if (storage) {
+        storage.setItem(`${this.storagePrefix}:clipboardReceive`, enabled ? '1' : '0');
       }
     } catch {
       // ignore
@@ -667,12 +692,17 @@ export class WarpClient {
     if (!trimmed) {
       throw new Error('Cannot beam empty text.');
     }
+    if (trimmed.length > MAX_CLIPBOARD_TEXT && !isValidClipboardImageDataUrl(trimmed)) {
+      throw new Error('Text too large to beam.');
+    }
 
     const cryptoSession = await this.ensureCryptoSession(peer);
     const beamId = randomHex16();
     const contentType = classifyTextPayload(trimmed);
     const timestamp = Date.now();
 
+    // Distinguish text vs image data URL payloads
+    const isImage = isValidClipboardImageDataUrl(trimmed) || contentType === 'image';
     this.lastSyncedClipboardText = trimmed;
     this.seenBeamIds.add(beamId);
 
@@ -681,7 +711,9 @@ export class WarpClient {
       {
         kind: 'clipboard-beam',
         beamId,
-        text: trimmed,
+        text: isImage ? undefined : trimmed,
+        imageDataUrl: isImage ? trimmed : undefined,
+        imageName: isImage ? `clipboard-image-${Date.now()}.png` : undefined,
         contentType,
         timestamp,
       },
@@ -694,6 +726,7 @@ export class WarpClient {
       peerName: peer.device.name,
       direction: 'outgoing',
       text: trimmed,
+      imageDataUrl: isImage ? trimmed : undefined,
       contentType,
       timestamp,
       sasCode: cryptoSession.sasCode,
@@ -704,6 +737,55 @@ export class WarpClient {
     if (options?.isAuto) {
       this.opts.onOutgoingAutoClipboard?.(item);
     }
+    return item;
+  }
+
+  /**
+   * Beam an image (data URL) via the clipboard channel.
+   * Accepts data:image/...;base64,<payload> up to ~5MB.
+   */
+  public async sendClipboardImage(
+    peerId: string,
+    imageDataUrl: string,
+    imageName?: string
+  ): Promise<ClipboardBeamItem> {
+    const peer = this.peers.find((p) => p.peerId === peerId);
+    if (!peer) throw new Error('Selected peer is no longer online.');
+    if (!isValidClipboardImageDataUrl(imageDataUrl)) throw new Error('Invalid image data. Use a PNG/JPEG/WebP image under 5 MB.');
+    const cryptoSession = await this.ensureCryptoSession(peer);
+    const beamId = randomHex16();
+    const timestamp = Date.now();
+    this.seenBeamIds.add(beamId);
+    // Use the image data as the deduplication key as well
+    this.lastSyncedClipboardText = imageDataUrl.slice(0, 1024);
+
+    await this.sendControlMessage(
+      peerId,
+      {
+        kind: 'clipboard-beam',
+        beamId,
+        imageDataUrl,
+        imageName: imageName || `image-${Date.now()}.png`,
+        contentType: 'image',
+        timestamp,
+      },
+      true
+    );
+    const item: ClipboardBeamItem = {
+      beamId,
+      peerId,
+      peerName: peer.device.name,
+      direction: 'outgoing',
+      text: imageDataUrl,
+      imageDataUrl,
+      imageName,
+      contentType: 'image',
+      timestamp,
+      sasCode: cryptoSession.sasCode,
+    };
+    this.clipboardItems = [item, ...this.clipboardItems].slice(0, 50);
+    this.persistClipboardHistory();
+    this.emit();
     return item;
   }
 
@@ -1306,15 +1388,23 @@ export class WarpClient {
       }
 
       case 'clipboard-beam': {
-        if (typeof payload.text !== 'string' || payload.text.length > MAX_CLIPBOARD_TEXT || typeof payload.beamId !== 'string') break;
-        const trimmed = payload.text.trim();
-        if (!trimmed) break;
+        // Support both legacy text-only and new image-capable payloads
+        if (typeof payload.beamId !== 'string') break;
+        if (!this.clipboardReceiveEnabled) break;
+        const hasText = typeof payload.text === 'string' && payload.text.trim().length > 0;
+        const hasImage = typeof payload.imageDataUrl === 'string' && isValidClipboardImageDataUrl(payload.imageDataUrl);
+        if (!hasText && !hasImage) break;
+        // Legacy guard: text length check
+        if (hasText && payload.text!.length > MAX_CLIPBOARD_TEXT) break;
+        if (hasImage && payload.imageDataUrl!.length > MAX_CLIPBOARD_IMAGE_DATAURL_LENGTH) break;
+        // Derive a unified key for dedup/throttle: text or image prefix
+        const dedupKey = hasImage ? payload.imageDataUrl!.slice(0, 256) : payload.text!.trim();
         if (this.seenBeamIds.has(payload.beamId)) break;
         const now = Date.now();
         if (
           this.lastIncomingClip &&
           this.lastIncomingClip.peerId === fromPeerId &&
-          this.lastIncomingClip.text === trimmed &&
+          this.lastIncomingClip.text === dedupKey &&
           now - this.lastIncomingClip.ts < 1_500
         ) {
           break;
@@ -1324,23 +1414,29 @@ export class WarpClient {
           const oldest = this.seenBeamIds.values().next().value;
           if (oldest) this.seenBeamIds.delete(oldest);
         }
-        this.lastIncomingClip = { peerId: fromPeerId, text: trimmed, ts: now };
-        this.lastSyncedClipboardText = trimmed;
+        this.lastIncomingClip = { peerId: fromPeerId, text: dedupKey, ts: now };
+        // For text beams still track lastSyncedClipboardText to prevent echo
+        if (hasText) this.lastSyncedClipboardText = payload.text!.trim();
+        else if (hasImage) this.lastSyncedClipboardText = payload.imageDataUrl!.slice(0, 1024);
 
         // Also update the host OS clipboard (e.g. macOS pbcopy) via loopback so
         // pasting works immediately in any app even if this browser tab is unfocused.
-        if (this.localDaemon.clipboardBridge) {
-          this.sendServer({ type: 'set-host-clipboard', text: payload.text });
+        // Only for text - image clipboard bridge is not yet supported on host.
+        if (this.localDaemon.clipboardBridge && hasText) {
+          this.sendServer({ type: 'set-host-clipboard', text: payload.text! });
         }
 
         const session = this.cryptoSessions.get(fromPeerId);
+        const isImageContent = payload.contentType === 'image' || hasImage;
         const item: ClipboardBeamItem = {
           beamId: payload.beamId,
           peerId: fromPeerId,
           peerName: peer?.device.name ?? 'Paired Device',
           direction: 'incoming',
-          text: payload.text,
-          contentType: payload.contentType,
+          text: hasText ? payload.text! : (hasImage ? payload.imageDataUrl! : ''),
+          imageDataUrl: hasImage ? payload.imageDataUrl : undefined,
+          imageName: payload.imageName,
+          contentType: isImageContent ? 'image' : (payload.contentType ?? 'text'),
           timestamp: payload.timestamp,
           sasCode: session?.sasCode ?? '··· ···',
         };
@@ -2102,7 +2198,10 @@ export class WarpClient {
       const storage = getSafeLocalStorage();
       if (storage) {
         const serializable = this.clipboardItems
-          .filter((c) => c.text.length <= 32_000)
+          .filter((c) => {
+            if (c.contentType === 'image') return (c.imageDataUrl?.length ?? c.text.length) <= MAX_CLIPBOARD_IMAGE_DATAURL_LENGTH;
+            return c.text.length <= 32_000;
+          })
           .slice(0, 50);
         storage.setItem(
           `${this.storagePrefix}:clipboardHistory`,

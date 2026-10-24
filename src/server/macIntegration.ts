@@ -13,14 +13,22 @@ export interface MacDaemonConfig {
 }
 
 export function createMacDaemonConfig(overrides?: Partial<MacDaemonConfig>): MacDaemonConfig {
-  const enabledByEnv = process.env.AIRBRIDGE_LOCAL_DAEMON === '1';
+  // Default to enabled outside test mode so Mac clients auto-save to the
+  // received-files folder without requiring AIRBRIDGE_LOCAL_DAEMON=1.
+  // Tests explicitly pass daemonConfig or set AIRBRIDGE_LOCAL_DAEMON=0 to opt out.
+  const envFlag = process.env.AIRBRIDGE_LOCAL_DAEMON;
+  let defaultEnabled: boolean;
+  if (envFlag === '0') defaultEnabled = false;
+  else if (envFlag === '1') defaultEnabled = true;
+  else if (process.env.NODE_ENV === 'test') defaultEnabled = false;
+  else defaultEnabled = true;
   const defaultDir =
     process.env.AIRBRIDGE_DOWNLOAD_DIR || path.join(os.homedir(), 'Downloads', 'AirBridge');
 
   return {
-    enabled: overrides?.enabled ?? enabledByEnv,
+    enabled: overrides?.enabled ?? defaultEnabled,
     downloadDir: overrides?.downloadDir ?? defaultDir,
-    autoSaveToDownloads: overrides?.autoSaveToDownloads ?? enabledByEnv,
+    autoSaveToDownloads: overrides?.autoSaveToDownloads ?? defaultEnabled,
     notifyOnReceive: overrides?.notifyOnReceive ?? process.platform === 'darwin',
     revealInFinder: overrides?.revealInFinder ?? false,
   };

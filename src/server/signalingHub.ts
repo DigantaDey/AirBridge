@@ -430,7 +430,7 @@ export class SignalingHub {
               break;
             }
           } else if (env.encrypted === true) {
-            if (typeof env.ciphertext !== 'string' || env.ciphertext.length > 2_000_000) break;
+            if (typeof env.ciphertext !== 'string' || env.ciphertext.length > 10_000_000) break;
           } else break;
           if (typeof msg.to !== 'string') break;
           const target = this.clients.get(msg.to);
