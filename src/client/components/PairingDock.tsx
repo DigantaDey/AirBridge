@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import QRCode from 'qrcode';
+import { useEffect, useMemo, useState } from "react";
+import QRCode from "qrcode";
 import {
   Archive,
   ArrowDownLeft,
@@ -16,18 +16,21 @@ import {
   ShieldCheck,
   XCircle,
   Zap,
-} from 'lucide-react';
+} from "lucide-react";
 import {
   formatBytes,
   formatPairCode,
   formatSpeed,
   normalizePairCode,
-} from '../../shared/protocol.js';
-import type { ClipboardBeamItem, TransferSessionView } from '../engine/warpClient.js';
+} from "../../shared/protocol.js";
+import type {
+  ClipboardBeamItem,
+  TransferSessionView,
+} from "../engine/warpClient.js";
 import {
   triggerBatchZipDownload,
   triggerSingleFileDownload,
-} from '../engine/fileDropUtils.js';
+} from "../engine/fileDropUtils.js";
 
 interface PairingDockProps {
   pairCode: string;
@@ -48,18 +51,22 @@ export function PairingDock({
   onRotatePairCode,
   onCancelTransfer,
 }: PairingDockProps) {
-  const [qrSvg, setQrSvg] = useState<string>('');
-  const [joinInput, setJoinInput] = useState('');
+  const [qrSvg, setQrSvg] = useState<string>("");
+  const [joinInput, setJoinInput] = useState("");
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedBeamId, setCopiedBeamId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'transfers' | 'clipboard'>('transfers');
+  const [activeTab, setActiveTab] = useState<"transfers" | "clipboard">(
+    "transfers",
+  );
 
   const pairUrl = useMemo(() => {
-    if (typeof window === 'undefined' || !pairCode) return '';
+    if (typeof window === "undefined" || !pairCode) return "";
     const isLocalhost =
-      window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-    const baseOrigin = isLocalhost && lanUrls.length > 0 ? lanUrls[0] : window.location.origin;
+      window.location.hostname === "localhost" ||
+      window.location.hostname === "127.0.0.1";
+    const baseOrigin =
+      isLocalhost && lanUrls.length > 0 ? lanUrls[0] : window.location.origin;
     return `${baseOrigin}/?pair=${pairCode}`;
   }, [pairCode, lanUrls]);
 
@@ -67,12 +74,12 @@ export function PairingDock({
     if (!pairUrl) return;
     let cancelled = false;
     QRCode.toString(pairUrl, {
-      type: 'svg',
+      type: "svg",
       margin: 1,
-      errorCorrectionLevel: 'M',
+      errorCorrectionLevel: "M",
       color: {
-        dark: '#0f172a',
-        light: '#ffffff',
+        dark: "#0f172a",
+        light: "#ffffff",
       },
     })
       .then((svg) => {
@@ -103,7 +110,7 @@ export function PairingDock({
     const clean = normalizePairCode(joinInput);
     if (clean.length === 6) {
       onJoinPairCode(clean);
-      setJoinInput('');
+      setJoinInput("");
     }
   };
 
@@ -115,7 +122,7 @@ export function PairingDock({
           <div className="flex items-center gap-2">
             <QrCode className="w-4 h-4 text-sky-400" />
             <h2 className="text-sm font-semibold text-[var(--ab-text)]">
-              Instant Android ↔ Mac Pairing
+              Connect a device
             </h2>
           </div>
           <button
@@ -144,7 +151,8 @@ export function PairingDock({
 
           <div className="flex-1 w-full text-center sm:text-left">
             <p className="text-[11px] text-[var(--ab-muted)] leading-relaxed">
-              Scan with your Android camera or enter this Warp Code on your other device:
+              Scan with your Android camera or enter this pairing code on your
+              other device:
             </p>
 
             <div className="mt-2 flex items-center justify-center sm:justify-start gap-2">
@@ -152,9 +160,9 @@ export function PairingDock({
                 type="button"
                 onClick={copyPairCode}
                 className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl ab-elevated font-mono-tabular text-base font-bold tracking-wider text-sky-500 dark:text-sky-400 hover:border-sky-500/50 transition-colors cursor-pointer"
-                title="Click to copy Warp Code"
+                title="Click to copy pairing code"
               >
-                <span>{pairCode ? formatPairCode(pairCode) : '···-···'}</span>
+                <span>{pairCode ? formatPairCode(pairCode) : "···-···"}</span>
                 {copiedCode ? (
                   <Check className="w-3.5 h-3.5 text-emerald-400" />
                 ) : (
@@ -177,7 +185,10 @@ export function PairingDock({
             </div>
 
             {/* Join Existing Room Input */}
-            <form onSubmit={handleJoinSubmit} className="mt-3 flex items-center gap-1.5">
+            <form
+              onSubmit={handleJoinSubmit}
+              className="mt-3 flex items-center gap-1.5"
+            >
               <input
                 type="text"
                 value={joinInput}
@@ -204,22 +215,22 @@ export function PairingDock({
           <div className="flex items-center gap-1 p-1 rounded-xl bg-black/[0.04] dark:bg-white/[0.04]">
             <button
               type="button"
-              onClick={() => setActiveTab('transfers')}
+              onClick={() => setActiveTab("transfers")}
               className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
-                activeTab === 'transfers'
-                  ? 'bg-white dark:bg-slate-800 text-[var(--ab-text)] shadow-sm'
-                  : 'text-[var(--ab-muted)] hover:text-[var(--ab-text)]'
+                activeTab === "transfers"
+                  ? "bg-white dark:bg-slate-800 text-[var(--ab-text)] shadow-sm"
+                  : "text-[var(--ab-muted)] hover:text-[var(--ab-text)]"
               }`}
             >
               Transfers ({transfers.length})
             </button>
             <button
               type="button"
-              onClick={() => setActiveTab('clipboard')}
+              onClick={() => setActiveTab("clipboard")}
               className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
-                activeTab === 'clipboard'
-                  ? 'bg-white dark:bg-slate-800 text-[var(--ab-text)] shadow-sm'
-                  : 'text-[var(--ab-muted)] hover:text-[var(--ab-text)]'
+                activeTab === "clipboard"
+                  ? "bg-white dark:bg-slate-800 text-[var(--ab-text)] shadow-sm"
+                  : "text-[var(--ab-muted)] hover:text-[var(--ab-text)]"
               }`}
             >
               Clipboard ({clipboardItems.length})
@@ -227,7 +238,7 @@ export function PairingDock({
           </div>
         </div>
 
-        {activeTab === 'transfers' ? (
+        {activeTab === "transfers" ? (
           <div className="mt-3.5 flex-1 space-y-3 overflow-y-auto max-h-[380px] pr-1">
             {transfers.length === 0 ? (
               <div className="h-44 flex flex-col items-center justify-center text-center px-4">
@@ -236,34 +247,41 @@ export function PairingDock({
                   No transfers in this session yet
                 </p>
                 <p className="text-[11px] text-[var(--ab-muted)] mt-0.5">
-                  Sent and received files appear here with SHA-256 verification and 1-click ZIP save.
+                  Sent and received files appear here with SHA-256 verification
+                  and 1-click ZIP save.
                 </p>
               </div>
             ) : (
               transfers.map((tr) => {
                 const pct =
                   tr.totalBytes > 0
-                    ? Math.min(100, Math.round((tr.transferredBytes / tr.totalBytes) * 100))
-                    : tr.status === 'completed'
+                    ? Math.min(
+                        100,
+                        Math.round((tr.transferredBytes / tr.totalBytes) * 100),
+                      )
+                    : tr.status === "completed"
                       ? 100
                       : 0;
                 const isActive =
-                  tr.status === 'transferring' ||
-                  tr.status === 'pending-accept' ||
-                  tr.status === 'connecting';
+                  tr.status === "transferring" ||
+                  tr.status === "pending-accept" ||
+                  tr.status === "connecting";
 
                 return (
-                  <div key={tr.transferId} className="rounded-2xl ab-elevated p-3.5 space-y-2.5">
+                  <div
+                    key={tr.transferId}
+                    className="rounded-2xl ab-elevated p-3.5 space-y-2.5"
+                  >
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex items-center gap-2 min-w-0">
                         <div
                           className={`p-1.5 rounded-lg shrink-0 ${
-                            tr.direction === 'incoming'
-                              ? 'bg-emerald-500/15 text-emerald-400'
-                              : 'bg-sky-500/15 text-sky-400'
+                            tr.direction === "incoming"
+                              ? "bg-emerald-500/15 text-emerald-400"
+                              : "bg-sky-500/15 text-sky-400"
                           }`}
                         >
-                          {tr.direction === 'incoming' ? (
+                          {tr.direction === "incoming" ? (
                             <ArrowDownLeft className="w-4 h-4" />
                           ) : (
                             <ArrowUpRight className="w-4 h-4" />
@@ -276,8 +294,11 @@ export function PairingDock({
                               : `${tr.files.length} files (${formatBytes(tr.totalBytes)})`}
                           </p>
                           <p className="text-[11px] text-[var(--ab-muted)] truncate">
-                            {tr.direction === 'incoming' ? 'From' : 'To'} {tr.peerName} ·{' '}
-                            <span className="font-mono-tabular">{formatBytes(tr.totalBytes)}</span>
+                            {tr.direction === "incoming" ? "From" : "To"}{" "}
+                            {tr.peerName} ·{" "}
+                            <span className="font-mono-tabular">
+                              {formatBytes(tr.totalBytes)}
+                            </span>
                           </p>
                         </div>
                       </div>
@@ -285,7 +306,7 @@ export function PairingDock({
                       <div className="flex items-center gap-1.5 shrink-0">
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-black/[0.04] dark:bg-white/[0.05] text-[var(--ab-muted)]">
                           <Zap className="w-2.5 h-2.5 text-sky-400" />
-                          {tr.transport === 'webrtc' ? 'P2P' : 'E2EE WSS'}
+                          {tr.transport === "webrtc" ? "P2P" : "E2EE WSS"}
                         </span>
                         {isActive && (
                           <button
@@ -305,25 +326,29 @@ export function PairingDock({
                       <div className="h-1.5 w-full rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
                         <div
                           className={`h-full transition-all duration-150 ${
-                            tr.status === 'completed'
-                              ? 'bg-emerald-400'
-                              : tr.status === 'declined' || tr.status === 'cancelled' || tr.status === 'error'
-                                ? 'bg-rose-400'
-                                : 'bg-sky-400'
+                            tr.status === "completed"
+                              ? "bg-emerald-400"
+                              : tr.status === "declined" ||
+                                  tr.status === "cancelled" ||
+                                  tr.status === "error"
+                                ? "bg-rose-400"
+                                : "bg-sky-400"
                           }`}
                           style={{ width: `${pct}%` }}
                         />
                       </div>
                       <div className="mt-1 flex items-center justify-between text-[10px] font-mono-tabular text-[var(--ab-muted)]">
                         <span>
-                          {tr.status === 'pending-accept'
-                            ? 'Waiting for recipient to accept…'
-                            : tr.status === 'transferring'
+                          {tr.status === "pending-accept"
+                            ? "Waiting for recipient to accept…"
+                            : tr.status === "transferring"
                               ? `${pct}% · ${formatSpeed(tr.speedBytesPerSec)}${
-                                  tr.etaSeconds ? ` · ${tr.etaSeconds}s left` : ''
+                                  tr.etaSeconds
+                                    ? ` · ${tr.etaSeconds}s left`
+                                    : ""
                                 }`
-                              : tr.status === 'completed'
-                                ? '100% · Verified SHA-256'
+                              : tr.status === "completed"
+                                ? "100% · Verified SHA-256"
                                 : tr.status.toUpperCase()}
                         </span>
                         <span>🔐 {tr.sasCode}</span>
@@ -331,81 +356,85 @@ export function PairingDock({
                     </div>
 
                     {/* Completed Received File Download Actions */}
-                    {tr.status === 'completed' && tr.receivedFiles.length > 0 && (
-                      <div className="pt-2 border-t border-[var(--ab-border)] space-y-1.5">
-                        {tr.receivedFiles.slice(0, 4).map((rf) => {
-                          const isPdf =
-                            rf.mimeType === 'application/pdf' ||
-                            rf.name.toLowerCase().endsWith('.pdf');
-                          return (
-                            <div
-                              key={rf.index}
-                              className="flex items-center justify-between gap-2 text-xs"
-                            >
-                              <div className="flex items-center gap-2 min-w-0">
-                                {rf.blobUrl && rf.mimeType.startsWith('image/') && (
-                                  <img
-                                    src={rf.blobUrl}
-                                    alt={rf.name}
-                                    className="w-7 h-7 rounded-md object-cover border border-white/10 shrink-0"
-                                  />
-                                )}
-                                {isPdf && (
-                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/15 text-rose-400 border border-rose-500/25 shrink-0">
-                                    PDF
+                    {tr.status === "completed" &&
+                      tr.receivedFiles.length > 0 && (
+                        <div className="pt-2 border-t border-[var(--ab-border)] space-y-1.5">
+                          {tr.receivedFiles.slice(0, 4).map((rf) => {
+                            const isPdf =
+                              rf.mimeType === "application/pdf" ||
+                              rf.name.toLowerCase().endsWith(".pdf");
+                            return (
+                              <div
+                                key={rf.index}
+                                className="flex items-center justify-between gap-2 text-xs"
+                              >
+                                <div className="flex items-center gap-2 min-w-0">
+                                  {rf.blobUrl &&
+                                    rf.mimeType.startsWith("image/") && (
+                                      <img
+                                        src={rf.blobUrl}
+                                        alt={rf.name}
+                                        className="w-7 h-7 rounded-md object-cover border border-white/10 shrink-0"
+                                      />
+                                    )}
+                                  {isPdf && (
+                                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/15 text-rose-400 border border-rose-500/25 shrink-0">
+                                      PDF
+                                    </span>
+                                  )}
+                                  <span className="truncate text-[var(--ab-text-secondary)]">
+                                    {rf.name}
                                   </span>
-                                )}
-                                <span className="truncate text-[var(--ab-text-secondary)]">
-                                  {rf.name}
-                                </span>
-                                {rf.verified && (
-                                  <span title={`SHA-256: ${rf.sha256}`}>
-                                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                                  </span>
-                                )}
-                              </div>
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                {isPdf && rf.blobUrl && (
-                                  <a
-                                    href={rf.blobUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium bg-sky-500/15 hover:bg-sky-500/25 text-sky-500 dark:text-sky-300"
+                                  {rf.verified && (
+                                    <span title={`SHA-256: ${rf.sha256}`}>
+                                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  {isPdf && rf.blobUrl && (
+                                    <a
+                                      href={rf.blobUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium bg-sky-500/15 hover:bg-sky-500/25 text-sky-500 dark:text-sky-300"
+                                    >
+                                      <ExternalLink className="w-3 h-3" />
+                                      View
+                                    </a>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      triggerSingleFileDownload(rf)
+                                    }
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-500 dark:text-emerald-300 shrink-0 cursor-pointer"
                                   >
-                                    <ExternalLink className="w-3 h-3" />
-                                    View
-                                  </a>
-                                )}
-                                <button
-                                  type="button"
-                                  onClick={() => triggerSingleFileDownload(rf)}
-                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-500 dark:text-emerald-300 shrink-0 cursor-pointer"
-                                >
-                                  <Download className="w-3 h-3" />
-                                  Save
-                                </button>
+                                    <Download className="w-3 h-3" />
+                                    Save
+                                  </button>
+                                </div>
                               </div>
-                            </div>
-                          );
-                        })}
+                            );
+                          })}
 
-                        {tr.receivedFiles.length > 1 && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              triggerBatchZipDownload(
-                                tr.receivedFiles,
-                                `AirBridge-${tr.peerName.replace(/\s+/g, '-')}`
-                              )
-                            }
-                            className="w-full mt-1.5 py-1.5 rounded-xl text-xs font-semibold bg-sky-500/15 hover:bg-sky-500/25 text-sky-500 dark:text-sky-300 inline-flex items-center justify-center gap-1.5 cursor-pointer"
-                          >
-                            <Archive className="w-3.5 h-3.5" />
-                            Save All {tr.receivedFiles.length} Files (.zip)
-                          </button>
-                        )}
-                      </div>
-                    )}
+                          {tr.receivedFiles.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                triggerBatchZipDownload(
+                                  tr.receivedFiles,
+                                  `AirBridge-${tr.peerName.replace(/\s+/g, "-")}`,
+                                )
+                              }
+                              className="w-full mt-1.5 py-1.5 rounded-xl text-xs font-semibold bg-sky-500/15 hover:bg-sky-500/25 text-sky-500 dark:text-sky-300 inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                            >
+                              <Archive className="w-3.5 h-3.5" />
+                              Save All {tr.receivedFiles.length} Files (.zip)
+                            </button>
+                          )}
+                        </div>
+                      )}
                   </div>
                 );
               })
@@ -420,15 +449,21 @@ export function PairingDock({
                   Universal Clipboard is empty
                 </p>
                 <p className="text-[11px] text-[var(--ab-muted)] mt-0.5">
-                  Beam OTP codes, links, or snippets between Android and MacBook with zero cloud logs.
+                  Beam OTP codes, links, or snippets between Android and MacBook
+                  with zero cloud logs.
                 </p>
               </div>
             ) : (
               clipboardItems.map((clip) => (
-                <div key={clip.beamId} className="rounded-2xl ab-elevated p-3 space-y-2">
+                <div
+                  key={clip.beamId}
+                  className="rounded-2xl ab-elevated p-3 space-y-2"
+                >
                   <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--ab-muted)]">
                     <span>
-                      {clip.direction === 'incoming' ? `From ${clip.peerName}` : `To ${clip.peerName}`}
+                      {clip.direction === "incoming"
+                        ? `From ${clip.peerName}`
+                        : `To ${clip.peerName}`}
                     </span>
                     <span className="uppercase px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 font-semibold text-[10px]">
                       {clip.contentType}
@@ -438,7 +473,7 @@ export function PairingDock({
                     {clip.text}
                   </pre>
                   <div className="flex items-center justify-end gap-2">
-                    {clip.contentType === 'url' && (
+                    {clip.contentType === "url" && (
                       <a
                         href={clip.text}
                         target="_blank"
@@ -452,7 +487,9 @@ export function PairingDock({
                     <button
                       type="button"
                       onClick={() => {
-                        navigator.clipboard?.writeText(clip.text).catch(() => {});
+                        navigator.clipboard
+                          ?.writeText(clip.text)
+                          .catch(() => {});
                         setCopiedBeamId(clip.beamId);
                         setTimeout(() => setCopiedBeamId(null), 1500);
                       }}

@@ -13,7 +13,7 @@ Apple's AirDrop and Universal Clipboard feel magical inside a walled garden—un
 - **Bidirectional Android ↔ MacBook AirDrop**: Send RAW photos, 4K 60fps videos, `.apk`s, `.dmg`s, PDFs, or drag entire nested macOS Finder folders directly onto your Android device—and vice versa.
 - **Hybrid Dual-Transport (`Warp Protocol v1`)**:
   - **Primary**: Direct peer-to-peer `RTCDataChannel` (`WebRTC` SCTP over LAN Wi-Fi) with `bufferedAmountLowThreshold` flow control—zero server bandwidth, LAN-speed saturation.
-  - **Seamless Fallback**: Zero-copy binary WebSocket streaming (`0x02` routed binary frames with `perMessageDeflate: false` and 48-chunk sliding-window receiver ACKs)—succeeds 100% of the time even across corporate firewalls, AP-isolated guest Wi-Fi, or Android 5G ↔ MacBook Ethernet.
+  - **Seamless Fallback**: Zero-copy binary WebSocket streaming (`0x02` routed binary frames with `perMessageDeflate: false` and 48-chunk sliding-window receiver ACKs)—can relay transfers across corporate firewalls, AP-isolated guest Wi-Fi, or Android 5G ↔ MacBook Ethernet.
 - **Zero-Knowledge End-to-End Encryption (E2EE)**:
   - Ephemeral **WebCrypto `ECDH P-256`** key exchange + **`HKDF-SHA256`** key derivation + **`AES-256-GCM`** authenticated encryption on every control offer, thumbnail preview, clipboard snippet, and 64 KB binary file chunk.
   - Human-verifiable **6-Digit SAS Security Code** (`🔐 849 · 210`) displayed identically on both Android and MacBook screens.
@@ -22,7 +22,7 @@ Apple's AirDrop and Universal Clipboard feel magical inside a walled garden—un
   - Incoming AirDrop prompts display encrypted WebP thumbnails of incoming photos *before* you click Accept—just like native Apple AirDrop.
   - Mark your own Android phone / MacBook as a **Trusted Device** so future drops save automatically without extra taps.
 - **Universal Encrypted Clipboard**:
-  - Beam 2FA OTPs, URLs, Wi-Fi passwords, or code snippets between Android and MacBook in `< 15 ms` with automatic payload classification (`OTP`, `URL`, `CODE`, `TEXT`).
+  - Beam 2FA OTPs, URLs, Wi-Fi passwords, or code snippets between Android and MacBook with encrypted delivery with automatic payload classification (`OTP`, `URL`, `CODE`, `TEXT`).
   - Press **`Cmd + V`** anywhere on AirBridge on your MacBook to immediately stage/beam a clipboard screenshot!
 - **Native Android Share Sheet Integration (Zero APK Sideloading)**:
   - Installable Progressive Web App (`manifest.webmanifest` + Service Worker `sw.js`) implementing **Web Share Target Level 2** (`POST /_share-target`). Tap **Share → AirBridge** straight from Google Photos, Gallery, or Files on Android.
@@ -80,7 +80,17 @@ cd android-to-mac
 npm install
 npm run dev
 ```
-Open `http://localhost:3000` on your MacBook and scan the on-screen QR code with your Android camera (auto-detects your MacBook's Wi-Fi LAN IP!).
+Open `http://localhost:3000` on your MacBook for local development.
+
+**For transfers with your Android phone, serve the app over HTTPS with a certificate trusted by both devices** (for example, behind your own TLS reverse proxy). Open the same HTTPS address on both devices, then scan the pairing QR or enter the pairing code. `http://192.168.x.x:3000` is **not** a secure browser context: WebCrypto, service workers, and clipboard APIs will not work there. The HTTPS Arena preview can also be opened on both devices.
+
+### Current scope and limitations
+
+This is a browser/PWA application, not a native Android or macOS AirDrop implementation. Keep both devices’ pages open during a transfer. Nearby discovery is server/network based, not Bluetooth proximity. The virtual-device demo runs an additional peer in your browser; it is not a physical phone.
+
+WebRTC is attempted first; encrypted WebSocket relay is the fallback. Availability and throughput depend on the network—there is no guaranteed transfer speed or firewall traversal. Received files are buffered in browser memory, so available RAM limits practical file sizes; use smaller batches for large videos. Compare the displayed security codes over a trusted channel before transferring sensitive data. This project has not received an independent security audit.
+
+PWA installation and Android Share Target support require HTTPS and a compatible browser. macOS direct-to-Downloads integration is optional and requires running the local daemon; ordinary browser transfers use browser downloads.
 
 ### 2. Run MacBook Local Daemon (Auto-Save to `~/Downloads/AirBridge`)
 ```bash
