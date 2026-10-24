@@ -1,12 +1,12 @@
 {
-  "name": "AirBridge — Android ↔ Mac Drop",
+  "name": "AirBridge — File transfer",
   "short_name": "AirBridge",
-  "description": "Blazing-fast, end-to-end encrypted AirDrop & Universal Clipboard between Android and MacBook.",
+  "description": "Encrypted file transfer between Android and macOS.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#080A0F",
-  "theme_color": "#080A0F",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
   "orientation": "any",
   "icons": [
     {

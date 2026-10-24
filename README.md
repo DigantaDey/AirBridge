@@ -1,125 +1,57 @@
-# ⚡ AirBridge (`android-to-mac`)
+# AirBridge
 
-> **The fast, end-to-end encrypted, open-source AirDrop & Universal Clipboard alternative built for people who use an Android phone and a MacBook.**
+AirBridge is an open-source encrypted file-transfer prototype for Android and macOS. The current implementation is a browser application backed by a Node.js signaling/transfer service. It is **not yet a native, install-and-open product**.
 
-Apple's AirDrop and Universal Clipboard feel magical inside a walled garden—until your daily driver is an **Android phone** paired with a **MacBook**. Existing workarounds force you to install clunky drivers, upload uncompressed 4K videos to cloud servers, message yourself on WhatsApp/Telegram (destroying image quality), or wrestle with broken MTP cables.
+The interface has been reduced to a focused transfer screen: device/service status, discovered devices, file selection and drag-and-drop, active transfer progress, pairing, settings, and recent transfers. The in-browser virtual-device simulator and clipboard controls are no longer part of the production screen.
 
-**AirBridge** solves both **Bidirectional File Transfer** and **Universal Clipboard** with zero cloud storage, zero media compression, hardware-grade **ECDH P-256 + AES-256-GCM End-to-End Encryption**, and a hybrid **WebRTC Direct P2P + Binary WebSocket Stream** engine (`Warp Protocol v1`).
+## Important: current product limits
 
----
+This repository does **not** currently provide installable macOS `.app`/`.dmg` or Android `.apk` artifacts. It does not yet meet the requested no-Terminal, no-server, no-certificate end-user setup. Do not present the current browser app as meeting that definition of done.
 
-## ✨ Key Capabilities
+- The signaling service must be started separately. The current pairing mechanism shares an expiring room/code through that service; it is not local-native discovery.
+- Browser WebCrypto and service-worker features require a secure context. `http://<Mac-LAN-IP>` is not a reliable secure context. Setting up trusted HTTPS on both devices remains a browser limitation; **do not bypass certificate warnings or weaken browser security**.
+- The receiver asks for consent by default. Trust/auto-accept behavior exists in the current engine, but revocation and trust management still need a dedicated, user-friendly native settings surface.
+- Outgoing file reads are chunked, but incoming file data is retained in memory by the browser. Large incoming files can exhaust device memory. Interrupted transfers are not resumable.
+- Automated tests below cover protocol and engine behavior, not physical Android ↔ Mac installation or transfer. No physical-device tests, first-run native installation tests, or signed release tests have been performed in this environment.
+- The app is not AirDrop-compatible and does not guarantee transfer speeds or discovery across guest/client-isolated networks.
 
-- **Bidirectional Android ↔ MacBook AirDrop**: Send RAW photos, 4K 60fps videos, `.apk`s, `.dmg`s, PDFs, or drag entire nested macOS Finder folders directly onto your Android device—and vice versa.
-- **Hybrid Dual-Transport (`Warp Protocol v1`)**:
-  - **Primary**: Direct peer-to-peer `RTCDataChannel` (`WebRTC` SCTP over LAN Wi-Fi) with `bufferedAmountLowThreshold` flow control—zero server bandwidth, LAN-speed saturation.
-  - **Seamless Fallback**: Zero-copy binary WebSocket streaming (`0x02` routed binary frames with `perMessageDeflate: false` and 48-chunk sliding-window receiver ACKs)—can relay transfers across corporate firewalls, AP-isolated guest Wi-Fi, or Android 5G ↔ MacBook Ethernet.
-- **Zero-Knowledge End-to-End Encryption (E2EE)**:
-  - Ephemeral **WebCrypto `ECDH P-256`** key exchange + **`HKDF-SHA256`** key derivation + **`AES-256-GCM`** authenticated encryption on every control offer, thumbnail preview, clipboard snippet, and 64 KB binary file chunk.
-  - Human-verifiable **6-Digit SAS Security Code** (`🔐 849 · 210`) displayed identically on both Android and MacBook screens.
-  - Per-file **SHA-256 cryptographic integrity verification** upon arrival.
-- **Live Encrypted Photo Previews & Trusted Auto-Accept**:
-  - Incoming AirDrop prompts display encrypted WebP thumbnails of incoming photos *before* you click Accept—just like native Apple AirDrop.
-  - Mark your own Android phone / MacBook as a **Trusted Device** so future drops save automatically without extra taps.
-- **Universal Encrypted Clipboard**:
-  - Beam 2FA OTPs, URLs, Wi-Fi passwords, or code snippets between Android and MacBook with encrypted delivery with automatic payload classification (`OTP`, `URL`, `CODE`, `TEXT`).
-  - Press **`Cmd + V`** anywhere on AirBridge on your MacBook to immediately stage/beam a clipboard screenshot!
-- **Native Android Share Sheet Integration (Zero APK Sideloading)**:
-  - Installable Progressive Web App (`manifest.webmanifest` + Service Worker `sw.js`) implementing **Web Share Target Level 2** (`POST /_share-target`). Tap **Share → AirBridge** straight from Google Photos, Gallery, or Files on Android.
-- **macOS Terminal CLI & Direct `~/Downloads` Daemon**:
-  - Run `npx airbridge daemon --reveal` on your MacBook for local mDNS (`_airbridge._tcp.local`) discovery, automatic direct saving into `~/Downloads/AirBridge`, macOS Notification Center alerts, and Finder reveal.
-  - Run `npx airbridge send ./Demo-4K.mp4` to print an instant terminal QR code with resumable HTTP `Range` streaming.
+These limitations are intentionally explicit: a monochrome UI is not a substitute for a secure, packaged native networking implementation.
 
----
+## Running from source (development only)
 
-## 🏗️ System Architecture & Wire Protocol
+These commands are for contributors. They are **not end-user installation instructions**.
 
-```text
-┌─────────────────────────────┐                  ┌─────────────────────────────┐
-│   Android 15 (Chrome/PWA)   │                  │   MacBook (Browser/Daemon)  │
-│  • Share Sheet Interceptor  │                  │  • Drag & Drop Folders      │
-│  • ECDH P-256 + AES-256-GCM │                  │  • Cmd+V Screenshot Beam    │
-│  • 6-Digit SAS Verification │                  │  • ~/Downloads Direct Save  │
-└──────┬───────────────┬──────┘                  └──────┬───────────────┬──────┘
-       │               │                                │               │
-       │               │  1. Direct LAN UDP/SCTP P2P    │               │
-       │               │◄══════ RTCDataChannel ════════►│               │
-       │               │   (64KB AES-256-GCM Frames)    │               │
-       │                                                                │
-       │        2. Signaling + Blind Binary E2EE Relay Fallback         │
-       └──────────────►┌────────────────────────────────┐◄──────────────┘
-                       │     AirBridge Warp Server      │
-                       │  • Nearby Subnet/IP Grouping   │
-                       │  • 6-Char Cross-Net Pair Rooms │
-                       │  • Zero-Copy 0x02 Binary Relay │
-                       │  • mDNS (_airbridge._tcp.local)│
-                       └────────────────────────────────┘
-```
+Requirements: Node.js 20+ and npm.
 
-### Binary Chunk Wire Format (`src/shared/protocol.ts`)
-
-| Offset | Length | Field | Description |
-| :--- | :--- | :--- | :--- |
-| `0` | `1 B` | `frameType` | `0x01` = Encrypted File Chunk |
-| `1..17` | `16 B` | `transferId` | 16-byte ASCII hex transfer identifier |
-| `17..21` | `4 B` | `fileIndex` | `Uint32BE` file index within multi-file batch |
-| `21..25` | `4 B` | `chunkIndex` | `Uint32BE` 64 KB chunk sequence number |
-| `25..37` | `12 B` | `iv` | 96-bit `AES-256-GCM` unique nonce |
-| `37..N` | `Var` | `ciphertext` | Encrypted chunk payload + 128-bit GCM auth tag |
-
-When routed through the WebSocket relay across strict NATs (`0x02`), a 33-byte header (`[0x02][targetPeerId:16][sourcePeerId:16]`) wraps the inner `0x01` frame. The server stamps `sourcePeerId` from the authenticated socket and forwards raw `Uint8Array` buffers without JSON serialization or Base64 overhead.
-
----
-
-## 🚀 Quick Start
-
-### 1. Run Development Server
-```bash
+```sh
 git clone https://github.com/DigantaDey/android-to-mac.git
 cd android-to-mac
-npm install
+npm ci
 npm run dev
 ```
-Open `http://localhost:3000` on your MacBook for local development.
 
-**For transfers with your Android phone, serve the app over HTTPS with a certificate trusted by both devices** (for example, behind your own TLS reverse proxy). Open the same HTTPS address on both devices, then scan the pairing QR or enter the pairing code. `http://192.168.x.x:3000` is **not** a secure browser context: WebCrypto, service workers, and clipboard APIs will not work there. The HTTPS Arena preview can also be opened on both devices.
+For a local browser-only development session, open the local URL printed by the server. Testing with a second physical device requires a network-reachable server and a secure browser context; the current project does not automate certificate provisioning. Never instruct users to ignore certificate warnings.
 
-### Current scope and limitations
+### Checks
 
-This is a browser/PWA application, not a native Android or macOS AirDrop implementation. Keep both devices’ pages open during a transfer. Nearby discovery is server/network based, not Bluetooth proximity. The virtual-device demo runs an additional peer in your browser; it is not a physical phone.
-
-WebRTC is attempted first; encrypted WebSocket relay is the fallback. Availability and throughput depend on the network—there is no guaranteed transfer speed or firewall traversal. Received files are buffered in browser memory, so available RAM limits practical file sizes; use smaller batches for large videos. Compare the displayed security codes over a trusted channel before transferring sensitive data. This project has not received an independent security audit.
-
-PWA installation and Android Share Target support require HTTPS and a compatible browser. macOS direct-to-Downloads integration is optional and requires running the local daemon; ordinary browser transfers use browser downloads.
-
-### 2. Run MacBook Local Daemon (Auto-Save to `~/Downloads/AirBridge`)
-```bash
-node ./bin/airbridge.mjs daemon --reveal
-```
-
-### 3. Instant CLI File Beam from macOS Terminal
-```bash
-node ./bin/airbridge.mjs send ./Presentation.pdf ./Footage-4K.mp4
-```
-
-### 4. Production Build & Test Suite
-```bash
+```sh
 npm run typecheck
 npm test
 npm run build
-npm start
 ```
 
----
+`npm run build` creates a web client in `dist/client` and compiles the server into `dist/server`. These are development/build outputs, **not installable macOS or Android packages**. `npm start` runs the built Node service; it is not a packaged app launcher.
 
-## 📱 Adding AirBridge to Android's Native Share Sheet
+## Native packaging and release status
 
-1. Open your AirBridge URL in **Chrome** on your Android phone.
-2. Tap **Menu (`⋮`) → Install app** (or **Add to Home screen**).
-3. Open **Google Photos** or **Files by Google**, select any uncompressed photos/videos, tap **Share**, and tap **AirBridge**!
+- **Locally buildable native packages:** none currently defined.
+- **Signed/notarized macOS release:** none. A future macOS app will require Apple Developer signing/notarization credentials for a broadly trusted download.
+- **Android release package:** none. A future Android app will require Android packaging/signing configuration and maintainer release credentials for a published release.
 
----
+No signing credentials are needed for the existing web test/build commands. This repository does not claim a reproducible native release build until the native app targets, offline/bundled dependencies, permissions, update path, and release workflows exist.
 
-## 📄 License
+## Engineering status
 
-Open-source under the [MIT License](./LICENSE).
+The existing `src/client/engine` and `src/server` contain the browser transfer engine, WebRTC/signaling, encrypted control/data framing, and optional local macOS daemon integration. Reusing parts of that engine may be useful, but its web-runtime assumptions and in-memory receive path mean it cannot simply be wrapped and called a native app. A production implementation still needs native local-network discovery, authenticated pairing integrated with both app identities, streamed native file I/O, clear permission recovery, reconnect/cancel behavior, and reproducible signed/unsigned package pipelines.
+
+License: MIT. See [LICENSE](./LICENSE).
