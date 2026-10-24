@@ -7,7 +7,13 @@ import { createAirBridgeServer, type AirBridgeServerInstance } from '../src/serv
 import { createCliBeamSession, type CliBeamSession } from '../src/server/cliSendSession.js';
 import { HostClipboardMonitor, type HostClipboardProvider } from '../src/server/hostClipboard.js';
 import { sanitizeFilename } from '../src/server/macIntegration.js';
-import type { ServerToClientMessage } from '../src/shared/protocol.js';
+import { bytesToBase64Url, type ServerToClientMessage } from '../src/shared/protocol.js';
+import { webcrypto } from 'node:crypto';
+
+async function testPublicKey(): Promise<string> {
+  const kp = await webcrypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  return bytesToBase64Url(new Uint8Array(await webcrypto.subtle.exportKey('raw', kp.publicKey)));
+}
 
 describe('CLI Beam Resumable Range Streaming & macOS Local Daemon Save', () => {
   let tmpDir: string;
@@ -169,6 +175,7 @@ describe('HostClipboardMonitor & Loopback Desktop Daemon Isolation', () => {
       },
     });
 
+    const validPublicKey = await testPublicKey();
     const macMessages: ServerToClientMessage[] = [];
     const androidMessages: ServerToClientMessage[] = [];
 
@@ -195,7 +202,7 @@ describe('HostClipboardMonitor & Loopback Desktop Daemon Isolation', () => {
                 platform,
                 model: platform,
                 formFactor: platform === 'macos' ? 'laptop' : 'phone',
-                publicKey: 'AAAA',
+                publicKey: validPublicKey,
               },
             })
           );

@@ -52,7 +52,10 @@ export function buildZipArchiveParts(entries: ZipInputEntry[]): Uint8Array[] {
   let offset = 0;
 
   for (const entry of entries) {
-    const cleanPath = entry.path.replace(/^[/\\]+/, '').replace(/\\/g, '/') || 'file';
+    // Strip drive/absolute prefixes and any '..' segments so a hostile
+    // relativePath in a manifest cannot become a path-traversal entry when
+    // the archive is extracted on the receiving device.
+    const cleanPath = entry.path.replace(/\\/g, '/').replace(/^[a-zA-Z]:/, '').split('/').filter((seg) => seg && seg !== '.' && seg !== '..').join('/') || 'file';
     const nameBytes = encoder.encode(cleanPath);
     const totalSize = entry.chunks.reduce((acc, c) => acc + c.byteLength, 0);
     const checksum = crc32(entry.chunks);

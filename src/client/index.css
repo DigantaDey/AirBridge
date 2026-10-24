@@ -157,3 +157,8 @@ html.dark .clipboard-error { color: #f87171; }
   .utility-footer { align-items: flex-start; gap: 8px; flex-direction: column; }
   .utility-modal { padding: 19px; }
 }
+
+.folder-locate-button { display: inline-flex; align-items: center; justify-content: center; padding: 6px; line-height: 0; }
+.received-folder-controls { display: flex; gap: 8px; align-items: center; }
+.received-folder-controls input { flex: 1; min-width: 0; }
+.received-folder-current { overflow-wrap: anywhere; color: var(--ab-muted); }

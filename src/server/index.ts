@@ -17,7 +17,11 @@ import {
 import {
   createMacDaemonConfig,
   getDaemonStatus,
+  loadPersistedDownloadDir,
+  openFolderInFileManager,
+  persistDownloadDir,
   saveBufferToLocalDownloads,
+  setDownloadDir,
   type MacDaemonConfig,
 } from './macIntegration.js';
 import {
@@ -46,6 +50,10 @@ export interface AirBridgeServerOptions {
    * AirBridge at all without it. Set `AIRBRIDGE_HTTPS=0` to opt out.
    */
   https?: boolean;
+  /** Override for tests: opens a folder in the OS file manager. */
+  openFolder?: (targetPath: string) => Promise<void>;
+  /** Where the received-files folder choice is persisted. Default ~/.airbridge/settings.json; set to null to disable. */
+  receivedFolderSettingsPath?: string | null;
   /** Path to a PEM certificate (e.g. mkcert). Implies `https: true`. */
   tlsCertPath?: string;
   /** Path to the PEM private key matching `tlsCertPath`. */
@@ -117,6 +125,14 @@ export async function createAirBridgeServer(
 
   const app = express();
   app.disable('x-powered-by');
+  // Baseline hardening for every response (the CA download included).
+  app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    next();
+  });
 
   const httpServer = http.createServer(app);
   const httpsServer = tls ? https.createServer({ key: tls.key, cert: tls.cert }, app) : null;
@@ -180,6 +196,50 @@ export async function createAirBridgeServer(
     });
   }
 
+  // Received-files folder settings. Loopback only: a phone (or any LAN
+  // device / website reaching this port) must not be able to move where the
+  // host saves files or pop open folders on the host's screen.
+  const isLoopbackRequest = (req: Request) => isLoopbackAddress(req.socket.remoteAddress);
+  const receivedSettingsPath = options.receivedFolderSettingsPath === null || (options.receivedFolderSettingsPath === undefined && mode === 'test')
+    ? null
+    : options.receivedFolderSettingsPath ?? path.join(path.dirname(tls?.certDir ?? path.join(process.env.HOME ?? '', '.airbridge', 'tls')), 'settings.json');
+  if (receivedSettingsPath && !options.daemonConfig?.downloadDir && !process.env.AIRBRIDGE_DOWNLOAD_DIR) {
+    const persisted = await loadPersistedDownloadDir(receivedSettingsPath);
+    if (persisted) daemonCfg.downloadDir = persisted;
+  }
+  app.get('/api/received-folder', (req, res) => {
+    if (!isLoopbackRequest(req)) { res.status(403).json({ error: 'Received-folder settings are restricted to this device.' }); return; }
+    res.json({ downloadDir: daemonCfg.downloadDir, autoSaveToDownloads: daemonCfg.enabled && daemonCfg.autoSaveToDownloads, enabled: daemonCfg.enabled });
+  });
+  app.use('/api/received-folder', express.json({ limit: '16kb' }));
+  app.put('/api/received-folder', async (req, res) => {
+    if (!isLoopbackRequest(req)) { res.status(403).json({ error: 'Received-folder settings are restricted to this device.' }); return; }
+    try {
+      const downloadDir = await setDownloadDir(daemonCfg, (req.body as { downloadDir?: unknown })?.downloadDir);
+      if (receivedSettingsPath) await persistDownloadDir(receivedSettingsPath, downloadDir).catch(() => {});
+      // Clients that change the folder almost certainly want files saved there.
+      daemonCfg.enabled = true; daemonCfg.autoSaveToDownloads = true;
+      res.json({ ok: true, downloadDir, autoSaveToDownloads: true, enabled: true });
+    } catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid folder' }); }
+  });
+  app.post('/api/received-folder/open', async (req, res) => {
+    if (!isLoopbackRequest(req)) { res.status(403).json({ error: 'Opening folders is restricted to this device.' }); return; }
+    try {
+      const requested = (req.body as { path?: unknown } | undefined)?.path;
+      let target = daemonCfg.downloadDir;
+      if (typeof requested === 'string' && requested) {
+        // Only reveal paths inside the received-files folder.
+        const resolved = path.resolve(requested);
+        const root = path.resolve(daemonCfg.downloadDir);
+        if (resolved !== root && !resolved.startsWith(root + path.sep)) { res.status(400).json({ error: 'Path is outside the received-files folder.' }); return; }
+        target = resolved;
+      }
+      await fs.promises.mkdir(daemonCfg.downloadDir, { recursive: true });
+      await (options.openFolder ?? openFolderInFileManager)(target);
+      res.json({ ok: true, path: target });
+    } catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : 'Could not open folder' }); }
+  });
+
   // Health & runtime diagnostics endpoint
   app.get('/api/health', (req, res) => {
     res.json({
@@ -195,7 +255,8 @@ export async function createAirBridgeServer(
       caFingerprintSha256: tls?.caFingerprintSha256 ?? null,
       requestProtocol: (req.socket as TLSSocket).encrypted ? 'https' : 'http',
       mdnsActive: mdns?.active ?? false,
-      localDaemon: getDaemonStatus(daemonCfg),
+      // Full daemon status (incl. the local download path) only for the host itself.
+      localDaemon: isLoopbackAddress(req.socket.remoteAddress) ? getDaemonStatus(daemonCfg) : { ...getDaemonStatus(daemonCfg), downloadDir: undefined },
     });
   });
 
@@ -214,10 +275,10 @@ export async function createAirBridgeServer(
         return;
       }
       const rawName = String(req.headers['x-airbridge-filename'] || 'download.bin');
-      const sender = req.headers['x-airbridge-sender']
-        ? decodeURIComponent(String(req.headers['x-airbridge-sender']))
-        : undefined;
       try {
+        const sender = req.headers['x-airbridge-sender']
+          ? decodeURIComponent(String(req.headers['x-airbridge-sender']))
+          : undefined;
         const filename = decodeURIComponent(rawName);
         const body = Buffer.isBuffer(req.body) ? req.body : Buffer.from([]);
         const saved = await saveBufferToLocalDownloads(daemonCfg, filename, body, sender);

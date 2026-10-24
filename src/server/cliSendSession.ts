@@ -15,7 +15,31 @@ export interface CliBeamSession {
   token: string;
   files: CliBeamFile[];
   createdAt: number;
+  /** Beam links are bearer credentials on the LAN: they expire. */
+  expiresAt: number;
   downloads: number;
+}
+
+export const CLI_BEAM_TTL_MS = 15 * 60 * 1000;
+
+// Brute-force throttling for token guesses (per remote address).
+const failedLookups = new Map<string, { count: number; windowStart: number }>();
+function tokenGuessThrottled(ip: string): boolean {
+  const now = Date.now();
+  const entry = failedLookups.get(ip);
+  if (!entry || now - entry.windowStart > 60_000) { failedLookups.set(ip, { count: 0, windowStart: now }); return false; }
+  return entry.count >= 20;
+}
+function noteFailedLookup(ip: string): void {
+  const entry = failedLookups.get(ip);
+  if (entry) entry.count += 1;
+}
+function liveSession(sessions: Map<string, CliBeamSession>, token: string, ip: string): CliBeamSession | null {
+  const session = sessions.get(token);
+  if (session && session.expiresAt > Date.now()) return session;
+  if (session) sessions.delete(token);
+  if (!tokenGuessThrottled(ip)) noteFailedLookup(ip);
+  return null;
 }
 
 export function registerCliBeamRoutes(
@@ -24,7 +48,8 @@ export function registerCliBeamRoutes(
   onDownloadComplete?: (file: CliBeamFile, remoteIp: string) => void
 ): void {
   app.get('/api/beam/:token', (req: Request, res: Response) => {
-    const session = sessions.get(String(req.params.token));
+    if (tokenGuessThrottled(req.ip || '')) { res.status(429).json({ error: 'Too many attempts.' }); return; }
+    const session = liveSession(sessions, String(req.params.token), req.ip || '');
     if (!session) {
       res.status(404).json({ error: 'Beam token expired or invalid.' });
       return;
@@ -43,7 +68,8 @@ export function registerCliBeamRoutes(
   });
 
   app.get('/api/beam/:token/file/:idx', async (req: Request, res: Response) => {
-    const session = sessions.get(String(req.params.token));
+    if (tokenGuessThrottled(req.ip || '')) { res.status(429).send('Too many attempts.'); return; }
+    const session = liveSession(sessions, String(req.params.token), req.ip || '');
     if (!session) {
       res.status(404).send('Beam token expired or invalid.');
       return;
@@ -82,9 +108,9 @@ export function registerCliBeamRoutes(
     if (range) {
       const match = range.match(/bytes=(\d*)-(\d*)/);
       if (match) {
-        const start = match[1] ? Number.parseInt(match[1], 10) : 0;
-        const end = match[2] ? Math.min(Number.parseInt(match[2], 10), total - 1) : total - 1;
-        if (start >= 0 && start <= end && end < total) {
+        const start = match[1] ? Number.parseInt(match[1], 10) : Math.max(0, total - (match[2] ? Number.parseInt(match[2], 10) : 0));
+        const end = match[1] && match[2] ? Math.min(Number.parseInt(match[2], 10), total - 1) : total - 1;
+        if (total > 0 && start >= 0 && start <= end && end < total) {
           res.status(206);
           res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
           res.setHeader('Content-Length', String(end - start + 1));
@@ -120,10 +146,14 @@ export async function createCliBeamSession(filePaths: string[]): Promise<CliBeam
     });
   }
 
+  const now = Date.now();
   return {
-    token: crypto.randomBytes(12).toString('base64url'),
+    // 256-bit bearer token (was 96-bit) — anyone with the link can download,
+    // so it must be unguessable and short-lived.
+    token: crypto.randomBytes(32).toString('base64url'),
     files,
-    createdAt: Date.now(),
+    createdAt: now,
+    expiresAt: now + CLI_BEAM_TTL_MS,
     downloads: 0,
   };
 }

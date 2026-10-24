@@ -4,7 +4,8 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
 import { webcrypto } from "node:crypto";
-import { bytesToBase64Url } from "../src/shared/protocol.js";
+import { bytesToBase64Url, type ControlPayload } from "../src/shared/protocol.js";
+import { derivePeerSession, encryptControlPayload } from "../src/client/engine/crypto.js";
 
 // Tell React its act() helpers are available in this jsdom test file.
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean })
@@ -30,6 +31,14 @@ interface SentMessage {
 // Real P-256 public key for the fake peer, regenerated per test so the
 // client's ECDH importKey / deriveBits actually succeeds.
 let peerPublicKeyB64 = "";
+let peerPrivateKey: CryptoKey | null = null;
+
+async function pushEncrypted(socket: FakeSocket, payload: ControlPayload) {
+  const hello = socket.sentMessages.find((m) => m.type === "hello") as unknown as { device: { publicKey: string } };
+  const session = await derivePeerSession(peerPrivateKey!, peerPublicKeyB64, hello.device.publicKey);
+  const envelope = await encryptControlPayload(session.aesKey, payload);
+  socket.pushServerMessage({ type: "transfer-control", from: "1122334455667788", envelope });
+}
 
 // ---- Minimal in-page fake WebSocket + signaling server --------------------
 class FakeSocket {
@@ -181,6 +190,7 @@ describe("AirBridge app UI", () => {
       await webcrypto.subtle.exportKey("raw", peerKeys.publicKey),
     );
     peerPublicKeyB64 = bytesToBase64Url(rawPeerPub);
+    peerPrivateKey = peerKeys.privateKey;
     // @ts-expect-error fake socket
     globalThis.WebSocket = FakeSocket;
     if (!navigator.clipboard) {
@@ -304,19 +314,12 @@ describe("AirBridge app UI", () => {
     const socket = FakeSocket.lastInstance!;
 
     await act(async () => {
-      socket.pushServerMessage({
-        type: "transfer-control",
-        from: "1122334455667788",
-        envelope: {
-          encrypted: false,
-          payload: {
-            kind: "clipboard-beam",
-            beamId: "beam-001",
-            text: "https://example.com/login?t=abc",
-            contentType: "url",
-            timestamp: Date.now(),
-          },
-        },
+      await pushEncrypted(socket, {
+        kind: "clipboard-beam",
+        beamId: "beam-001",
+        text: "https://example.com/login?t=abc",
+        contentType: "url",
+        timestamp: Date.now(),
       });
       await new Promise((r) => setTimeout(r, 30));
     });
@@ -390,18 +393,47 @@ describe("AirBridge app UI", () => {
     expect(historyTexts).toContain("copied-inline-snippet");
   });
 
+  it("shows the received-files folder in Settings, saves a new path, and locates it with the folder icon", async () => {
+    const calls: Array<{ url: string; method?: string; body?: string }> = [];
+    const originalFetch = globalThis.fetch;
+    // @ts-expect-error test fetch stub
+    globalThis.fetch = async (url: string, init?: { method?: string; body?: string }) => {
+      calls.push({ url: String(url), method: init?.method, body: init?.body });
+      if (String(url) === "/api/received-folder" && !init?.method) {
+        return { ok: true, json: async () => ({ downloadDir: "/Users/test/Downloads/AirBridge", enabled: true, autoSaveToDownloads: true }) };
+      }
+      if (String(url) === "/api/received-folder" && init?.method === "PUT") {
+        return { ok: true, json: async () => ({ downloadDir: "/Users/test/Pictures/Received", enabled: true, autoSaveToDownloads: true }) };
+      }
+      return { ok: true, json: async () => ({ ok: true }) };
+    };
+    try {
+      const { container } = await renderApp();
+      // Header locate icon appears once the folder is known.
+      await waitFor(() => container.querySelector('button[aria-label="Open received files folder"]') !== null);
+      await act(async () => { findButton(container, "Settings").click(); });
+      const input = container.querySelector('input[aria-label="Received files folder path"]') as HTMLInputElement;
+      expect(input).toBeTruthy();
+      expect(container.textContent).toContain("/Users/test/Downloads/AirBridge");
+      await act(async () => { setNativeValue(input as unknown as HTMLTextAreaElement, HTMLInputElement as unknown as { prototype: object }, "/Users/test/Pictures/Received", "input"); });
+      const saveBtn = findButton(container, "Save folder") as HTMLButtonElement;
+      await act(async () => { saveBtn.click(); await new Promise((r) => setTimeout(r, 30)); });
+      expect(calls.some((c) => c.url === "/api/received-folder" && c.method === "PUT" && String(c.body).includes("Pictures/Received"))).toBe(true);
+      expect(container.textContent).toContain("/Users/test/Pictures/Received");
+      // Folder icon inside Settings opens the folder through the client.
+      const icon = container.querySelector('.received-folder-setting button[aria-label="Open received files folder"]') as HTMLButtonElement;
+      await act(async () => { icon.click(); await new Promise((r) => setTimeout(r, 20)); });
+      expect(calls.some((c) => c.url === "/api/received-folder/open" && c.method === "POST")).toBe(true);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
   it("displays Recent transfers newest-first on Android with header count and Save button for received files", async () => {
     const { container } = await renderApp();
     const socket = FakeSocket.lastInstance!;
 
     // 1. Reconcile two historical transfers from MacBook via history-sync (intentionally sent oldest-first)
     await act(async () => {
-      socket.pushServerMessage({
-        type: "transfer-control",
-        from: "1122334455667788",
-        envelope: {
-          encrypted: false,
-          payload: {
+      await pushEncrypted(socket, {
             kind: "history-sync",
             transfers: [
               {
@@ -451,8 +483,6 @@ describe("AirBridge app UI", () => {
                 sasCode: "123 456",
               },
             ],
-          },
-        },
       });
       await new Promise((r) => setTimeout(r, 30));
     });
