@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, Copy, Sparkles, X } from "lucide-react";
-import type { PeerSummary, VisibilityMode } from "../shared/protocol.js";
+import { formatBytes } from "../shared/protocol.js";
 import {
   loadOrCreateDeviceProfile,
   saveDeviceName,
@@ -12,25 +11,18 @@ import {
 } from "./engine/soundEffects.js";
 import {
   WarpClient,
-  type ClipboardBeamItem,
   type SendableFileInput,
   type WarpClientSnapshot,
   wrapBrowserFile,
 } from "./engine/warpClient.js";
 import { consumePwaSharedPayload } from "./engine/fileDropUtils.js";
-import { HeaderBar } from "./components/HeaderBar.js";
-import { RadarStage } from "./components/RadarStage.js";
 import { PairingDock } from "./components/PairingDock.js";
 import { TransferModal } from "./components/TransferModal.js";
-import { ClipboardModal } from "./components/ClipboardModal.js";
-import { SetupGuideModal } from "./components/SetupGuideModal.js";
-import { CompanionSimulator } from "./components/CompanionSimulator.js";
 
 interface ToastNotice {
   id: string;
   title: string;
   body: string;
-  copyText?: string;
 }
 
 export function App() {
@@ -73,30 +65,8 @@ export function App() {
     }
   });
 
-  const [soundMuted, setSoundMuted] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem("airbridge:soundMuted") === "1";
-    } catch {
-      return false;
-    }
-  });
-
-  const [simulatorOpen, setSimulatorOpen] = useState(false);
-  const [setupGuideOpen, setSetupGuideOpen] = useState(false);
-  const [clipboardTargetPeer, setClipboardTargetPeer] =
-    useState<PeerSummary | null>(null);
   const [stagedFiles, setStagedFiles] = useState<SendableFileInput[]>([]);
   const [toast, setToast] = useState<ToastNotice | null>(null);
-  const [toastCopied, setToastCopied] = useState(false);
-
-  useEffect(() => {
-    soundMutedRef.current = soundMuted;
-    try {
-      localStorage.setItem("airbridge:soundMuted", soundMuted ? "1" : "0");
-    } catch {
-      // ignore
-    }
-  }, [soundMuted]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -114,7 +84,6 @@ export function App() {
 
   const showToast = (notice: ToastNotice) => {
     setToast(notice);
-    setToastCopied(false);
   };
 
   // Initialize WarpClient & PWA Share Target consumer
@@ -130,16 +99,7 @@ export function App() {
       onIncomingTransfer: () => {
         playIncomingChime(soundMutedRef.current);
       },
-      onIncomingClipboard: (item: ClipboardBeamItem) => {
-        playIncomingChime(soundMutedRef.current);
-        showToast({
-          id: item.beamId,
-          title: `Clipboard from ${item.peerName}`,
-          body:
-            item.text.length > 90 ? `${item.text.slice(0, 90)}…` : item.text,
-          copyText: item.text,
-        });
-      },
+
       onTransferCompleted: (tr) => {
         playTransferCompleteChime(soundMutedRef.current);
         if (tr.direction === "incoming") {
@@ -195,36 +155,6 @@ export function App() {
     };
   }, [initialPairCode]);
 
-  // Global Cmd+V / Ctrl+V screenshot & file paste handler
-  useEffect(() => {
-    const onPaste = (e: ClipboardEvent) => {
-      const activeTag = (document.activeElement as HTMLElement | null)?.tagName;
-      if (activeTag === "INPUT" || activeTag === "TEXTAREA") return;
-      if (!e.clipboardData) return;
-
-      const files = Array.from(e.clipboardData.files || []);
-      if (files.length > 0) {
-        e.preventDefault();
-        const wrapped = files.map((f) => wrapBrowserFile(f));
-        const currentPeers = clientRef.current?.getSnapshot().peers ?? [];
-        if (currentPeers.length === 1 && clientRef.current) {
-          playBeamSentPulse(soundMutedRef.current);
-          clientRef.current.sendFiles(currentPeers[0].peerId, wrapped);
-        } else {
-          setStagedFiles((prev) => [...prev, ...wrapped]);
-          showToast({
-            id: `paste-${Date.now()}`,
-            title: "Pasted Screenshot / File Staged",
-            body: "Select a device on the radar to beam immediately.",
-          });
-        }
-      }
-    };
-
-    window.addEventListener("paste", onPaste);
-    return () => window.removeEventListener("paste", onPaste);
-  }, []);
-
   const activeIncomingOffer = useMemo(
     () =>
       snap.transfers.find(
@@ -253,216 +183,81 @@ export function App() {
     clientRef.current?.updateDeviceName(newName);
   };
 
-  const handleVisibilityChange = (v: VisibilityMode) => {
-    clientRef.current?.setVisibility(v);
+
+
+  const [pairingOpen, setPairingOpen] = useState(false);
+  const [recentOpen, setRecentOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const filePicker = useRef<HTMLInputElement>(null);
+  const deviceName = snap.myDevice?.name || "This device";
+  const connectionLabel = snap.connectionState === "connected"
+    ? "Transfer service connected"
+    : snap.connectionState === "reconnecting"
+      ? "Reconnecting to transfer service"
+      : snap.connectionState === "disconnected"
+        ? "Transfer service unavailable"
+        : "Starting transfer service";
+  const stageFiles = (files: FileList | File[]) => {
+    setStagedFiles((current) => [...current, ...Array.from(files).map((file) => wrapBrowserFile(file))]);
   };
+  const activeTransfers = snap.transfers.filter((transfer) => ["connecting", "transferring", "pending-accept"].includes(transfer.status));
+  const recentTransfers = snap.transfers.filter((transfer) => !["connecting", "transferring", "pending-accept"].includes(transfer.status));
 
   return (
-    <div className="min-h-screen flex flex-col bg-[var(--ab-bg)] text-[var(--ab-text)] transition-colors">
-      <HeaderBar
-        connectionState={snap.connectionState}
-        visibility={snap.visibility}
-        onChangeVisibility={handleVisibilityChange}
-        simulatorOpen={simulatorOpen}
-        onToggleSimulator={() => setSimulatorOpen((prev) => !prev)}
-        onOpenSetupGuide={() => setSetupGuideOpen(true)}
-        soundMuted={soundMuted}
-        onToggleSound={() => setSoundMuted((prev) => !prev)}
-        darkMode={darkMode}
-        onToggleDarkMode={() => setDarkMode((prev) => !prev)}
-      />
-
-      {/* Main Spatial Workspace */}
-      <main className="app-main flex-1 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-5 sm:py-7">
+    <div className="utility-shell">
+      <header className="utility-header">
+        <div className="brand"><span className="brand-mark">A</span><span>AirBridge</span></div>
+        <div className="header-actions">
+          <button className="quiet-button" onClick={() => setRecentOpen(true)}>Recent</button>
+          <button className="icon-button" aria-label="Settings" title="Settings" onClick={() => setSettingsOpen(true)}>Settings</button>
+        </div>
+      </header>
+      <main className="utility-main">
+        <section className="device-heading">
+          <div>
+            <p className="section-kicker">YOUR DEVICE</p>
+            <h1>{deviceName}</h1>
+          </div>
+          <div className="service-state" role="status"><span className="state-symbol" aria-hidden="true">{snap.connectionState === "connected" ? "●" : "○"}</span><span>{connectionLabel}</span></div>
+        </section>
         {snap.connectionState !== "connected" && (
-          <div className="connection-notice" role="status">
-            <strong>
-              {!window.isSecureContext
-                ? "HTTPS is required on your phone"
-                : "Connecting to the pairing server…"}
-            </strong>
-            <p>
-              {!window.isSecureContext
-                ? "A local Wi-Fi HTTP address can open the page, but cannot start encrypted transfers. Open the same trusted HTTPS address on both devices."
-                : "Opening the page is not enough: both devices must connect to the same running AirBridge server. Keep this tab open. If this persists, check that your proxy supports WebSockets at /ws."}
-            </p>
-            <button onClick={() => window.location.reload()}>
-              Retry connection
-            </button>
+          <div className="recovery-note" role="status">
+            <div><strong>{!window.isSecureContext ? "Secure connection required" : "Could not reach the transfer service"}</strong><p>{!window.isSecureContext ? "This browser version needs a trusted HTTPS connection. A local Wi-Fi address cannot provide one." : "Check that AirBridge is running on the same network, then try again."}</p></div>
+            <button className="text-button" onClick={() => window.location.reload()}>Try again</button>
           </div>
         )}
-        <div className="page-heading">
-          <div>
-            <div className="eyebrow">
-              A LITTLE LESS FRICTION. A LITTLE MORE FLOW.
-            </div>
-            <h1>
-              Your devices. <span>Better together.</span>
-            </h1>
-            <p>
-              Send anything between Android and Mac. Simply, securely, yours.
-            </p>
+        <section className="devices-section">
+          <div className="section-title"><h2>Devices</h2><button className="text-button" onClick={() => setPairingOpen(true)}>Pair a device</button></div>
+          {snap.peers.length ? <ul className="device-list">{snap.peers.map((peer) => {
+            const verification = snap.peerSecurity[peer.peerId];
+            return <li className="device-row" key={peer.peerId}>
+              <span className="device-glyph" aria-hidden="true">{peer.device.formFactor === "phone" ? "▯" : "▱"}</span>
+              <span className="device-copy"><strong>{peer.device.name}</strong><small>{peer.discoveryScope === "paired" ? "Paired" : "Nearby"}{verification ? " · Encrypted session established" : " · Discovered; pair to send"}</small></span>
+              <button className="send-device-button" disabled={stagedFiles.length === 0 || !verification} onClick={() => { handleSendFilesToPeer(peer.peerId, stagedFiles); setStagedFiles([]); }}>Send</button>
+            </li>;
+          })}</ul> : <div className="empty-devices"><p>No devices found yet</p><span>Open AirBridge on your other device on the same Wi-Fi network, or pair it with a QR code.</span><button className="secondary-button" onClick={() => setPairingOpen(true)}>Pair with QR code</button></div>}
+        </section>
+        <section className="send-section">
+          <div className="section-title"><h2>Send files</h2>{stagedFiles.length > 0 && <button className="text-button" onClick={() => setStagedFiles([])}>Clear selection</button>}</div>
+          <div className={`drop-area ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); stageFiles(event.dataTransfer.files); }}>
+            <input ref={filePicker} type="file" multiple className="visually-hidden" onChange={(event) => { if (event.target.files) stageFiles(event.target.files); event.target.value = ""; }} aria-label="Choose files to send" />
+            <span className="upload-symbol" aria-hidden="true">↑</span>
+            <p><strong>Drop files here</strong><span> or </span><button className="inline-button" onClick={() => filePicker.current?.click()}>choose files</button></p>
+            <small>Files stay between your devices. The receiver must accept each transfer.</small>
           </div>
-          <span className="network-pill">
-            <span />{" "}
-            {snap.connectionState === "connected"
-              ? "Connected to AirBridge"
-              : snap.connectionState === "disconnected"
-                ? "Connection unavailable"
-                : "Connecting to AirBridge…"}
-          </span>
-        </div>
-        <div
-          className={`grid grid-cols-1 gap-5 items-stretch ${
-            simulatorOpen
-              ? "xl:grid-cols-[1fr_340px_380px] lg:grid-cols-[1fr_360px]"
-              : "lg:grid-cols-[1fr_350px]"
-          }`}
-        >
-          <RadarStage
-            connectionState={snap.connectionState}
-            visibility={snap.visibility}
-            myDevice={snap.myDevice}
-            localDaemon={snap.localDaemon}
-            peers={snap.peers}
-            peerSecurity={snap.peerSecurity}
-            trustedPeerKeys={snap.trustedPeerKeys}
-            stagedFiles={stagedFiles}
-            onClearStagedFiles={() => setStagedFiles([])}
-            onStageFiles={(files) =>
-              setStagedFiles((prev) => [...prev, ...files])
-            }
-            onSendFilesToPeer={handleSendFilesToPeer}
-            onOpenClipboardForPeer={(peer) => setClipboardTargetPeer(peer)}
-            onToggleTrustPeer={(pubKey, trusted) =>
-              clientRef.current?.toggleTrustedPeer(pubKey, trusted)
-            }
-            onRenameDevice={handleRenameDevice}
-            onOpenSimulator={() => setSimulatorOpen(true)}
-          />
-
-          {simulatorOpen && (
-            <CompanionSimulator
-              open={simulatorOpen}
-              hostPairCode={snap.pairCode}
-              hostPeerId={snap.peerId}
-              onClose={() => setSimulatorOpen(false)}
-            />
-          )}
-
-          <PairingDock
-            pairCode={snap.pairCode}
-            lanUrls={snap.lanUrls}
-            transfers={snap.transfers}
-            clipboardItems={snap.clipboardItems}
-            onJoinPairCode={(code) => clientRef.current?.joinPairCode(code)}
-            onRotatePairCode={() => clientRef.current?.rotatePairCode()}
-            onCancelTransfer={(tid) => clientRef.current?.cancelTransfer(tid)}
-          />
-        </div>
-        <footer className="app-footer">
-          <span>
-            Built for the devices you love. Not just the ones from the same
-            brand.
-          </span>
-          <a
-            href="https://github.com/DigantaDey/android-to-mac"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Open source, always ↗
-          </a>
-          <span>
-            PRIVATE BY DESIGN <span className="footer-dot">●</span>
-          </span>
-        </footer>
+          {stagedFiles.length > 0 && <ul className="staged-list" aria-label="Selected files">{stagedFiles.map((file, index) => <li key={`${file.name}-${index}`}><span>{file.name}</span><small>{formatBytes(file.size)}</small><button className="remove-file" aria-label={`Remove ${file.name}`} onClick={() => setStagedFiles((files) => files.filter((_, itemIndex) => itemIndex !== index))}>×</button></li>)}</ul>}
+          {stagedFiles.length > 0 && <p className="selection-hint">{stagedFiles.length} file{stagedFiles.length === 1 ? "" : "s"} selected. Choose a ready device above to send.</p>}
+        </section>
+        {activeTransfers.length > 0 && <section className="transfers-section"><div className="section-title"><h2>Transfers</h2><span className="quiet-count">{activeTransfers.length}</span></div>{activeTransfers.map((transfer) => <div className="transfer-row" key={transfer.transferId}><div className="transfer-heading"><strong>{transfer.direction === "incoming" ? `From ${transfer.peerName}` : `To ${transfer.peerName}`}</strong><span>{transfer.status === "pending-accept" ? "Waiting for approval" : transfer.status === "connecting" ? "Connecting" : "Transferring"}</span></div><progress value={transfer.totalBytes ? transfer.transferredBytes : 0} max={Math.max(transfer.totalBytes, 1)} aria-label={`Transfer to ${transfer.peerName}`} /><div className="transfer-foot"><span>{formatBytes(transfer.transferredBytes)} of {formatBytes(transfer.totalBytes)}</span>{transfer.direction === "outgoing" && <button className="text-button" onClick={() => clientRef.current?.cancelTransfer(transfer.transferId)}>Cancel</button>}</div></div>)}</section>}
+        <footer className="utility-footer"><span>Encrypted transfers. No account or cloud storage.</span><button className="text-button" onClick={() => setRecentOpen(true)}>Recent transfers</button></footer>
       </main>
-
-      {/* Incoming AirDrop Accept / Decline Modal */}
-      <TransferModal
-        offer={activeIncomingOffer}
-        senderPublicKey={incomingSenderPubKey}
-        onAccept={(transferId, trustSender) => {
-          if (trustSender && incomingSenderPubKey) {
-            clientRef.current?.toggleTrustedPeer(incomingSenderPubKey, true);
-          }
-          clientRef.current?.acceptIncomingTransfer(transferId);
-        }}
-        onDecline={(transferId) =>
-          clientRef.current?.declineIncomingTransfer(transferId)
-        }
-      />
-
-      {/* Universal Clipboard Modal */}
-      <ClipboardModal
-        peer={clipboardTargetPeer}
-        sasCode={
-          clipboardTargetPeer
-            ? snap.peerSecurity[clipboardTargetPeer.peerId]?.sasCode
-            : undefined
-        }
-        onClose={() => setClipboardTargetPeer(null)}
-        onSendClipboard={async (peerId, text) => {
-          if (!clientRef.current) return;
-          playBeamSentPulse(soundMutedRef.current);
-          await clientRef.current.sendClipboard(peerId, text);
-        }}
-      />
-
-      {/* Native CLI & Android Share Sheet Setup Modal */}
-      <SetupGuideModal
-        open={setupGuideOpen}
-        onClose={() => setSetupGuideOpen(false)}
-      />
-
-      {/* Crisp Floating Toast Notification */}
-      {toast && (
-        <div className="fixed bottom-5 right-5 z-40 max-w-sm w-[calc(100%-2.5rem)] rounded-2xl ab-elevated shadow-2xl p-4 border border-sky-500/30 flex items-start justify-between gap-3">
-          <div className="flex items-start gap-2.5 min-w-0">
-            <Sparkles className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-            <div className="min-w-0">
-              <p className="text-xs font-semibold text-[var(--ab-text)]">
-                {toast.title}
-              </p>
-              <p className="text-xs text-[var(--ab-muted)] font-mono-tabular break-all mt-0.5">
-                {toast.body}
-              </p>
-              {toast.copyText && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    navigator.clipboard
-                      ?.writeText(toast.copyText!)
-                      .catch(() => {});
-                    setToastCopied(true);
-                    setTimeout(() => setToast(null), 900);
-                  }}
-                  className="mt-2 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 cursor-pointer"
-                >
-                  {toastCopied ? (
-                    <>
-                      <Check className="w-3 h-3" />
-                      Copied!
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3 h-3" />
-                      Copy to Clipboard
-                    </>
-                  )}
-                </button>
-              )}
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => setToast(null)}
-            className="text-[var(--ab-muted)] hover:text-[var(--ab-text)] cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
+      {pairingOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPairingOpen(false); }}><section className="utility-modal pairing-modal" role="dialog" aria-modal="true" aria-labelledby="pair-title"><div className="modal-heading"><div><p className="section-kicker">PAIR DEVICES</p><h2 id="pair-title">Scan to pair</h2></div><button className="modal-close" aria-label="Close" onClick={() => setPairingOpen(false)}>×</button></div><p className="modal-explainer">Scan this code from AirBridge on your other device. Compare the verification code on both screens before accepting a transfer.</p><PairingDock pairCode={snap.pairCode} lanUrls={snap.lanUrls} transfers={[]} clipboardItems={[]} onJoinPairCode={(code) => clientRef.current?.joinPairCode(code)} onRotatePairCode={() => clientRef.current?.rotatePairCode()} onCancelTransfer={(id) => clientRef.current?.cancelTransfer(id)} /><button className="text-button advanced-toggle" onClick={() => setShowAdvanced((value) => !value)}>{showAdvanced ? "Hide network details" : "Having trouble pairing?"}</button>{showAdvanced && <div className="help-copy"><p>Both devices must be running the AirBridge app on the same local network. Guest Wi-Fi and some office networks block device-to-device connections.</p><p>Current service: {snap.connectionState}. {snap.lanUrls.length ? `Local address: ${snap.lanUrls[0]}` : "No local address was reported."}</p></div>}</section></div>}
+      {recentOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setRecentOpen(false); }}><section className="utility-modal recent-modal" role="dialog" aria-modal="true" aria-labelledby="recent-title"><div className="modal-heading"><div><p className="section-kicker">HISTORY</p><h2 id="recent-title">Recent transfers</h2></div><button className="modal-close" aria-label="Close" onClick={() => setRecentOpen(false)}>×</button></div>{recentTransfers.length ? <div className="recent-list">{recentTransfers.slice().reverse().map((transfer) => <div className="recent-row" key={transfer.transferId}><span><strong>{transfer.files.map((file) => file.name).join(", ")}</strong><small>{transfer.direction === "incoming" ? "Received" : "Sent"} · {transfer.peerName}</small></span><span className="recent-state">{transfer.status === "completed" ? "Complete" : transfer.status === "cancelled" ? "Cancelled" : transfer.status === "declined" ? "Declined" : "Failed"}</span></div>)}</div> : <p className="empty-history">Completed transfers will appear here.</p>}</section></div>}
+      {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="utility-modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="modal-heading"><div><p className="section-kicker">PREFERENCES</p><h2 id="settings-title">Settings</h2></div><button className="modal-close" aria-label="Close" onClick={() => setSettingsOpen(false)}>×</button></div><label className="setting-field">Device name<input defaultValue={deviceName} maxLength={40} onBlur={(event) => { const name = event.target.value.trim(); if (name && name !== deviceName) handleRenameDevice(name); }} /></label><label className="setting-toggle"><span><strong>Dark appearance</strong><small>Use a monochrome dark theme</small></span><input type="checkbox" checked={darkMode} onChange={() => setDarkMode((value) => !value)} /></label><div className="settings-info"><strong>About connection status</strong><p>“Running” means this app is connected to its transfer service. “Nearby” means another device was discovered; a secure session is only ready after pairing completes.</p></div><div className="settings-info"><strong>Privacy and consent</strong><p>Incoming transfers ask before saving. Auto-accept is off. Revoke trusted devices in advanced trust management.</p></div><a className="text-button advanced-toggle" href="https://github.com/DigantaDey/android-to-mac#important-current-product-limits" target="_blank" rel="noreferrer">About this version</a></section></div>}
+      <TransferModal offer={activeIncomingOffer} senderPublicKey={incomingSenderPubKey} onAccept={(transferId, trustSender) => { if (trustSender && incomingSenderPubKey) clientRef.current?.toggleTrustedPeer(incomingSenderPubKey, true); clientRef.current?.acceptIncomingTransfer(transferId); }} onDecline={(transferId) => clientRef.current?.declineIncomingTransfer(transferId)} />
+      {toast && <div className="utility-toast" role="status"><strong>{toast.title}</strong><span>{toast.body}</span><button aria-label="Dismiss notification" onClick={() => setToast(null)}>×</button></div>}
     </div>
   );
 }
