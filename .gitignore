@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+.vite/
+
+# Logs & runtime
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Local environment & test artifacts
+.env
+.env.local
+coverage/
+tmp/

@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+:root {
+  --ab-bg: #f3f5f9;
+  --ab-bg-subtle: #e8ecf4;
+  --ab-surface: rgba(255, 255, 255, 0.86);
+  --ab-surface-elevated: #ffffff;
+  --ab-surface-hover: rgba(15, 23, 42, 0.04);
+  --ab-border: rgba(15, 23, 42, 0.09);
+  --ab-border-strong: rgba(15, 23, 42, 0.16);
+  --ab-text: #0f172a;
+  --ab-text-secondary: #334155;
+  --ab-muted: #64748b;
+  --ab-ring: rgba(14, 165, 233, 0.16);
+  --ab-radar-line: rgba(15, 23, 42, 0.08);
+}
+
+html.dark {
+  --ab-bg: #080a0f;
+  --ab-bg-subtle: #0d111a;
+  --ab-surface: rgba(16, 20, 30, 0.78);
+  --ab-surface-elevated: #141926;
+  --ab-surface-hover: rgba(255, 255, 255, 0.05);
+  --ab-border: rgba(255, 255, 255, 0.08);
+  --ab-border-strong: rgba(255, 255, 255, 0.16);
+  --ab-text: #f8fafc;
+  --ab-text-secondary: #cbd5e1;
+  --ab-muted: #94a3b8;
+  --ab-ring: rgba(56, 189, 248, 0.18);
+  --ab-radar-line: rgba(148, 163, 184, 0.11);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background-color: var(--ab-bg);
+  color: var(--ab-text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Inter",
+    "Roboto", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+.font-mono-tabular {
+  font-family: "SF Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.ab-glass {
+  background: var(--ab-surface);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--ab-border);
+}
+
+.ab-elevated {
+  background: var(--ab-surface-elevated);
+  border: 1px solid var(--ab-border-strong);
+}
+
+@keyframes radarPulse {
+  0% {
+    transform: scale(0.82);
+    opacity: 0.55;
+  }
+  70% {
+    transform: scale(1.22);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.22);
+    opacity: 0;
+  }
+}
+
+@keyframes radarSweep {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-radar-pulse {
+  animation: radarPulse 3.4s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.animate-radar-sweep {
+  animation: radarSweep 14s linear infinite;
+}
