@@ -1,0 +1,47 @@
+{
+  "name": "AirBridge — Android ↔ Mac Drop",
+  "short_name": "AirBridge",
+  "description": "Blazing-fast, end-to-end encrypted AirDrop & Universal Clipboard between Android and MacBook.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#080A0F",
+  "theme_color": "#080A0F",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "share_target": {
+    "action": "/_share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [
+        {
+          "name": "files",
+          "accept": [
+            "*/*",
+            "application/pdf",
+            ".pdf",
+            "image/*",
+            "video/*",
+            "audio/*",
+            "text/*",
+            "application/*",
+            ".zip",
+            ".apk",
+            ".dmg"
+          ]
+        }
+      ]
+    }
+  }
+}
