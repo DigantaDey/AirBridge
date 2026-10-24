@@ -7,13 +7,17 @@ interface ClipboardCenterProps {
   items: ClipboardBeamItem[];
   autoSync: boolean;
   hostClipboardActive: boolean;
+  /** When false, incoming clipboard beams are blocked on this device. */
+  receiveEnabled: boolean;
   /** Preselect this peer when opened from a device row. */
   initialPeerId?: string | null;
   /** Text shared via the Android Share Sheet arrives prefilled. */
   prefill?: string;
   onToggleAutoSync: (enabled: boolean) => void;
+  onToggleReceive: (enabled: boolean) => void;
   onMarkCopied?: (text: string) => void;
   onSend: (peerId: string, text: string) => Promise<void>;
+  onSendImage: (peerId: string, dataUrl: string, name?: string) => Promise<void>;
   onClose: () => void;
 }
 
@@ -30,11 +34,14 @@ export function ClipboardCenter({
   items,
   autoSync,
   hostClipboardActive,
+  receiveEnabled,
   initialPeerId,
   prefill,
   onToggleAutoSync,
+  onToggleReceive,
   onMarkCopied,
   onSend,
+  onSendImage,
   onClose,
 }: ClipboardCenterProps) {
   const [text, setText] = useState(prefill ?? "");
@@ -47,6 +54,9 @@ export function ClipboardCenter({
   const [error, setError] = useState<string | null>(null);
   const [copiedBeamId, setCopiedBeamId] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
+  const [imageName, setImageName] = useState<string>("");
+  const imageInputRef = useRef<HTMLInputElement>(null);
 
   // Peers can arrive after the modal opened (e.g. right after the Share Sheet
   // redirected in). Keep the destination select on a valid value.
@@ -71,10 +81,46 @@ export function ClipboardCenter({
     }
   };
 
+  const fileToDataUrl = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      if (!file.type.startsWith('image/')) { reject(new Error('Only images are allowed here.')); return; }
+      if (file.size > 5 * 1024 * 1024) { reject(new Error('Image must be under 5 MB.')); return; }
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(new Error('Could not read image'));
+      reader.readAsDataURL(file);
+    });
+
+  const handleImageFile = async (file: File) => {
+    try {
+      const dataUrl = await fileToDataUrl(file);
+      setImageDataUrl(dataUrl);
+      setImageName(file.name);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not load image');
+    }
+  };
+
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (!peerId || sending) return;
+    // Prefer image if present
+    if (imageDataUrl) {
+      setSending(true);
+      setError(null);
+      try {
+        await onSendImage(peerId, imageDataUrl, imageName);
+        setImageDataUrl(null);
+        setImageName('');
+        textareaRef.current?.focus();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not beam this image.');
+      } finally { setSending(false); }
+      return;
+    }
     const trimmed = text.trim();
-    if (!trimmed || !peerId || sending) return;
+    if (!trimmed) return;
     setSending(true);
     setError(null);
     try {
@@ -90,10 +136,51 @@ export function ClipboardCenter({
     }
   };
 
+  const handlePasteWithImage = async (e: React.ClipboardEvent) => {
+    // If clipboard contains an image, capture it
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it.type.startsWith('image/')) {
+        const file = it.getAsFile();
+        if (file) {
+          e.preventDefault();
+          await handleImageFile(file);
+          return;
+        }
+      }
+    }
+  };
+
+  const handleDropImage = async (e: React.DragEvent) => {
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      const file = files[0];
+      if (file.type.startsWith('image/')) {
+        e.preventDefault();
+        await handleImageFile(file);
+      }
+    }
+  };
+
   const copyItem = (item: ClipboardBeamItem) => {
     onMarkCopied?.(item.text);
     try {
-      navigator.clipboard?.writeText(item.text).catch(() => {});
+      if (item.contentType === 'image' && item.imageDataUrl) {
+        // Try to write image to clipboard as well; fallback to text copy
+        if (navigator.clipboard && (window as unknown as { ClipboardItem?: unknown }).ClipboardItem) {
+          fetch(item.imageDataUrl).then(r => r.blob()).then(blob => {
+            const ClipboardItemCtor = (window as unknown as { ClipboardItem: new (d: Record<string, Blob>) => unknown }).ClipboardItem;
+            const ci = new ClipboardItemCtor({ [blob.type]: blob });
+            (navigator.clipboard.write as (items: unknown[]) => Promise<void>)([ci]).catch(() => navigator.clipboard?.writeText(item.imageDataUrl!));
+          }).catch(() => navigator.clipboard?.writeText(item.text).catch(() => {}));
+        } else {
+          navigator.clipboard?.writeText(item.text).catch(() => {});
+        }
+      } else {
+        navigator.clipboard?.writeText(item.text).catch(() => {});
+      }
     } catch {
       // ignore — user can still select the text manually
     }
@@ -103,7 +190,17 @@ export function ClipboardCenter({
     }, 1500);
   };
 
-  const canSend = text.trim().length > 0 && Boolean(peerId) && !sending;
+  const saveImageItem = (item: ClipboardBeamItem) => {
+    if (!item.imageDataUrl) return;
+    const a = document.createElement('a');
+    a.href = item.imageDataUrl;
+    a.download = item.imageName || `airbridge-image-${item.beamId.slice(0,6)}.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const canSend = (text.trim().length > 0 || Boolean(imageDataUrl)) && Boolean(peerId) && !sending;
 
   return (
     <div
@@ -135,8 +232,8 @@ export function ClipboardCenter({
         </div>
         <p className="modal-explainer">
           Text, links, OTP codes and snippets are end-to-end encrypted (the same
-          AES-256-GCM session as file transfers). Incoming text is copied to this
-          device&apos;s clipboard automatically.
+          AES-256-GCM session as file transfers). Incoming content is copied to this
+          device&apos;s clipboard automatically. Images up to 5 MB can be beamed as well.
         </p>
 
         <label className="setting-toggle clipboard-auto-toggle">
@@ -154,16 +251,41 @@ export function ClipboardCenter({
             onChange={(event) => onToggleAutoSync(event.target.checked)}
           />
         </label>
+        <label className="setting-toggle clipboard-auto-toggle">
+          <span>
+            <strong>Receive clipboard beams</strong>
+            <small>
+              {receiveEnabled ? "Incoming beams are saved and copied to clipboard. Turn off to block receiving while still beaming." : "Receiving is paused — you can still beam to the other device."}
+            </small>
+          </span>
+          <input
+            type="checkbox"
+            checked={receiveEnabled}
+            onChange={(event) => onToggleReceive(event.target.checked)}
+          />
+        </label>
+        {!receiveEnabled && <p className="clipboard-empty" role="status">Receiving is blocked on this device. Outgoing beams still work.</p>}
 
-        <form className="clipboard-compose" onSubmit={handleSubmit}>
+        <form className="clipboard-compose" onSubmit={handleSubmit} onDragOver={(e) => e.preventDefault()} onDrop={handleDropImage}>
           <textarea
             ref={textareaRef}
             value={text}
             onChange={(event) => setText(event.target.value)}
+            onPaste={handlePasteWithImage}
             rows={4}
-            placeholder="Paste a link, 2FA code, Wi-Fi password, command…"
+            placeholder="Paste a link, 2FA code, Wi-Fi password, command… or drop/paste an image"
             aria-label="Text to send to the other device"
           />
+          <input ref={imageInputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" className="visually-hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleImageFile(f); e.target.value=''; }} />
+          {imageDataUrl && (
+            <div className="clipboard-image-preview">
+              <img src={imageDataUrl} alt="preview" />
+              <div className="clipboard-image-meta">
+                <span>{imageName} • {(imageDataUrl.length * 3 / 4 / 1024).toFixed(0)} KB</span>
+                <button type="button" className="text-button" onClick={() => { setImageDataUrl(null); setImageName(''); }}>Remove</button>
+              </div>
+            </div>
+          )}
           {error && <p className="clipboard-error" role="alert">{error}</p>}
           <div className="clipboard-actions">
             <div className="clipboard-destination">
@@ -193,12 +315,13 @@ export function ClipboardCenter({
               >
                 Paste from this device
               </button>
+              <button type="button" className="quiet-button" onClick={() => imageInputRef.current?.click()}>Add image</button>
               <button
                 type="submit"
                 className="beam-button"
                 disabled={!canSend}
               >
-                {sending ? "Beaming…" : "Beam text"}
+                {sending ? "Beaming…" : imageDataUrl ? "Beam image" : "Beam text"}
               </button>
             </div>
           </div>
@@ -225,7 +348,14 @@ export function ClipboardCenter({
                     </span>
                     <span className="clipboard-badge">{item.contentType}</span>
                   </div>
-                  <pre>{item.text}</pre>
+                  {item.contentType === 'image' && item.imageDataUrl ? (
+                    <div className="clipboard-image-history">
+                      <img src={item.imageDataUrl} alt={item.imageName || 'shared image'} />
+                      {item.imageName && <small>{item.imageName}</small>}
+                    </div>
+                  ) : (
+                    <pre>{item.text}</pre>
+                  )}
                   <div className="clipboard-item-actions">
                     {item.contentType === "url" && (
                       <a
@@ -236,6 +366,9 @@ export function ClipboardCenter({
                       >
                         Open URL
                       </a>
+                    )}
+                    {item.contentType === 'image' && item.imageDataUrl && (
+                      <button type="button" className="text-button" onClick={() => saveImageItem(item)}>Save</button>
                     )}
                     <button
                       type="button"

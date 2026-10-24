@@ -103,8 +103,10 @@ export type ControlPayload =
   | {
       kind: 'clipboard-beam';
       beamId: string;
-      text: string;
-      contentType: 'url' | 'otp' | 'code' | 'text';
+      text?: string;
+      imageDataUrl?: string;
+      imageName?: string;
+      contentType: 'url' | 'otp' | 'code' | 'text' | 'image';
       timestamp: number;
     }
   | {
@@ -394,8 +396,15 @@ export function formatSpeed(bytesPerSec: number): string {
   return `${formatBytes(bytesPerSec)}/s`;
 }
 
-export function classifyTextPayload(text: string): 'url' | 'otp' | 'code' | 'text' {
+export const MAX_CLIPBOARD_IMAGE_DATAURL = 7_000_000; // ~5MB binary as data URL
+
+export function isValidClipboardImageDataUrl(dataUrl: string): boolean {
+  return typeof dataUrl === 'string' && dataUrl.length > 0 && dataUrl.length <= MAX_CLIPBOARD_IMAGE_DATAURL && /^data:image\/(png|jpeg|jpg|webp|gif|bmp);base64,/.test(dataUrl);
+}
+
+export function classifyTextPayload(text: string): 'url' | 'otp' | 'code' | 'text' | 'image' {
   const trimmed = text.trim();
+  if (isValidClipboardImageDataUrl(trimmed)) return 'image';
   if (/^https?:\/\/\S+$/i.test(trimmed)) return 'url';
   if (/^\d{4,8}$/.test(trimmed) || /\b(?:code|otp|pin|verification)\b.*?\b\d{4,8}\b/i.test(trimmed)) {
     return 'otp';

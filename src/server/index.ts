@@ -1,6 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import type { TLSSocket } from 'node:tls';
@@ -207,6 +208,10 @@ export async function createAirBridgeServer(
     const persisted = await loadPersistedDownloadDir(receivedSettingsPath);
     if (persisted) daemonCfg.downloadDir = persisted;
   }
+  // Ensure the received folder exists when daemon is enabled (default in dev/prod)
+  if (daemonCfg.enabled) {
+    await fs.promises.mkdir(daemonCfg.downloadDir, { recursive: true }).catch(() => {});
+  }
   app.get('/api/received-folder', (req, res) => {
     if (!isLoopbackRequest(req)) { res.status(403).json({ error: 'Received-folder settings are restricted to this device.' }); return; }
     res.json({ downloadDir: daemonCfg.downloadDir, autoSaveToDownloads: daemonCfg.enabled && daemonCfg.autoSaveToDownloads, enabled: daemonCfg.enabled });
@@ -238,6 +243,48 @@ export async function createAirBridgeServer(
       await (options.openFolder ?? openFolderInFileManager)(target);
       res.json({ ok: true, path: target });
     } catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : 'Could not open folder' }); }
+  });
+
+  // Loopback-only filesystem browser for the "Browse…" path picker in Settings.
+  // Exposes only directory listings, never file contents.
+  app.get('/api/fs/list', async (req, res) => {
+    if (!isLoopbackRequest(req)) { res.status(403).json({ error: 'Filesystem browsing is restricted to this device.' }); return; }
+    try {
+      const raw = typeof req.query.path === 'string' ? req.query.path : daemonCfg.downloadDir;
+      const resolved = path.resolve(raw);
+      const stat = await fs.promises.stat(resolved);
+      if (!stat.isDirectory()) { res.status(400).json({ error: 'Not a directory' }); return; }
+      const entries = await fs.promises.readdir(resolved, { withFileTypes: true });
+      const dirs = entries
+        .filter((e) => e.isDirectory())
+        .map((e) => ({ name: e.name, isDirectory: true, path: path.join(resolved, e.name) }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      const parent = path.dirname(resolved);
+      res.json({
+        current: resolved,
+        parent: parent !== resolved ? parent : null,
+        home: os.homedir(),
+        downloadDir: daemonCfg.downloadDir,
+        entries: dirs,
+      });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Cannot list directory' });
+    }
+  });
+  app.post('/api/fs/mkdir', express.json({ limit: '16kb' }), async (req, res) => {
+    if (!isLoopbackRequest(req)) { res.status(403).json({ error: 'Restricted to this device.' }); return; }
+    try {
+      const { base, name } = req.body as { base?: unknown; name?: unknown };
+      if (typeof base !== 'string' || typeof name !== 'string') { res.status(400).json({ error: 'base and name required' }); return; }
+      const sanitized = name.replace(/[\\/:*?\"<>|\\x00-\\x1f]/g, '_').trim();
+      if (!sanitized || sanitized === '.' || sanitized === '..') { res.status(400).json({ error: 'Invalid folder name' }); return; }
+      const resolvedBase = path.resolve(base);
+      const stat = await fs.promises.stat(resolvedBase).catch(() => null);
+      if (!stat?.isDirectory()) { res.status(400).json({ error: 'Base is not a directory' }); return; }
+      const target = path.join(resolvedBase, sanitized);
+      await fs.promises.mkdir(target, { recursive: true });
+      res.json({ ok: true, path: target });
+    } catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : 'Cannot create folder' }); }
   });
 
   // Health & runtime diagnostics endpoint
