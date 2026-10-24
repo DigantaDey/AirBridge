@@ -2,9 +2,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import WebSocket from 'ws';
 import { createAirBridgeServer, type AirBridgeServerInstance } from '../src/server/index.js';
 import { createCliBeamSession, type CliBeamSession } from '../src/server/cliSendSession.js';
+import { HostClipboardMonitor, type HostClipboardProvider } from '../src/server/hostClipboard.js';
 import { sanitizeFilename } from '../src/server/macIntegration.js';
+import type { ServerToClientMessage } from '../src/shared/protocol.js';
 
 describe('CLI Beam Resumable Range Streaming & macOS Local Daemon Save', () => {
   let tmpDir: string;
@@ -100,5 +103,146 @@ describe('CLI Beam Resumable Range Streaming & macOS Local Daemon Save', () => {
     });
     const j2 = (await r2.json()) as { finalName: string };
     expect(j2.finalName).toBe('CameraRoll (1).jpg');
+  });
+});
+
+describe('HostClipboardMonitor & Loopback Desktop Daemon Isolation', () => {
+  it('seeds initial OS clipboard without firing onClipboardChange and suppresses echo writes', async () => {
+    let osClipboard = 'Pre-existing secret on clipboard';
+    const provider: HostClipboardProvider = {
+      isSupported: () => true,
+      readText: async () => osClipboard,
+      writeText: async (text: string) => {
+        osClipboard = text;
+        return true;
+      },
+    };
+
+    const events: string[] = [];
+    const monitor = new HostClipboardMonitor({
+      provider,
+      pollIntervalMs: 60,
+      onClipboardChange: (text: string) => events.push(text),
+    });
+
+    monitor.setShouldWatch(true);
+    await new Promise((r) => setTimeout(r, 120));
+    expect(events).toEqual([]);
+
+    // User copies new text in another macOS app
+    osClipboard = 'Copied from VS Code';
+    await new Promise((r) => setTimeout(r, 150));
+    expect(events).toEqual(['Copied from VS Code']);
+
+    // Incoming beam from Android writes to macOS clipboard -> must NOT echo back
+    await monitor.writeClipboard('Incoming from Android');
+    expect(osClipboard).toBe('Incoming from Android');
+    await new Promise((r) => setTimeout(r, 160));
+    expect(events).toEqual(['Copied from VS Code']);
+
+    monitor.close();
+  });
+
+  it('scopes localDaemon & host-clipboard bridge strictly to host desktop clients', async () => {
+    let osClipboard = 'Baseline';
+    const provider: HostClipboardProvider = {
+      isSupported: () => true,
+      readText: async () => osClipboard,
+      writeText: async (text: string) => {
+        osClipboard = text;
+        return true;
+      },
+    };
+
+    const srv = await createAirBridgeServer({
+      port: 0,
+      host: '127.0.0.1',
+      mode: 'test',
+      enableMdns: false,
+      hostClipboard: provider,
+      hostClipboardPollMs: 120,
+      daemonConfig: {
+        enabled: true,
+        downloadDir: os.tmpdir(),
+        autoSaveToDownloads: true,
+        notifyOnReceive: false,
+      },
+    });
+
+    const macMessages: ServerToClientMessage[] = [];
+    const androidMessages: ServerToClientMessage[] = [];
+
+    const connectClient = (
+      platform: 'macos' | 'android',
+      sink: ServerToClientMessage[]
+    ): Promise<WebSocket> =>
+      new Promise((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${srv.port}/ws`);
+        ws.on('message', (raw) => {
+          const msg = JSON.parse(raw.toString()) as ServerToClientMessage;
+          sink.push(msg);
+          if (msg.type === 'welcome') resolve(ws);
+        });
+        ws.on('open', () => {
+          ws.send(
+            JSON.stringify({
+              type: 'hello',
+              pairCode: 'CLIP99',
+              visibility: 'nearby-and-paired',
+              device: {
+                deviceId: platform === 'macos' ? 'aaaa1111bbbb2222' : 'cccc3333dddd4444',
+                name: platform === 'macos' ? 'MacBook Pro' : 'Pixel 9 Pro',
+                platform,
+                model: platform,
+                formFactor: platform === 'macos' ? 'laptop' : 'phone',
+                publicKey: 'AAAA',
+              },
+            })
+          );
+        });
+        ws.on('error', reject);
+      });
+
+    const macWs = await connectClient('macos', macMessages);
+    const androidWs = await connectClient('android', androidMessages);
+
+    try {
+      const macWelcome = macMessages.find((m) => m.type === 'welcome');
+      const androidWelcome = androidMessages.find((m) => m.type === 'welcome');
+      expect(macWelcome?.type === 'welcome' && macWelcome.localDaemon.enabled).toBe(true);
+      expect(macWelcome?.type === 'welcome' && macWelcome.localDaemon.clipboardBridge).toBe(true);
+      expect(androidWelcome?.type === 'welcome' && androidWelcome.localDaemon.enabled).toBe(false);
+      expect(
+        androidWelcome?.type === 'welcome' && Boolean(androidWelcome.localDaemon.clipboardBridge)
+      ).toBe(false);
+
+      // Wait for initial monitor seed, then simulate external Cmd+C on MacBook
+      await new Promise((r) => setTimeout(r, 160));
+      osClipboard = 'Background macOS copy';
+      await new Promise((r) => setTimeout(r, 220));
+
+      expect(
+        macMessages.some(
+          (m) => m.type === 'host-clipboard' && m.text === 'Background macOS copy'
+        )
+      ).toBe(true);
+      expect(androidMessages.some((m) => m.type === 'host-clipboard')).toBe(false);
+
+      // Android client attempting set-host-clipboard is ignored; Mac client updates host clipboard without echo
+      androidWs.send(JSON.stringify({ type: 'set-host-clipboard', text: 'Spoofed' }));
+      await new Promise((r) => setTimeout(r, 80));
+      expect(osClipboard).toBe('Background macOS copy');
+
+      macWs.send(JSON.stringify({ type: 'set-host-clipboard', text: 'Beamed from Pixel' }));
+      await new Promise((r) => setTimeout(r, 220));
+      expect(osClipboard).toBe('Beamed from Pixel');
+      expect(
+        macMessages.some((m) => m.type === 'host-clipboard' && m.text === 'Beamed from Pixel')
+      ).toBe(false);
+    } finally {
+      macWs.close();
+      androidWs.close();
+      await srv.close();
+    }
   });
 });

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
+import os from 'node:os';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
   type ClientToServerMessage,
@@ -16,11 +17,14 @@ import {
   overwriteRoutedSourcePeerId,
   unwrapRoutedRelayFrame,
 } from '../shared/protocol.js';
+import { HostClipboardMonitor, type HostClipboardProvider } from './hostClipboard.js';
+import { isLoopbackAddress } from './tls.js';
 
 interface ConnectedClient {
   peerId: string;
   ws: WebSocket;
   networkKey: string;
+  isLoopback: boolean;
   pairCode: string;
   visibility: VisibilityMode;
   device: DeviceProfile;
@@ -66,6 +70,20 @@ function generatePeerId(): string {
   return crypto.randomBytes(8).toString('hex'); // 16 hex chars
 }
 
+function isLocalMachineAddress(remoteAddress: string | undefined): boolean {
+  if (!remoteAddress) return false;
+  if (isLoopbackAddress(remoteAddress)) return true;
+  const normalized = remoteAddress.replace(/^::ffff:/, '');
+  const interfaces = os.networkInterfaces();
+  for (const list of Object.values(interfaces)) {
+    if (!list) continue;
+    for (const info of list) {
+      if (info.address === normalized) return true;
+    }
+  }
+  return false;
+}
+
 function sanitizePeerId(candidate?: string): string {
   if (candidate && /^[0-9a-f]{16}$/.test(candidate)) {
     return candidate;
@@ -77,15 +95,26 @@ export class SignalingHub {
   public readonly wss: WebSocketServer;
   private readonly clients = new Map<string, ConnectedClient>();
   private readonly pingTimer: NodeJS.Timeout;
+  private readonly clipboardMonitor: HostClipboardMonitor | null;
   private getLanUrls: () => string[];
   private getDaemonStatus: () => LocalDaemonStatus;
 
   constructor(opts: {
     getLanUrls: () => string[];
     getDaemonStatus: () => LocalDaemonStatus;
+    clipboardProvider?: HostClipboardProvider | null;
+    clipboardPollMs?: number;
   }) {
     this.getLanUrls = opts.getLanUrls;
     this.getDaemonStatus = opts.getDaemonStatus;
+    this.clipboardMonitor =
+      opts.clipboardProvider && opts.clipboardProvider.isSupported()
+        ? new HostClipboardMonitor({
+            provider: opts.clipboardProvider,
+            pollIntervalMs: opts.clipboardPollMs,
+            onClipboardChange: (text) => this.deliverHostClipboard(text),
+          })
+        : null;
 
     // Disable perMessageDeflate: encrypted AES-GCM binary frames are incompressible;
     // skipping zlib cuts CPU load dramatically and maximizes relay throughput.
@@ -103,6 +132,7 @@ export class SignalingHub {
           client.ws.terminate();
           this.clients.delete(peerId);
           this.broadcastPeerUpdatesFor(client);
+          this.syncClipboardWatchState();
           continue;
         }
         client.isAlive = false;
@@ -122,6 +152,7 @@ export class SignalingHub {
 
   public close(): void {
     clearInterval(this.pingTimer);
+    this.clipboardMonitor?.close();
     for (const client of this.clients.values()) {
       try {
         client.ws.close();
@@ -133,8 +164,63 @@ export class SignalingHub {
     this.wss.close();
   }
 
+  private isHostDesktopClient(client: ConnectedClient): boolean {
+    return (
+      client.isLoopback &&
+      client.device.platform !== 'android' &&
+      client.device.platform !== 'ios'
+    );
+  }
+
+  private resolveClientDaemonStatus(client: ConnectedClient): LocalDaemonStatus {
+    if (!this.isHostDesktopClient(client)) {
+      return {
+        enabled: false,
+        platform: 'remote',
+        hostname: '',
+        autoSaveToDownloads: false,
+        clipboardBridge: false,
+      };
+    }
+    return {
+      ...this.getDaemonStatus(),
+      clipboardBridge: Boolean(this.clipboardMonitor?.isSupported()),
+    };
+  }
+
+  private syncClipboardWatchState(): void {
+    if (!this.clipboardMonitor) return;
+    let hasActiveHostClient = false;
+    for (const client of this.clients.values()) {
+      if (this.isHostDesktopClient(client) && client.ws.readyState === WebSocket.OPEN) {
+        hasActiveHostClient = true;
+        break;
+      }
+    }
+    this.clipboardMonitor.setShouldWatch(hasActiveHostClient);
+  }
+
+  private deliverHostClipboard(text: string): void {
+    let target: ConnectedClient | null = null;
+    for (const client of this.clients.values()) {
+      if (this.isHostDesktopClient(client) && client.ws.readyState === WebSocket.OPEN) {
+        if (!target || client.connectedAt >= target.connectedAt) {
+          target = client;
+        }
+      }
+    }
+    if (target) {
+      this.sendJson(target.ws, {
+        type: 'host-clipboard',
+        text,
+        timestamp: Date.now(),
+      });
+    }
+  }
+
   private handleConnection(ws: WebSocket, req: IncomingMessage): void {
     const networkKey = deriveNetworkKey(req);
+    const isLoopback = isLocalMachineAddress(req.socket.remoteAddress);
     let registeredClient: ConnectedClient | null = null;
 
     ws.on('pong', () => {
@@ -183,6 +269,7 @@ export class SignalingHub {
           peerId,
           ws,
           networkKey,
+          isLoopback,
           pairCode,
           visibility: msg.visibility ?? 'nearby',
           device: msg.device,
@@ -191,13 +278,14 @@ export class SignalingHub {
         };
 
         this.clients.set(peerId, registeredClient);
+        this.syncClipboardWatchState();
 
         this.sendJson(ws, {
           type: 'welcome',
           peerId,
           pairCode,
           lanUrls: this.getLanUrls(),
-          localDaemon: this.getDaemonStatus(),
+          localDaemon: this.resolveClientDaemonStatus(registeredClient),
           peers: this.computeVisiblePeers(registeredClient),
         });
 
@@ -214,6 +302,7 @@ export class SignalingHub {
         case 'update-profile': {
           registeredClient.device = msg.device;
           registeredClient.visibility = msg.visibility;
+          this.syncClipboardWatchState();
           this.broadcastPeerUpdatesFor(registeredClient);
           break;
         }
@@ -277,12 +366,25 @@ export class SignalingHub {
           }
           break;
         }
+
+        case 'set-host-clipboard': {
+          if (
+            this.isHostDesktopClient(registeredClient) &&
+            typeof msg.text === 'string' &&
+            msg.text.length > 0 &&
+            msg.text.length <= 512_000
+          ) {
+            this.clipboardMonitor?.writeClipboard(msg.text).catch(() => {});
+          }
+          break;
+        }
       }
     });
 
     ws.on('close', () => {
       if (registeredClient && this.clients.get(registeredClient.peerId)?.ws === ws) {
         this.clients.delete(registeredClient.peerId);
+        this.syncClipboardWatchState();
         this.broadcastPeerUpdatesFor(registeredClient);
       }
     });

@@ -169,6 +169,7 @@ function setNativeValue(
 
 describe("AirBridge app UI", () => {
   beforeEach(async () => {
+    localStorage.clear();
     FakeSocket.instances = [];
     FakeSocket.lastInstance = null;
     const peerKeys = await webcrypto.subtle.generateKey(
@@ -335,5 +336,140 @@ describe("AirBridge app UI", () => {
       "https://example.com/login?t=abc",
     );
     expect(historyItem?.querySelector("a")?.textContent).toContain("Open URL");
+  });
+
+  it("auto-beams copied text on copy event and on background host-clipboard events without opening the Clipboard modal", async () => {
+    const { container } = await renderApp();
+    const socket = FakeSocket.lastInstance!;
+
+    // 1. Simulate pressing Cmd+C / Ctrl+C on the page without opening Clipboard modal
+    await act(async () => {
+      const copyEvent = new Event("copy", { bubbles: true }) as Event & {
+        clipboardData: { getData: (type: string) => string };
+      };
+      copyEvent.clipboardData = {
+        getData: (type: string) =>
+          type === "text/plain" ? "copied-inline-snippet" : "",
+      };
+      document.dispatchEvent(copyEvent);
+      await new Promise((r) => setTimeout(r, 40));
+    });
+
+    let controlFrames = FakeSocket.instances.flatMap((s) =>
+      s.sentMessages.filter((m) => m.type === "transfer-control"),
+    );
+    expect(controlFrames.length).toBeGreaterThan(0);
+    expect(container.querySelector(".utility-toast")?.textContent).toContain(
+      "Clipboard beamed to Pixel Phone",
+    );
+
+    // 2. Simulate background OS clipboard push from server (user copied in another app)
+    const countBeforeHostPush = controlFrames.length;
+    await act(async () => {
+      socket.pushServerMessage({
+        type: "host-clipboard",
+        text: "copied-in-external-app-9912",
+        timestamp: Date.now(),
+      });
+      await new Promise((r) => setTimeout(r, 40));
+    });
+
+    controlFrames = FakeSocket.instances.flatMap((s) =>
+      s.sentMessages.filter((m) => m.type === "transfer-control"),
+    );
+    expect(controlFrames.length).toBeGreaterThan(countBeforeHostPush);
+
+    // Verify both auto-beamed items are recorded in Clipboard history
+    await act(async () => {
+      findButton(container, "Clipboard").click();
+    });
+    const historyTexts = Array.from(
+      container.querySelectorAll(".clipboard-item pre"),
+    ).map((el) => el.textContent);
+    expect(historyTexts).toContain("copied-in-external-app-9912");
+    expect(historyTexts).toContain("copied-inline-snippet");
+  });
+
+  it("displays Recent transfers newest-first on Android with header count and Save button for received files", async () => {
+    const { container } = await renderApp();
+    const socket = FakeSocket.lastInstance!;
+
+    // 1. Reconcile two historical transfers from MacBook via history-sync (intentionally sent oldest-first)
+    await act(async () => {
+      socket.pushServerMessage({
+        type: "transfer-control",
+        from: "1122334455667788",
+        envelope: {
+          encrypted: false,
+          payload: {
+            kind: "history-sync",
+            transfers: [
+              {
+                transferId: "hist-older",
+                peerName: "MacBook Pro",
+                peerPlatform: "macos",
+                direction: "outgoing",
+                status: "completed",
+                transport: "webrtc",
+                files: [
+                  {
+                    index: 0,
+                    name: "older-notes.txt",
+                    size: 1024,
+                    mimeType: "text/plain",
+                    totalChunks: 1,
+                    chunkSize: 65536,
+                  },
+                ],
+                totalBytes: 1024,
+                transferredBytes: 1024,
+                startedAt: 1_700_000_000_000,
+                completedAt: 1_700_000_001_000,
+                sasCode: "123 456",
+              },
+              {
+                transferId: "hist-newer",
+                peerName: "MacBook Pro",
+                peerPlatform: "macos",
+                direction: "outgoing",
+                status: "completed",
+                transport: "webrtc",
+                files: [
+                  {
+                    index: 0,
+                    name: "newest-invoice.pdf",
+                    size: 20480,
+                    mimeType: "application/pdf",
+                    totalChunks: 1,
+                    chunkSize: 65536,
+                  },
+                ],
+                totalBytes: 20480,
+                transferredBytes: 20480,
+                startedAt: 1_700_000_050_000,
+                completedAt: 1_700_000_055_000,
+                sasCode: "123 456",
+              },
+            ],
+          },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+    });
+
+    // Header badge reflects count
+    const recentBtn = findButton(container, "Recent");
+    expect(recentBtn.textContent).toContain("Recent (2)");
+
+    await act(async () => {
+      recentBtn.click();
+    });
+
+    const rows = Array.from(container.querySelectorAll(".recent-row"));
+    expect(rows).toHaveLength(2);
+    // Newest transfer MUST appear at the top (index 0), not reversed to the bottom
+    expect(rows[0].textContent).toContain("newest-invoice.pdf");
+    expect(rows[0].textContent).toContain("Received");
+    expect(rows[1].textContent).toContain("older-notes.txt");
   });
 });

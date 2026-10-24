@@ -20,6 +20,10 @@ import {
   saveBufferToLocalDownloads,
   type MacDaemonConfig,
 } from './macIntegration.js';
+import {
+  createSystemClipboardProvider,
+  type HostClipboardProvider,
+} from './hostClipboard.js';
 import { registerCliBeamRoutes, type CliBeamSession } from './cliSendSession.js';
 
 export interface AirBridgeServerOptions {
@@ -30,6 +34,12 @@ export interface AirBridgeServerOptions {
   daemonConfig?: Partial<MacDaemonConfig>;
   cliSessions?: Map<string, CliBeamSession>;
   onCliDownload?: (fileName: string, remoteIp: string) => void;
+  /**
+   * Background OS clipboard bridge for the local host browser client.
+   * Enabled by default outside test mode unless `AIRBRIDGE_CLIPBOARD_WATCH=0`.
+   */
+  hostClipboard?: boolean | HostClipboardProvider;
+  hostClipboardPollMs?: number;
   /**
    * Serve HTTPS (on the same port as HTTP). Defaults to on outside tests:
    * browsers refuse WebCrypto on `http://<LAN-IP>`, so a phone cannot use
@@ -113,9 +123,21 @@ export async function createAirBridgeServer(
   let activePort = requestedPort;
   let mdns: MdnsHandle | null = null;
 
+  const clipboardProvider: HostClipboardProvider | null =
+    typeof options.hostClipboard === 'object' && options.hostClipboard !== null
+      ? options.hostClipboard
+      : options.hostClipboard === true ||
+          (options.hostClipboard === undefined &&
+            mode !== 'test' &&
+            process.env.AIRBRIDGE_CLIPBOARD_WATCH !== '0')
+        ? createSystemClipboardProvider()
+        : null;
+
   const hub = new SignalingHub({
     getLanUrls: () => getLanUrls(activePort, protocol),
     getDaemonStatus: () => getDaemonStatus(daemonCfg),
+    clipboardProvider,
+    clipboardPollMs: options.hostClipboardPollMs,
   });
 
   if (tls) {

@@ -40,6 +40,7 @@ interface PairingDockProps {
   onJoinPairCode: (code: string) => void;
   onRotatePairCode: () => void;
   onCancelTransfer: (transferId: string) => void;
+  onMarkCopied?: (text: string) => void;
 }
 
 export function PairingDock({
@@ -50,6 +51,7 @@ export function PairingDock({
   onJoinPairCode,
   onRotatePairCode,
   onCancelTransfer,
+  onMarkCopied,
 }: PairingDockProps) {
   const [qrSvg, setQrSvg] = useState<string>("");
   const [joinInput, setJoinInput] = useState("");
@@ -93,13 +95,16 @@ export function PairingDock({
 
   const copyPairCode = () => {
     if (!pairCode) return;
-    navigator.clipboard?.writeText(formatPairCode(pairCode)).catch(() => {});
+    const formatted = formatPairCode(pairCode);
+    onMarkCopied?.(formatted);
+    navigator.clipboard?.writeText(formatted).catch(() => {});
     setCopiedCode(true);
     setTimeout(() => setCopiedCode(false), 1800);
   };
 
   const copyPairLink = () => {
     if (!pairUrl) return;
+    onMarkCopied?.(pairUrl);
     navigator.clipboard?.writeText(pairUrl).catch(() => {});
     setCopiedLink(true);
     setTimeout(() => setCopiedLink(false), 1800);
