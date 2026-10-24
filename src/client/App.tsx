@@ -18,11 +18,14 @@ import {
 import { consumePwaSharedPayload } from "./engine/fileDropUtils.js";
 import { PairingDock } from "./components/PairingDock.js";
 import { TransferModal } from "./components/TransferModal.js";
+import { ClipboardCenter } from "./components/ClipboardCenter.js";
 
 interface ToastNotice {
   id: string;
   title: string;
   body: string;
+  actionLabel?: string;
+  onAction?: () => void;
 }
 
 export function App() {
@@ -89,15 +92,54 @@ export function App() {
   // Initialize WarpClient & PWA Share Target consumer
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.has("pair") || params.has("shared")) {
+    if (
+      params.has("pair") ||
+      params.has("shared") ||
+      params.has("share_error")
+    ) {
       const cleanUrl = window.location.pathname;
       window.history.replaceState({}, "", cleanUrl);
+    }
+    if (params.has("share_error")) {
+      showToast({
+        id: "share-error",
+        title: "Could not import shared item",
+        body: "The shared content was not readable here. Try choosing the file inside AirBridge instead.",
+      });
     }
 
     const client = new WarpClient({
       initialPairCode,
       onIncomingTransfer: () => {
         playIncomingChime(soundMutedRef.current);
+      },
+
+      onIncomingClipboard: (item) => {
+        const copyToSystemClipboard = () => {
+          try {
+            // Best-effort: succeeds in a focused secure context. When the
+            // page is in the background (e.g. Android PWA) the promise can
+            // reject — the toast's Copy action is the fallback.
+            navigator.clipboard?.writeText(item.text).catch(() => {});
+          } catch {
+            // Clipboard API unavailable — user can copy from the clipboard
+            // center or the toast action instead.
+          }
+        };
+        copyToSystemClipboard();
+        showToast({
+          id: `clip-${item.beamId}`,
+          title: `Clipboard from ${item.peerName}`,
+          body:
+            item.text.length > 140
+              ? `${item.text.slice(0, 140)}…`
+              : item.text,
+          actionLabel: "Copy",
+          onAction: () => {
+            copyToSystemClipboard();
+            setToast(null);
+          },
+        });
       },
 
       onTransferCompleted: (tr) => {
@@ -146,6 +188,13 @@ export function App() {
           body: `${shared.files.length} file(s) staged and ready to beam.`,
         });
       }
+      if (shared.text) {
+        // Shared text/link opens the clipboard composer prefilled; the user
+        // picks the destination device and taps Beam.
+        setClipboardPrefill(shared.text);
+        setClipboardPeerId(null);
+        setClipboardOpen(true);
+      }
     });
 
     return () => {
@@ -178,6 +227,19 @@ export function App() {
     clientRef.current.sendFiles(peerId, files);
   };
 
+  const openClipboardForPeer = (peerId: string) => {
+    setClipboardPeerId(peerId);
+    setClipboardPrefill("");
+    setClipboardOpen(true);
+  };
+
+  const handleSendClipboard = async (peerId: string, text: string) => {
+    if (!clientRef.current) {
+      throw new Error("Transfer service is not connected yet.");
+    }
+    await clientRef.current.sendClipboard(peerId, text);
+  };
+
   const handleRenameDevice = (newName: string) => {
     saveDeviceName(newName);
     clientRef.current?.updateDeviceName(newName);
@@ -188,6 +250,9 @@ export function App() {
   const [pairingOpen, setPairingOpen] = useState(false);
   const [recentOpen, setRecentOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [clipboardOpen, setClipboardOpen] = useState(false);
+  const [clipboardPeerId, setClipboardPeerId] = useState<string | null>(null);
+  const [clipboardPrefill, setClipboardPrefill] = useState("");
   const [dragging, setDragging] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const filePicker = useRef<HTMLInputElement>(null);
@@ -200,7 +265,13 @@ export function App() {
         ? "Transfer service unavailable"
         : "Starting transfer service";
   const stageFiles = (files: FileList | File[]) => {
-    setStagedFiles((current) => [...current, ...Array.from(files).map((file) => wrapBrowserFile(file))]);
+    // Snapshot the live FileList SYNCHRONOUSLY. The file input resets its
+    // value ("") right after the change event, which empties the same FileList
+    // object in real browsers — a deferred React state updater reading it later
+    // would then see zero files, so nothing would stage and Send stayed
+    // disabled. Capturing wrapped File references first avoids that race.
+    const wrapped = Array.from(files).map((file) => wrapBrowserFile(file));
+    setStagedFiles((current) => [...current, ...wrapped]);
   };
   const activeTransfers = snap.transfers.filter((transfer) => ["connecting", "transferring", "pending-accept"].includes(transfer.status));
   const recentTransfers = snap.transfers.filter((transfer) => !["connecting", "transferring", "pending-accept"].includes(transfer.status));
@@ -210,6 +281,9 @@ export function App() {
       <header className="utility-header">
         <div className="brand"><span className="brand-mark">A</span><span>AirBridge</span></div>
         <div className="header-actions">
+          <button className="quiet-button" onClick={() => { setClipboardPeerId(null); setClipboardPrefill(""); setClipboardOpen(true); }}>
+            Clipboard{snap.clipboardItems.length > 0 ? ` (${snap.clipboardItems.length})` : ""}
+          </button>
           <button className="quiet-button" onClick={() => setRecentOpen(true)}>Recent</button>
           <button className="icon-button" aria-label="Settings" title="Settings" onClick={() => setSettingsOpen(true)}>Settings</button>
         </div>
@@ -267,6 +341,7 @@ export function App() {
             return <li className="device-row" key={peer.peerId}>
               <span className="device-glyph" aria-hidden="true">{peer.device.formFactor === "phone" ? "▯" : "▱"}</span>
               <span className="device-copy"><strong>{peer.device.name}</strong><small>{peer.discoveryScope === "paired" ? "Paired" : "Nearby"}{verification ? " · Encrypted session established" : " · Discovered; pair to send"}</small></span>
+              <button className="quiet-button clipboard-device-button" aria-label={`Send clipboard text to ${peer.device.name}`} title="Send text / link / code" onClick={() => openClipboardForPeer(peer.peerId)}>Clipboard</button>
               <button className="send-device-button" disabled={stagedFiles.length === 0 || !verification} onClick={() => { handleSendFilesToPeer(peer.peerId, stagedFiles); setStagedFiles([]); }}>Send</button>
             </li>;
           })}</ul> : <div className="empty-devices"><p>No devices found yet</p><span>Open AirBridge on your other device on the same Wi-Fi network, or pair it with a QR code.</span><button className="secondary-button" onClick={() => setPairingOpen(true)}>Pair with QR code</button></div>}
@@ -285,11 +360,12 @@ export function App() {
         {activeTransfers.length > 0 && <section className="transfers-section"><div className="section-title"><h2>Transfers</h2><span className="quiet-count">{activeTransfers.length}</span></div>{activeTransfers.map((transfer) => <div className="transfer-row" key={transfer.transferId}><div className="transfer-heading"><strong>{transfer.direction === "incoming" ? `From ${transfer.peerName}` : `To ${transfer.peerName}`}</strong><span>{transfer.status === "pending-accept" ? "Waiting for approval" : transfer.status === "connecting" ? "Connecting" : "Transferring"}</span></div><progress value={transfer.totalBytes ? transfer.transferredBytes : 0} max={Math.max(transfer.totalBytes, 1)} aria-label={`Transfer to ${transfer.peerName}`} /><div className="transfer-foot"><span>{formatBytes(transfer.transferredBytes)} of {formatBytes(transfer.totalBytes)}</span>{transfer.direction === "outgoing" && <button className="text-button" onClick={() => clientRef.current?.cancelTransfer(transfer.transferId)}>Cancel</button>}</div></div>)}</section>}
         <footer className="utility-footer"><span>Encrypted transfers. No account or cloud storage.</span><button className="text-button" onClick={() => setRecentOpen(true)}>Recent transfers</button></footer>
       </main>
-      {pairingOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPairingOpen(false); }}><section className="utility-modal pairing-modal" role="dialog" aria-modal="true" aria-labelledby="pair-title"><div className="modal-heading"><div><p className="section-kicker">PAIR DEVICES</p><h2 id="pair-title">Scan to pair</h2></div><button className="modal-close" aria-label="Close" onClick={() => setPairingOpen(false)}>×</button></div><p className="modal-explainer">Scan this code from AirBridge on your other device. Compare the verification code on both screens before accepting a transfer.</p><PairingDock pairCode={snap.pairCode} lanUrls={snap.lanUrls} transfers={[]} clipboardItems={[]} onJoinPairCode={(code) => clientRef.current?.joinPairCode(code)} onRotatePairCode={() => clientRef.current?.rotatePairCode()} onCancelTransfer={(id) => clientRef.current?.cancelTransfer(id)} /><button className="text-button advanced-toggle" onClick={() => setShowAdvanced((value) => !value)}>{showAdvanced ? "Hide network details" : "Having trouble pairing?"}</button>{showAdvanced && <div className="help-copy"><p>Both devices must be running the AirBridge app on the same local network. Guest Wi-Fi and some office networks block device-to-device connections.</p><p>Current service: {snap.connectionState}. {snap.lanUrls.length ? `Local address: ${snap.lanUrls[0]}` : "No local address was reported."}</p></div>}</section></div>}
+      {pairingOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPairingOpen(false); }}><section className="utility-modal pairing-modal" role="dialog" aria-modal="true" aria-labelledby="pair-title"><div className="modal-heading"><div><p className="section-kicker">PAIR DEVICES</p><h2 id="pair-title">Scan to pair</h2></div><button className="modal-close" aria-label="Close" onClick={() => setPairingOpen(false)}>×</button></div><p className="modal-explainer">Scan this code from AirBridge on your other device. Compare the verification code on both screens before accepting a transfer.</p><PairingDock pairCode={snap.pairCode} lanUrls={snap.lanUrls} transfers={snap.transfers} clipboardItems={snap.clipboardItems} onJoinPairCode={(code) => clientRef.current?.joinPairCode(code)} onRotatePairCode={() => clientRef.current?.rotatePairCode()} onCancelTransfer={(id) => clientRef.current?.cancelTransfer(id)} /><button className="text-button advanced-toggle" onClick={() => setShowAdvanced((value) => !value)}>{showAdvanced ? "Hide network details" : "Having trouble pairing?"}</button>{showAdvanced && <div className="help-copy"><p>Both devices must be running the AirBridge app on the same local network. Guest Wi-Fi and some office networks block device-to-device connections.</p><p>Current service: {snap.connectionState}. {snap.lanUrls.length ? `Local address: ${snap.lanUrls[0]}` : "No local address was reported."}</p></div>}</section></div>}
       {recentOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setRecentOpen(false); }}><section className="utility-modal recent-modal" role="dialog" aria-modal="true" aria-labelledby="recent-title"><div className="modal-heading"><div><p className="section-kicker">HISTORY</p><h2 id="recent-title">Recent transfers</h2></div><button className="modal-close" aria-label="Close" onClick={() => setRecentOpen(false)}>×</button></div>{recentTransfers.length ? <div className="recent-list">{recentTransfers.slice().reverse().map((transfer) => <div className="recent-row" key={transfer.transferId}><span><strong>{transfer.files.map((file) => file.name).join(", ")}</strong><small>{transfer.direction === "incoming" ? "Received" : "Sent"} · {transfer.peerName}</small></span><span className="recent-state">{transfer.status === "completed" ? "Complete" : transfer.status === "cancelled" ? "Cancelled" : transfer.status === "declined" ? "Declined" : "Failed"}</span></div>)}</div> : <p className="empty-history">Completed transfers will appear here.</p>}</section></div>}
       {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="utility-modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="modal-heading"><div><p className="section-kicker">PREFERENCES</p><h2 id="settings-title">Settings</h2></div><button className="modal-close" aria-label="Close" onClick={() => setSettingsOpen(false)}>×</button></div><label className="setting-field">Device name<input defaultValue={deviceName} maxLength={40} onBlur={(event) => { const name = event.target.value.trim(); if (name && name !== deviceName) handleRenameDevice(name); }} /></label><label className="setting-toggle"><span><strong>Dark appearance</strong><small>Use a monochrome dark theme</small></span><input type="checkbox" checked={darkMode} onChange={() => setDarkMode((value) => !value)} /></label><div className="settings-info"><strong>About connection status</strong><p>“Running” means this app is connected to its transfer service. “Nearby” means another device was discovered; a secure session is only ready after pairing completes.</p></div><div className="settings-info"><strong>Privacy and consent</strong><p>Incoming transfers ask before saving. Auto-accept is off. Revoke trusted devices in advanced trust management.</p></div><a className="text-button advanced-toggle" href="https://github.com/DigantaDey/android-to-mac#important-current-product-limits" target="_blank" rel="noreferrer">About this version</a></section></div>}
       <TransferModal offer={activeIncomingOffer} senderPublicKey={incomingSenderPubKey} onAccept={(transferId, trustSender) => { if (trustSender && incomingSenderPubKey) clientRef.current?.toggleTrustedPeer(incomingSenderPubKey, true); clientRef.current?.acceptIncomingTransfer(transferId); }} onDecline={(transferId) => clientRef.current?.declineIncomingTransfer(transferId)} />
-      {toast && <div className="utility-toast" role="status"><strong>{toast.title}</strong><span>{toast.body}</span><button aria-label="Dismiss notification" onClick={() => setToast(null)}>×</button></div>}
+      {clipboardOpen && <ClipboardCenter peers={snap.peers} items={snap.clipboardItems} initialPeerId={clipboardPeerId} prefill={clipboardPrefill} onSend={handleSendClipboard} onClose={() => setClipboardOpen(false)} />}
+      {toast && <div className="utility-toast" role="status"><strong>{toast.title}</strong><span>{toast.body}</span>{toast.actionLabel && <button type="button" className="toast-action" onClick={toast.onAction}>{toast.actionLabel}</button>}<button aria-label="Dismiss notification" onClick={() => setToast(null)}>×</button></div>}
     </div>
   );
 }

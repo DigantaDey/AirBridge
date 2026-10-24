@@ -2,7 +2,14 @@
 
 AirBridge is an open-source encrypted file-transfer prototype for Android and macOS. The current implementation is a browser application backed by a Node.js signaling/transfer service. It is **not yet a native, install-and-open product**.
 
-The interface has been reduced to a focused transfer screen: device/service status, discovered devices, file selection and drag-and-drop, active transfer progress, pairing, settings, and recent transfers. The in-browser virtual-device simulator and clipboard controls are no longer part of the production screen.
+The interface is a focused transfer screen: device/service status, discovered devices, file selection and drag-and-drop, an encrypted universal clipboard (text, links, OTP codes, snippets), active transfer progress, pairing, settings, and recent transfers.
+
+## Universal clipboard (copy-paste between devices)
+
+The same E2EE channel that carries files also carries clipboard text (`ECDH-P256` + `AES-256-GCM`; nothing is stored on the server):
+
+- **Send text:** open **Clipboard** from the header (or tap **Clipboard** on a device row), paste or type the text/link/code, pick the destination device, and tap **Beam text**. On Android you can also share text or a link from any app via the system Share Sheet — it opens the composer prefilled.
+- **Receive text:** incoming beams are copied to the device's system clipboard automatically (so a normal paste/Cmd+V/long-press-paste just works), a notification with a **Copy** fallback is shown, and every beam is kept in the Clipboard modal's history with one-click copy and "Open URL" for links.
 
 ## Important: current product limits
 
