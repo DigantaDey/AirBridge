@@ -26,6 +26,62 @@ export function createMacDaemonConfig(overrides?: Partial<MacDaemonConfig>): Mac
   };
 }
 
+/**
+ * Validate a user-chosen received-files directory. The path must be absolute
+ * (a relative path would silently depend on the server's working directory),
+ * free of NUL/control characters, and reasonably short. It is intentionally
+ * NOT restricted to ~/Downloads: choosing where your own files land is the
+ * whole point of the setting. Callers must still gate *who* may change it
+ * (loopback-only HTTP route / host desktop client).
+ */
+export function validateDownloadDir(raw: unknown): string {
+  if (typeof raw !== 'string') throw new Error('Download folder must be a path string.');
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 1024 || /[\x00-\x1f\x7f]/.test(trimmed)) {
+    throw new Error('Download folder path is empty or invalid.');
+  }
+  const expanded = trimmed === '~' ? os.homedir() : trimmed.startsWith('~/') ? path.join(os.homedir(), trimmed.slice(2)) : trimmed;
+  if (!path.isAbsolute(expanded)) throw new Error('Download folder must be an absolute path (or start with ~/).');
+  return path.resolve(expanded);
+}
+
+export async function setDownloadDir(config: MacDaemonConfig, raw: unknown): Promise<string> {
+  const dir = validateDownloadDir(raw);
+  await fs.promises.mkdir(dir, { recursive: true });
+  const stat = await fs.promises.stat(dir);
+  if (!stat.isDirectory()) throw new Error('Download folder path is not a directory.');
+  config.downloadDir = dir;
+  return dir;
+}
+
+/** Persist only the received-files folder choice (no secrets involved). */
+export async function loadPersistedDownloadDir(filePath: string): Promise<string | null> {
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(filePath, 'utf8')) as { downloadDir?: unknown };
+    return validateDownloadDir(parsed.downloadDir);
+  } catch { return null; }
+}
+
+export async function persistDownloadDir(filePath: string, dir: string): Promise<void> {
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.tmp`;
+  await fs.promises.writeFile(tmp, JSON.stringify({ downloadDir: dir }, null, 2), { mode: 0o600 });
+  await fs.promises.rename(tmp, filePath);
+}
+
+/** Open a folder (or reveal a file) with the OS file manager — fixed argv, never a shell. */
+export async function openFolderInFileManager(targetPath: string, platform: NodeJS.Platform = process.platform): Promise<void> {
+  const stat = await fs.promises.stat(targetPath).catch(() => null);
+  if (!stat) throw new Error('Folder does not exist yet. Receive a file first or save the setting again.');
+  const isDir = stat.isDirectory();
+  const [cmd, args]: [string, string[]] = platform === 'darwin'
+    ? (isDir ? ['open', [targetPath]] : ['open', ['-R', targetPath]])
+    : platform === 'win32' ? ['explorer.exe', [targetPath]] : ['xdg-open', [isDir ? targetPath : path.dirname(targetPath)]];
+  await new Promise<void>((resolve, reject) => {
+    execFile(cmd, args, (err) => (err && platform !== 'win32' ? reject(new Error('Could not open the folder in the file manager.')) : resolve()));
+  });
+}
+
 export function getDaemonStatus(config: MacDaemonConfig): LocalDaemonStatus {
   return {
     enabled: config.enabled,

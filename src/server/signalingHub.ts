@@ -30,14 +30,16 @@ interface ConnectedClient {
   device: DeviceProfile;
   connectedAt: number;
   isAlive: boolean;
+  joinPairAttempts: number[];
 }
 
 function deriveNetworkKey(req: IncomingMessage): string {
-  const forwarded = req.headers['x-forwarded-for'];
-  const rawIp =
-    (typeof forwarded === 'string' ? forwarded.split(',')[0]?.trim() : forwarded?.[0]) ||
-    req.socket.remoteAddress ||
-    'unknown';
+  // SECURITY: never trust X-Forwarded-For here. AirBridge is not deployed
+  // behind a proxy that strips it, so any LAN client could otherwise spoof
+  // a victim's subnet (or loopback) and gain "nearby" discovery/relay access
+  // to devices it is not on the same network as. The socket address is the
+  // only address the kernel actually observed.
+  const rawIp = req.socket.remoteAddress || 'unknown';
 
   const ip = rawIp.replace(/^::ffff:/, '');
 
@@ -64,6 +66,40 @@ function deriveNetworkKey(req: IncomingMessage): string {
 
   // Public IP (e.g., devices behind same home Wi-Fi NAT hitting cloud signaling)
   return 'net:' + crypto.createHash('sha256').update(ip).digest('hex').slice(0, 16);
+}
+
+const PLATFORMS = new Set(['macos', 'android', 'ios', 'windows', 'linux', 'unknown']);
+const FORM_FACTORS = new Set(['laptop', 'phone', 'tablet', 'desktop']);
+export const MAX_CLIENTS = 128;
+export const MAX_CLIENTS_PER_NETWORK = 32;
+const JOIN_PAIR_WINDOW_MS = 60_000;
+const MAX_JOIN_PAIR_PER_WINDOW = 6; // pair codes are only 30 bits; slow guessing to a crawl
+
+function boundText(value: unknown, max: number, fallback: string): string {
+  if (typeof value !== 'string') return fallback;
+  const clean = value.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, max);
+  return clean || fallback;
+}
+
+/** A device profile is attacker-controlled input: validate before it is stored, broadcast, or fed to ECDH. */
+export function sanitizeDeviceProfile(raw: unknown): DeviceProfile | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const d = raw as Record<string, unknown>;
+  if (typeof d.publicKey !== 'string' || d.publicKey.length > 128) return null;
+  let rawKey: Buffer;
+  try { rawKey = Buffer.from(d.publicKey.replace(/-/g, '+').replace(/_/g, '/'), 'base64'); } catch { return null; }
+  // Uncompressed P-256 point: 65 bytes, 0x04 prefix, re-encoding must round-trip (canonical base64url).
+  if (rawKey.byteLength !== 65 || rawKey[0] !== 0x04) return null;
+  const canonical = rawKey.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  if (canonical !== d.publicKey) return null;
+  return {
+    name: boundText(d.name, 80, 'AirBridge Device'),
+    platform: (PLATFORMS.has(String(d.platform)) ? d.platform : 'unknown') as DeviceProfile['platform'],
+    model: boundText(d.model, 80, 'Device'),
+    formFactor: (FORM_FACTORS.has(String(d.formFactor)) ? d.formFactor : 'laptop') as DeviceProfile['formFactor'],
+    publicKey: d.publicKey,
+    deviceId: typeof d.deviceId === 'string' && /^[0-9a-f]{16}$/.test(d.deviceId) ? d.deviceId : undefined,
+  };
 }
 
 function generatePeerId(): string {
@@ -222,6 +258,10 @@ export class SignalingHub {
     const networkKey = deriveNetworkKey(req);
     const isLoopback = isLocalMachineAddress(req.socket.remoteAddress);
     let registeredClient: ConnectedClient | null = null;
+    if (this.clients.size >= MAX_CLIENTS) { ws.close(1013, 'Server busy'); return; }
+    let perNetwork = 0;
+    for (const c of this.clients.values()) if (c.networkKey === networkKey) perNetwork++;
+    if (perNetwork >= MAX_CLIENTS_PER_NETWORK) { ws.close(1013, 'Too many connections from this network'); return; }
 
     ws.on('pong', () => {
       if (registeredClient) {
@@ -249,12 +289,20 @@ export class SignalingHub {
       let msg: ClientToServerMessage;
       try {
         msg = JSON.parse(data.toString('utf8')) as ClientToServerMessage;
+        if (!msg || typeof msg !== 'object' || typeof (msg as { type?: unknown }).type !== 'string') throw new Error('bad frame');
       } catch {
         this.sendJson(ws, { type: 'error', code: 'BAD_JSON', message: 'Invalid JSON frame' });
         return;
       }
 
       if (msg.type === 'hello') {
+        const device = sanitizeDeviceProfile(msg.device);
+        if (!device) {
+          this.sendJson(ws, { type: 'error', code: 'INVALID_DEVICE', message: 'Device profile or public key is invalid.' });
+          ws.close(1008, 'Invalid device profile');
+          return;
+        }
+        (msg as { device: DeviceProfile }).device = device;
         let peerId = sanitizePeerId(msg.peerId);
         if (this.clients.has(peerId) && this.clients.get(peerId)?.ws !== ws) {
           peerId = generatePeerId();
@@ -271,10 +319,11 @@ export class SignalingHub {
           networkKey,
           isLoopback,
           pairCode,
-          visibility: msg.visibility ?? 'nearby',
+          visibility: msg.visibility === 'paired-only' || msg.visibility === 'hidden' ? msg.visibility : 'nearby',
           device: msg.device,
           connectedAt: Date.now(),
           isAlive: true,
+          joinPairAttempts: [],
         };
 
         this.clients.set(peerId, registeredClient);
@@ -300,14 +349,25 @@ export class SignalingHub {
 
       switch (msg.type) {
         case 'update-profile': {
-          registeredClient.device = msg.device;
-          registeredClient.visibility = msg.visibility;
+          const device = sanitizeDeviceProfile(msg.device);
+          if (!device) break;
+          registeredClient.device = device;
+          if (msg.visibility === 'nearby' || msg.visibility === 'paired-only' || msg.visibility === 'hidden') {
+            registeredClient.visibility = msg.visibility;
+          }
           this.syncClipboardWatchState();
           this.broadcastPeerUpdatesFor(registeredClient);
           break;
         }
 
         case 'join-pair': {
+          const nowMs = Date.now();
+          registeredClient.joinPairAttempts = registeredClient.joinPairAttempts.filter((t) => nowMs - t < JOIN_PAIR_WINDOW_MS);
+          if (registeredClient.joinPairAttempts.length >= MAX_JOIN_PAIR_PER_WINDOW) {
+            this.sendJson(ws, { type: 'error', code: 'RATE_LIMITED', message: 'Too many pair attempts. Wait a minute and try again.' });
+            return;
+          }
+          registeredClient.joinPairAttempts.push(nowMs);
           const normalized = normalizePairCode(msg.pairCode);
           if (!isValidPairCode(normalized)) {
             this.sendJson(ws, {
@@ -344,6 +404,7 @@ export class SignalingHub {
         }
 
         case 'rtc-signal': {
+          if (typeof msg.to !== 'string' || !msg.signal || typeof msg.signal !== 'object' || JSON.stringify(msg.signal).length > 64_000) break;
           const target = this.clients.get(msg.to);
           if (target && this.canCommunicate(registeredClient, target)) {
             this.sendJson(target.ws, {
@@ -356,6 +417,22 @@ export class SignalingHub {
         }
 
         case 'transfer-control': {
+          // SECURITY: unencrypted control frames may only be ping/pong.
+          // Previously ANY payload (transfer-offer, clipboard-beam,
+          // history-sync, accept/decline/cancel) was relayed in plaintext,
+          // so any peer could inject clipboard text or forge transfer
+          // decisions without holding the ECDH session key.
+          const env = msg.envelope as { encrypted?: unknown; payload?: { kind?: unknown }; ciphertext?: unknown } | undefined;
+          if (!env || typeof env !== 'object') break;
+          if (env.encrypted === false) {
+            if (env.payload?.kind !== 'ping' && env.payload?.kind !== 'pong') {
+              this.sendJson(ws, { type: 'error', code: 'ENCRYPTION_REQUIRED', message: 'Control messages must be end-to-end encrypted.' });
+              break;
+            }
+          } else if (env.encrypted === true) {
+            if (typeof env.ciphertext !== 'string' || env.ciphertext.length > 2_000_000) break;
+          } else break;
+          if (typeof msg.to !== 'string') break;
           const target = this.clients.get(msg.to);
           if (target && this.canCommunicate(registeredClient, target)) {
             this.sendJson(target.ws, {
@@ -407,6 +484,8 @@ export class SignalingHub {
       return;
     }
 
+    // Do not let a fast sender grow the relay queue without bound.
+    if (target.ws.bufferedAmount > 16 * 1024 * 1024) return;
     // Stamp authenticated sender peerId in-place so sourcePeerId can never be forged
     const copy = new Uint8Array(bytes.byteLength);
     copy.set(bytes);

@@ -31,6 +31,27 @@ import {
 import { loadOrCreateDeviceId } from './deviceDetect.js';
 
 export const CHUNK_SIZE = 64 * 1024; // 64 KB optimal for both WebRTC SCTP & WS Binary Relay
+export const MAX_FILES_PER_TRANSFER = 100;
+export const MAX_CHUNKS_PER_TRANSFER = 262_144; // 16 GiB at 64 KiB chunks — a manifest sanity ceiling, not a product limit
+export const MAX_CLIPBOARD_TEXT = 256_000;
+
+export function isValidFileManifest(files: unknown, totalBytes: unknown): files is FileManifestItem[] {
+  if (!Array.isArray(files) || files.length === 0 || files.length > MAX_FILES_PER_TRANSFER) return false;
+  if (typeof totalBytes !== 'number' || !Number.isFinite(totalBytes) || totalBytes < 0) return false;
+  let sum = 0; let chunks = 0;
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i] as FileManifestItem;
+    if (!f || f.index !== i || typeof f.name !== 'string' || f.name.length === 0 || f.name.length > 512) return false;
+    if (typeof f.size !== 'number' || !Number.isFinite(f.size) || f.size < 0) return false;
+    if (f.chunkSize !== CHUNK_SIZE) return false;
+    const expectedChunks = Math.max(1, Math.ceil(f.size / CHUNK_SIZE));
+    if (f.totalChunks !== expectedChunks) return false;
+    if (f.previewDataUrl !== undefined && (typeof f.previewDataUrl !== 'string' || f.previewDataUrl.length > 16_000 || !f.previewDataUrl.startsWith('data:image/'))) return false;
+    sum += f.size; chunks += f.totalChunks;
+    if (chunks > MAX_CHUNKS_PER_TRANSFER) return false;
+  }
+  return sum === totalBytes;
+}
 const MAX_UNACKED_CHUNKS = 48; // 3 MB sliding window
 const ACK_INTERVAL_CHUNKS = 8;
 const MAX_BUFFER_HIGH_WATER = 2 * 1024 * 1024; // 2 MB socket buffer threshold
@@ -561,6 +582,28 @@ export class WarpClient {
       // ignore
     }
     this.emit();
+  }
+
+  /** Folder on this device (host daemon) where received files are saved. Loopback-only server API. */
+  public async updateReceivedFolder(downloadDir: string): Promise<string> {
+    const resp = await fetch('/api/received-folder', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ downloadDir }),
+    });
+    const json = (await resp.json().catch(() => ({}))) as { downloadDir?: string; error?: string };
+    if (!resp.ok || !json.downloadDir) throw new Error(json.error || 'Could not update the received-files folder.');
+    this.localDaemon = { ...this.localDaemon, enabled: true, autoSaveToDownloads: true, downloadDir: json.downloadDir };
+    this.emit();
+    return json.downloadDir;
+  }
+
+  public async openReceivedFolder(savedPath?: string): Promise<void> {
+    const resp = await fetch('/api/received-folder/open', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(savedPath ? { path: savedPath } : {}),
+    });
+    if (!resp.ok) {
+      const json = (await resp.json().catch(() => ({}))) as { error?: string };
+      throw new Error(json.error || 'Could not open the received-files folder.');
+    }
   }
 
   public markClipboardSynced(text: string): void {
@@ -1241,6 +1284,11 @@ export class WarpClient {
       if (!session) return;
       payload = await decryptControlPayload(session.aesKey, envelope);
     } else {
+      // SECURITY: only the unauthenticated liveness ping/pong may travel in
+      // plaintext. Everything else (offers, clipboard, accept/decline/cancel,
+      // history) must prove possession of the ECDH session key via AES-GCM,
+      // otherwise anyone able to relay a frame could forge it.
+      if (envelope.payload?.kind !== 'ping' && envelope.payload?.kind !== 'pong') return;
       payload = envelope.payload;
     }
 
@@ -1258,6 +1306,7 @@ export class WarpClient {
       }
 
       case 'clipboard-beam': {
+        if (typeof payload.text !== 'string' || payload.text.length > MAX_CLIPBOARD_TEXT || typeof payload.beamId !== 'string') break;
         const trimmed = payload.text.trim();
         if (!trimmed) break;
         if (this.seenBeamIds.has(payload.beamId)) break;
@@ -1308,6 +1357,11 @@ export class WarpClient {
       }
 
       case 'transfer-offer': {
+        if (typeof payload.transferId !== 'string' || !/^[0-9a-f]{16}$/.test(payload.transferId)) break;
+        // Validate BEFORE allocating per-chunk arrays: a hostile manifest
+        // previously could declare billions of chunks and exhaust memory
+        // before the user ever saw (let alone accepted) the offer.
+        if (!isValidFileManifest(payload.files, payload.totalBytes)) break;
         if (this.incomingStates.has(payload.transferId)) break;
         const session = this.cryptoSessions.get(fromPeerId);
         const view: TransferSessionView = {
@@ -1366,7 +1420,7 @@ export class WarpClient {
 
       case 'transfer-accept': {
         const sendState = this.outgoingStates.get(payload.transferId);
-        if (sendState) {
+        if (sendState && sendState.session.peerId === fromPeerId) {
           sendState.acceptResolver?.(payload.preferredTransport);
         }
         break;
@@ -1374,6 +1428,7 @@ export class WarpClient {
 
       case 'transfer-decline': {
         const sendState = this.outgoingStates.get(payload.transferId);
+        if (sendState && sendState.session.peerId !== fromPeerId) break;
         if (sendState) {
           sendState.cancelled = true;
           sendState.session.status = 'declined';
@@ -1388,6 +1443,12 @@ export class WarpClient {
       }
 
       case 'transfer-cancel': {
+        // Only the transfer's own peer may cancel it.
+        {
+          const s0 = this.outgoingStates.get(payload.transferId);
+          const r0 = this.incomingStates.get(payload.transferId);
+          if ((s0 && s0.session.peerId !== fromPeerId) || (r0 && r0.session.peerId !== fromPeerId)) break;
+        }
         const sendState = this.outgoingStates.get(payload.transferId);
         if (sendState) {
           sendState.cancelled = true;
@@ -1415,7 +1476,8 @@ export class WarpClient {
 
       case 'chunk-ack': {
         const sendState = this.outgoingStates.get(payload.transferId);
-        if (sendState) {
+        if (sendState && sendState.session.peerId === fromPeerId) {
+          if (!Number.isInteger(payload.fileIndex) || payload.fileIndex < 0 || payload.fileIndex >= sendState.session.files.length) break;
           // Compute cumulative global chunks acknowledged up to (fileIndex, ackedChunkIndex)
           let globalAcked = 0;
           for (let i = 0; i < payload.fileIndex; i++) {
@@ -1436,7 +1498,9 @@ export class WarpClient {
 
       case 'file-complete': {
         const recvState = this.incomingStates.get(payload.transferId);
-        if (!recvState) break;
+        if (!recvState || recvState.session.peerId !== fromPeerId) break;
+        if (!Number.isInteger(payload.fileIndex) || payload.fileIndex < 0 || payload.fileIndex >= recvState.session.files.length) break;
+        if (payload.sha256 !== undefined && !/^[0-9a-f]{64}$/.test(payload.sha256)) break;
         recvState.fileCompletePayloads.set(payload.fileIndex, {
           sha256: payload.sha256,
         });
@@ -1446,7 +1510,7 @@ export class WarpClient {
 
       case 'transfer-complete': {
         const recvState = this.incomingStates.get(payload.transferId);
-        if (!recvState) break;
+        if (!recvState || recvState.session.peerId !== fromPeerId) break;
         recvState.transferCompleteReceived = true;
         if (!recvState.fallbackTimer) {
           recvState.fallbackTimer = setTimeout(() => {
@@ -1592,6 +1656,12 @@ export class WarpClient {
     const decoded = decodeEncryptedChunkFrame(innerPayload);
     const recvState = this.incomingStates.get(decoded.transferId);
     if (!recvState || recvState.session.peerId !== fromPeerId) return;
+    // SECURITY: nothing is decrypted or stored before the user accepts the
+    // transfer — a nearby stranger could otherwise fill device memory with
+    // unsolicited "chunks" for an offer that is still awaiting consent.
+    if (recvState.session.status !== 'transferring') return;
+    const meta0 = recvState.session.files[decoded.fileIndex];
+    if (!meta0 || !Number.isInteger(decoded.chunkIndex) || decoded.chunkIndex < 0 || decoded.chunkIndex >= meta0.totalChunks) return;
 
     const cryptoSession = this.cryptoSessions.get(fromPeerId);
     if (!cryptoSession) return;
@@ -1603,6 +1673,9 @@ export class WarpClient {
     );
 
     if (!this.incomingStates.has(decoded.transferId)) return;
+    // Each chunk must be exactly the size the manifest promises for its slot.
+    const expectedSize = meta0.size === 0 ? 0 : Math.min(CHUNK_SIZE, meta0.size - decoded.chunkIndex * CHUNK_SIZE);
+    if (plainBytes.byteLength !== expectedSize) return;
 
     recvState.session.transport = transport;
     const fileArr = recvState.fileChunks[decoded.fileIndex];
@@ -1914,9 +1987,13 @@ export class WarpClient {
       if (!item || typeof item.transferId !== 'string' || !Array.isArray(item.files)) continue;
       if (!isTerminalTransferStatus(item.status)) continue;
 
+      if (!isValidFileManifest(item.files, item.totalBytes)) continue;
       const localDirection: TransferDirection =
         item.direction === 'outgoing' ? 'incoming' : 'outgoing';
       const existingIdx = this.transfers.findIndex((t) => t.transferId === item.transferId);
+      // A peer may only reconcile its own transfers — otherwise any peer
+      // could cancel/complete another peer's live transfer by guessing its ID.
+      if (existingIdx !== -1 && this.transfers[existingIdx].peerId !== fromPeerId) continue;
 
       if (existingIdx === -1) {
         const reconstructed: TransferSessionView = {

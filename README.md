@@ -4,6 +4,10 @@ AirBridge is an open-source encrypted file-transfer prototype for Android and ma
 
 The interface is a focused transfer screen: device/service status, discovered devices, file selection and drag-and-drop, an encrypted universal clipboard (text, links, OTP codes, snippets), active transfer progress, pairing, settings, and recent transfers.
 
+## Received-files folder
+
+On the device running AirBridge, received files that are saved directly to disk land in a folder you control: look for the folder (📂) icon in the header or next to a completed transfer in **Recent transfers** to open/locate that folder, and change it any time under **Settings → Received files folder** (e.g. `~/Downloads/AirBridge`, an external drive, a synced folder). The choice is persisted on that device, applies to the next received file, and can only be viewed/changed/opened from that device itself — the settings API is loopback-only (see [SECURITY.md](SECURITY.md)). On a phone, or when direct-to-disk saving is off, received files are saved by the browser instead (usually its Downloads folder).
+
 ## Universal clipboard (copy-paste between devices)
 
 The same E2EE channel that carries files also carries clipboard text (`ECDH-P256` + `AES-256-GCM`; encrypted peer-to-peer between devices):

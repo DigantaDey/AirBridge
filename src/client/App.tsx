@@ -24,6 +24,7 @@ import {
 import { PairingDock } from "./components/PairingDock.js";
 import { TransferModal } from "./components/TransferModal.js";
 import { ClipboardCenter } from "./components/ClipboardCenter.js";
+import { FolderOpen } from "lucide-react";
 
 interface ToastNotice {
   id: string;
@@ -78,6 +79,36 @@ export function App() {
   });
 
   const [stagedFiles, setStagedFiles] = useState<SendableFileInput[]>([]);
+  // Received-files folder (host daemon). Only the device running the server
+  // can read/change it — the API is loopback-only, so this stays empty on a phone.
+  const [receivedFolder, setReceivedFolder] = useState("");
+  const [receivedFolderInput, setReceivedFolderInput] = useState("");
+  const [folderSaving, setFolderSaving] = useState(false);
+  useEffect(() => {
+    fetch("/api/received-folder")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { downloadDir?: string } | null) => {
+        if (j?.downloadDir) { setReceivedFolder(j.downloadDir); setReceivedFolderInput(j.downloadDir); }
+      })
+      .catch(() => {});
+  }, []);
+  const openReceivedFolder = (savedPath?: string) => {
+    clientRef.current?.openReceivedFolder(savedPath).catch((err: unknown) => {
+      showToast({ id: "open-folder", title: "Could not open folder", body: err instanceof Error ? err.message : "Opening folders is only available on the device running AirBridge." });
+    });
+  };
+  const saveReceivedFolder = async () => {
+    const next = receivedFolderInput.trim();
+    if (!next || !clientRef.current) return;
+    setFolderSaving(true);
+    try {
+      const saved = await clientRef.current.updateReceivedFolder(next);
+      setReceivedFolder(saved); setReceivedFolderInput(saved);
+      showToast({ id: "folder-saved", title: "Received-files folder updated", body: saved });
+    } catch (err) {
+      showToast({ id: "folder-save-error", title: "Could not change folder", body: err instanceof Error ? err.message : "Invalid folder path." });
+    } finally { setFolderSaving(false); }
+  };
   const [toast, setToast] = useState<ToastNotice | null>(null);
 
   useEffect(() => {
@@ -527,6 +558,11 @@ export function App() {
           <button className="quiet-button" onClick={() => setRecentOpen(true)}>
             Recent{recentTransfers.length > 0 ? ` (${recentTransfers.length})` : ""}
           </button>
+          {receivedFolder && (
+            <button className="icon-button folder-locate-button" aria-label="Open received files folder" title={`Open received files folder (${receivedFolder})`} onClick={() => openReceivedFolder()}>
+              <FolderOpen size={16} aria-hidden="true" />
+            </button>
+          )}
           <button className="icon-button" aria-label="Settings" title="Settings" onClick={() => setSettingsOpen(true)}>Settings</button>
         </div>
       </header>
@@ -603,8 +639,22 @@ export function App() {
         <footer className="utility-footer"><span>Encrypted transfers. No account or cloud storage.</span><button className="text-button" onClick={() => setRecentOpen(true)}>Recent transfers</button></footer>
       </main>
       {pairingOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPairingOpen(false); }}><section className="utility-modal pairing-modal" role="dialog" aria-modal="true" aria-labelledby="pair-title"><div className="modal-heading"><div><p className="section-kicker">PAIR DEVICES</p><h2 id="pair-title">Scan to pair</h2></div><button className="modal-close" aria-label="Close" onClick={() => setPairingOpen(false)}>×</button></div><p className="modal-explainer">Scan this code from AirBridge on your other device. Compare the verification code on both screens before accepting a transfer.</p><PairingDock pairCode={snap.pairCode} lanUrls={snap.lanUrls} transfers={snap.transfers} clipboardItems={snap.clipboardItems} onJoinPairCode={(code) => clientRef.current?.joinPairCode(code)} onRotatePairCode={() => clientRef.current?.rotatePairCode()} onCancelTransfer={(id) => clientRef.current?.cancelTransfer(id)} onMarkCopied={markLocalCopyHandled} /><button className="text-button advanced-toggle" onClick={() => setShowAdvanced((value) => !value)}>{showAdvanced ? "Hide network details" : "Having trouble pairing?"}</button>{showAdvanced && <div className="help-copy"><p>Both devices must be running the AirBridge app on the same local network. Guest Wi-Fi and some office networks block device-to-device connections.</p><p>Current service: {snap.connectionState}. {snap.lanUrls.length ? `Local address: ${snap.lanUrls[0]}` : "No local address was reported."}</p></div>}</section></div>}
-      {recentOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setRecentOpen(false); }}><section className="utility-modal recent-modal" role="dialog" aria-modal="true" aria-labelledby="recent-title"><div className="modal-heading"><div><p className="section-kicker">HISTORY</p><h2 id="recent-title">Recent transfers</h2></div><button className="modal-close" aria-label="Close" onClick={() => setRecentOpen(false)}>×</button></div>{recentTransfers.length ? <div className="recent-list">{recentTransfers.map((transfer) => { const canSave = transfer.status === "completed" && transfer.direction === "incoming" && transfer.receivedFiles.length > 0; return <div className="recent-row" key={transfer.transferId}><span><strong>{transfer.files.map((file) => file.name).join(", ")}</strong><small>{transfer.direction === "incoming" ? "Received" : "Sent"} · {transfer.peerName} · {formatBytes(transfer.totalBytes)}</small></span><span className="recent-actions">{canSave && <button type="button" className="text-button" onClick={() => saveReceivedTransferFiles(transfer)}>{transfer.receivedFiles.length > 1 ? "Save ZIP" : "Save"}</button>}<span className="recent-state">{transfer.status === "completed" ? "Complete" : transfer.status === "cancelled" ? "Cancelled" : transfer.status === "declined" ? "Declined" : "Failed"}</span></span></div>; })}</div> : <p className="empty-history">Completed transfers will appear here.</p>}</section></div>}
-      {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="utility-modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="modal-heading"><div><p className="section-kicker">PREFERENCES</p><h2 id="settings-title">Settings</h2></div><button className="modal-close" aria-label="Close" onClick={() => setSettingsOpen(false)}>×</button></div><label className="setting-field">Device name<input defaultValue={deviceName} maxLength={40} onBlur={(event) => { const name = event.target.value.trim(); if (name && name !== deviceName) handleRenameDevice(name); }} /></label><label className="setting-toggle"><span><strong>Dark appearance</strong><small>Use a monochrome dark theme</small></span><input type="checkbox" checked={darkMode} onChange={() => setDarkMode((value) => !value)} /></label><label className="setting-toggle"><span><strong>Auto-beam copied text</strong><small>{snap.localDaemon.clipboardBridge ? "Automatically beam copied text in the background without returning to this page" : "Automatically beam newly copied or shared text to your connected device"}</small></span><input type="checkbox" checked={snap.autoClipboardSync} onChange={(event) => clientRef.current?.setAutoClipboardSync(event.target.checked)} /></label><div className="settings-info"><strong>About connection status</strong><p>“Running” means this app is connected to its transfer service. “Nearby” means another device was discovered; a secure session is only ready after pairing completes.</p></div><div className="settings-info"><strong>Privacy and consent</strong><p>Incoming transfers ask before saving. Auto-accept is off. Revoke trusted devices in advanced trust management.</p></div><a className="text-button advanced-toggle" href="https://github.com/DigantaDey/android-to-mac#important-current-product-limits" target="_blank" rel="noreferrer">About this version</a></section></div>}
+      {recentOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setRecentOpen(false); }}><section className="utility-modal recent-modal" role="dialog" aria-modal="true" aria-labelledby="recent-title"><div className="modal-heading"><div><p className="section-kicker">HISTORY</p><h2 id="recent-title">Recent transfers</h2></div><button className="modal-close" aria-label="Close" onClick={() => setRecentOpen(false)}>×</button></div>{recentTransfers.length ? <div className="recent-list">{recentTransfers.map((transfer) => { const canSave = transfer.status === "completed" && transfer.direction === "incoming" && transfer.receivedFiles.length > 0; return <div className="recent-row" key={transfer.transferId}><span><strong>{transfer.files.map((file) => file.name).join(", ")}</strong><small>{transfer.direction === "incoming" ? "Received" : "Sent"} · {transfer.peerName} · {formatBytes(transfer.totalBytes)}</small></span><span className="recent-actions">{transfer.direction === "incoming" && transfer.status === "completed" && (transfer.receivedFiles.find((f) => f.savedToMacPath)?.savedToMacPath || receivedFolder) && <button type="button" className="icon-button folder-locate-button" aria-label={`Locate ${transfer.files[0]?.name ?? "received files"} in folder`} title="Locate in received-files folder" onClick={() => openReceivedFolder(transfer.receivedFiles.find((f) => f.savedToMacPath)?.savedToMacPath)}><FolderOpen size={15} aria-hidden="true" /></button>}{canSave && <button type="button" className="text-button" onClick={() => saveReceivedTransferFiles(transfer)}>{transfer.receivedFiles.length > 1 ? "Save ZIP" : "Save"}</button>}<span className="recent-state">{transfer.status === "completed" ? "Complete" : transfer.status === "cancelled" ? "Cancelled" : transfer.status === "declined" ? "Declined" : "Failed"}</span></span></div>; })}</div> : <p className="empty-history">Completed transfers will appear here.</p>}</section></div>}
+      {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="utility-modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="modal-heading"><div><p className="section-kicker">PREFERENCES</p><h2 id="settings-title">Settings</h2></div><button className="modal-close" aria-label="Close" onClick={() => setSettingsOpen(false)}>×</button></div><label className="setting-field">Device name<input defaultValue={deviceName} maxLength={40} onBlur={(event) => { const name = event.target.value.trim(); if (name && name !== deviceName) handleRenameDevice(name); }} /></label><label className="setting-toggle"><span><strong>Dark appearance</strong><small>Use a monochrome dark theme</small></span><input type="checkbox" checked={darkMode} onChange={() => setDarkMode((value) => !value)} /></label><label className="setting-toggle"><span><strong>Auto-beam copied text</strong><small>{snap.localDaemon.clipboardBridge ? "Automatically beam copied text in the background without returning to this page" : "Automatically beam newly copied or shared text to your connected device"}</small></span><input type="checkbox" checked={snap.autoClipboardSync} onChange={(event) => clientRef.current?.setAutoClipboardSync(event.target.checked)} /></label>{receivedFolder ? (
+            <div className="setting-field received-folder-setting">
+              <span><strong>Received files folder</strong></span>
+              <small className="received-folder-current">{receivedFolder}</small>
+              <span className="received-folder-controls">
+                <input aria-label="Received files folder path" value={receivedFolderInput} onChange={(event) => setReceivedFolderInput(event.target.value)} placeholder="~/Downloads/AirBridge or /absolute/path" />
+                <button type="button" className="secondary-button" disabled={folderSaving || !receivedFolderInput.trim() || receivedFolderInput.trim() === receivedFolder} onClick={saveReceivedFolder}>{folderSaving ? "Saving…" : "Save folder"}</button>
+                <button type="button" className="icon-button folder-locate-button" aria-label="Open received files folder" title="Open received files folder" onClick={() => openReceivedFolder()}><FolderOpen size={16} aria-hidden="true" /></button>
+              </span>
+              <small>New received files will be saved directly to this folder on this device. Only changeable from this device itself.</small>
+            </div>
+          ) : (
+            <div className="settings-info"><strong>Received files folder</strong><p>Received files are saved by your browser (usually its Downloads folder). On the device running AirBridge you can choose an exact folder here.</p></div>
+          )}
+          <div className="settings-info"><strong>About connection status</strong><p>“Running” means this app is connected to its transfer service. “Nearby” means another device was discovered; a secure session is only ready after pairing completes.</p></div><div className="settings-info"><strong>Privacy and consent</strong><p>Incoming transfers ask before saving. Auto-accept is off. Revoke trusted devices in advanced trust management.</p></div><a className="text-button advanced-toggle" href="https://github.com/DigantaDey/android-to-mac#important-current-product-limits" target="_blank" rel="noreferrer">About this version</a></section></div>}
       <TransferModal offer={activeIncomingOffer} senderPublicKey={incomingSenderPubKey} onAccept={(transferId, trustSender) => { if (trustSender && incomingSenderPubKey) clientRef.current?.toggleTrustedPeer(incomingSenderPubKey, true); clientRef.current?.acceptIncomingTransfer(transferId); }} onDecline={(transferId) => clientRef.current?.declineIncomingTransfer(transferId)} />
       {clipboardOpen && <ClipboardCenter peers={snap.peers} items={snap.clipboardItems} autoSync={snap.autoClipboardSync} hostClipboardActive={Boolean(snap.localDaemon.clipboardBridge)} initialPeerId={clipboardPeerId} prefill={clipboardPrefill} onToggleAutoSync={(enabled) => clientRef.current?.setAutoClipboardSync(enabled)} onMarkCopied={markLocalCopyHandled} onSend={handleSendClipboard} onClose={() => setClipboardOpen(false)} />}
       {toast && <div className="utility-toast" role="status"><strong>{toast.title}</strong><span>{toast.body}</span>{toast.actionLabel && <button type="button" className="toast-action" onClick={toast.onAction}>{toast.actionLabel}</button>}<button aria-label="Dismiss notification" onClick={() => setToast(null)}>×</button></div>}
