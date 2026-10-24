@@ -26,6 +26,16 @@ function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
 }
 
 export async function generateIdentityKeyPair(): Promise<IdentityKeys> {
+  // crypto.subtle only exists in secure contexts (HTTPS or localhost).
+  // Without this guard an http://<LAN-IP> page fails with an opaque
+  // "Cannot read properties of undefined (reading 'generateKey')".
+  if (!globalThis.crypto?.subtle) {
+    throw new Error(
+      'WebCrypto is unavailable because this page is not a secure context. ' +
+        'Open AirBridge over HTTPS (or http://localhost) — browsers block ' +
+        'crypto.subtle on plain-HTTP LAN addresses.'
+    );
+  }
   const kp = await globalThis.crypto.subtle.generateKey(
     { name: 'ECDH', namedCurve: 'P-256' },
     true,

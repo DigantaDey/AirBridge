@@ -224,8 +224,40 @@ export function App() {
         </section>
         {snap.connectionState !== "connected" && (
           <div className="recovery-note" role="status">
-            <div><strong>{!window.isSecureContext ? "Secure connection required" : "Could not reach the transfer service"}</strong><p>{!window.isSecureContext ? "This browser version needs a trusted HTTPS connection. A local Wi-Fi address cannot provide one." : "Check that AirBridge is running on the same network, then try again."}</p></div>
-            <button className="text-button" onClick={() => window.location.reload()}>Try again</button>
+            {!window.isSecureContext ? (
+              <>
+                <div>
+                  <strong>Secure connection required</strong>
+                  <p>
+                    Browsers only enable AirBridge&apos;s encryption on HTTPS or localhost
+                    pages, so this plain-HTTP Wi-Fi address can&apos;t start transfers. The
+                    AirBridge server serves HTTPS on this same address and port — switch to it:
+                  </p>
+                  <p>
+                    First visit only: if the browser says the certificate isn&apos;t trusted
+                    yet, install AirBridge&apos;s local CA from{" "}
+                    <code>{`http://${window.location.host}/airbridge-ca.crt`}</code> (Android:
+                    Settings → Security → Install a certificate → CA certificate) and check its
+                    SHA-256 fingerprint matches the one printed where AirBridge is running on
+                    the Mac, then reload the secure address.
+                  </p>
+                </div>
+                <button
+                  className="text-button"
+                  onClick={() => {
+                    const pair = initialPairCode ? `?pair=${encodeURIComponent(initialPairCode)}` : "";
+                    window.location.href = `https://${window.location.host}/${pair}`;
+                  }}
+                >
+                  Open secure (HTTPS) address
+                </button>
+              </>
+            ) : (
+              <>
+                <div><strong>Could not reach the transfer service</strong><p>Check that AirBridge is running on the same network, then try again.</p></div>
+                <button className="text-button" onClick={() => window.location.reload()}>Try again</button>
+              </>
+            )}
           </div>
         )}
         <section className="devices-section">

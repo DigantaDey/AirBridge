@@ -17,3 +17,6 @@ Thumbs.db
 .env.local
 coverage/
 tmp/
+
+# Generated local TLS CA (default lives in ~/.airbridge, never commit keys)
+.airbridge/
