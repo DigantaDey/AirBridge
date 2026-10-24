@@ -109,6 +109,26 @@ export function sanitizeFilename(rawName: string): string {
   return cleaned;
 }
 
+/**
+ * Pick a collision-free destination path inside `dir` for `safeName`,
+ * creating "name (1).ext", "name (2).ext", … variants when needed. The name
+ * must already be sanitized.
+ */
+export async function resolveFinalPath(dir: string, safeName: string): Promise<string> {
+  await fs.promises.mkdir(dir, { recursive: true });
+  const ext = path.extname(safeName);
+  const stem = path.basename(safeName, ext);
+
+  let candidate = safeName;
+  let counter = 1;
+  while (fs.existsSync(path.join(dir, candidate))) {
+    candidate = `${stem} (${counter})${ext}`;
+    counter++;
+  }
+
+  return path.join(dir, candidate);
+}
+
 export async function saveBufferToLocalDownloads(
   config: MacDaemonConfig,
   filename: string,
@@ -122,17 +142,9 @@ export async function saveBufferToLocalDownloads(
   await fs.promises.mkdir(config.downloadDir, { recursive: true });
 
   const safeName = sanitizeFilename(filename);
-  const ext = path.extname(safeName);
-  const stem = path.basename(safeName, ext);
 
-  let candidate = safeName;
-  let counter = 1;
-  while (fs.existsSync(path.join(config.downloadDir, candidate))) {
-    candidate = `${stem} (${counter})${ext}`;
-    counter++;
-  }
-
-  const finalPath = path.join(config.downloadDir, candidate);
+  const finalPath = await resolveFinalPath(config.downloadDir, safeName);
+  const finalName = path.basename(finalPath);
   const tempPath = `${finalPath}.airbridge.part`;
 
   await fs.promises.writeFile(tempPath, data);
@@ -142,7 +154,7 @@ export async function saveBufferToLocalDownloads(
     if (config.notifyOnReceive) {
       triggerMacNotification(
         'AirBridge — File Received',
-        `${candidate}${senderName ? ` from ${senderName}` : ''} saved to Downloads`
+        `${finalName}${senderName ? ` from ${senderName}` : ''} saved to Downloads`
       );
     }
     if (config.revealInFinder) {
@@ -150,7 +162,7 @@ export async function saveBufferToLocalDownloads(
     }
   }
 
-  return { savedPath: finalPath, finalName: candidate };
+  return { savedPath: finalPath, finalName };
 }
 
 export function triggerMacNotification(title: string, subtitle: string): void {

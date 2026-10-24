@@ -41,11 +41,19 @@ one side doesn't lose the other side's record.
 
 ### Received files
 
-When the service is running on the machine receiving the file, incoming files are
-written straight to disk (up to 512 MB per file) and a macOS notification is posted.
-The default folder is `~/Downloads/AirBridge`; change it in **Settings → Received files
-folder**, with `--dir` on the CLI, or with `AIRBRIDGE_DOWNLOAD_DIR`. The choice is
-remembered per machine in `~/.airbridge/settings.json`.
+When the service is running on the machine receiving the file, each decrypted chunk is
+streamed straight to disk as it arrives — the browser never holds the whole file in
+memory, and there is no per-file size cap on the host. A macOS notification is posted
+once the file is complete and verified. The default folder is `~/Downloads/AirBridge`;
+change it in **Settings → Received files folder**, with `--dir` on the CLI, or with
+`AIRBRIDGE_DOWNLOAD_DIR`. The choice is remembered per machine in `~/.airbridge/settings.json`.
+
+Chunks are written to a `.part` file at their declared offset and a small manifest is
+persisted beside it, so a transfer that is interrupted (tab closed, network dropped) can
+resume from the highest contiguous chunk already on disk instead of starting over. A
+re-delivered chunk is a no-op, and a transfer that is cancelled or declines leaves its
+partial behind under `~/Downloads/AirBridge/.airbridge-partial/` rather than a corrupt
+file.
 
 The folder icon in the header (and next to saved items in **Recent transfers**) opens
 that folder in Finder, Explorer, or your Linux file manager. Folder browsing for the
@@ -261,8 +269,9 @@ The server's own endpoints, for debugging or scripting: `GET /api/health`,
 `GET /api/received-folder` and `PUT /api/received-folder`,
 `POST /api/received-folder/open`, `GET /api/fs/list`, `POST /api/fs/mkdir`,
 `POST /api/daemon/save`, `GET /api/beam/:token[/file/:index]`, and the `/ws` signaling
-socket. The folder, filesystem and daemon routes answer only on
-loopback; from anywhere else they return 403.
+socket. The folder and filesystem routes answer only on loopback; the daemon
+routes answer from this machine (loopback or one of its own interfaces, so the host
+browser works over the LAN IP too). From anywhere else they return 403.
 
 ## If something's wrong
 
@@ -271,11 +280,15 @@ loopback; from anywhere else they return 403.
 - **No devices in the list.** Both sides need the same server and both need visibility
   set to *Nearby*, or a shared pair code. Guest Wi-Fi and client-isolated networks block
   this; use a phone hotspot if you're stuck.
-- **Transfers stall on a large file.** Received data is held in memory until the file is
-  complete, so a many-gigabyte file can exhaust the receiving browser. Try smaller
-  batches, or send from the CLI where no per-chunk browser buffer is involved.
-- **A transfer dies when you switch apps.** Both pages have to stay open. A backgrounded
-  mobile tab can have its socket throttled, and a stalled transfer isn't resumable.
+- **Transfers stall on a large file.** On the machine running the server, chunks stream
+  to disk as they arrive, so size is bounded by disk, not RAM. On a phone (or when
+  direct-to-disk saving is off), the file is still reassembled in browser memory first —
+  try smaller batches, or send from the CLI where no per-chunk browser buffer is involved.
+- **Both pages still have to stay open.** The host daemon writes chunks to disk in the
+  background as they arrive and a re-established transfer resumes from its partial, but
+  the receiving browser must stay connected to decrypt and forward chunks. A backgrounded
+  mobile tab can have its socket throttled, and there is no cross-reload recovery of an
+  in-flight offer.
 
 ## How transfers actually work
 
@@ -359,10 +372,10 @@ These are real gaps, not TODO padding:
   "across networks" means you've made the server reachable somehow.
 - **The phone certificate install is manual.** That's a browser/OS trust requirement no
   web app can automate away.
-- **Received data is buffered in memory.** Large incoming files can exhaust the device;
-  interrupted transfers aren't resumable and there's no partial-file recovery. A
-  direct-to-disk save is a single 512 MB request, so anything larger falls back to a
-  browser download even on the machine running the server.
+- **The phone still buffers in memory.** The host streams received chunks straight to
+  disk, but a phone (or any client without the local daemon) reassembles the file in
+  browser memory before saving, so a many-gigabyte file sent *to* a phone can still
+  exhaust it. Sending *from* a phone is unaffected.
 - **A hash mismatch doesn't block the write.** The per-file hash is checked and shown as
   a shield icon in the transfer list, but the file is still handed to the save path. If
   integrity matters for what you're moving, look for that icon (its tooltip carries the

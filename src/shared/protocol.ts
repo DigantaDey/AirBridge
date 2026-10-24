@@ -73,6 +73,12 @@ export type ControlPayload =
       kind: 'transfer-accept';
       transferId: string;
       preferredTransport: TransportKind;
+      /**
+       * Optional resume hint: per file index, the highest contiguous chunk
+       * index the receiver already has on disk. The sender may skip sending
+       * chunks below it. Forward-compatible: older senders ignore it.
+       */
+      resumeFromChunks?: Record<number, number>;
     }
   | {
       kind: 'transfer-decline';
