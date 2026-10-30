@@ -8,8 +8,9 @@ import java.net.Inet4Address
 
 /**
  * mDNS browse for the desktop AirBridge server (`_airbridge._tcp`, registered
- * by mdnsService.ts). Found hosts surface as `ws://ip:port/ws` candidates the
- * user can tap to connect — no typing, no QR reader needed on the phone.
+ * by mdnsService.ts). Found hosts surface as `ws://ip:port/ws` candidates, which
+ * the unpaired connect screen lists as "Computers on this network" — so a phone
+ * on the same Wi-Fi can connect without typing an address or scanning a QR.
  */
 class ServerDiscovery(
     context: Context,
