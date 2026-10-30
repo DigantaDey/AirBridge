@@ -53,6 +53,9 @@ class QrScannerView(context: Context) : FrameLayout(context) {
     /** Called on the main thread when the user taps close. */
     var onClose: (() -> Unit)? = null
 
+    /** Called on the main thread when no usable camera could be opened. */
+    var onCameraUnavailable: (() -> Unit)? = null
+
     private val preview = SurfaceView(context)
     private val overlay = ScannerOverlay(context)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -217,9 +220,13 @@ class QrScannerView(context: Context) : FrameLayout(context) {
         if (camera != null) return
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val info = try {
-            pickCamera(manager) ?: return
+            pickCamera(manager)
         } catch (e: CameraAccessException) {
             Log.w(TAG, "camera unavailable: ${e.message}")
+            null
+        }
+        if (info == null) {
+            mainHandler.post { onCameraUnavailable?.invoke() }
             return
         }
         val thread = HandlerThread("airbridge-qr").also { it.start() }
@@ -257,6 +264,7 @@ class QrScannerView(context: Context) : FrameLayout(context) {
         } catch (e: Exception) {
             Log.w(TAG, "openCamera failed: ${e.message}")
             stopCamera()
+            mainHandler.post { onCameraUnavailable?.invoke() }
         }
     }
 

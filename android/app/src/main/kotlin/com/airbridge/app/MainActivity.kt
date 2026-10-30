@@ -342,6 +342,12 @@ class MainActivity : Activity() {
             handleScanned(payload)
         }
         view.onClose = { closeScanner() }
+        view.onCameraUnavailable = {
+            if (scanner === view) {
+                closeScanner()
+                toast("The camera is unavailable on this device — type your computer's address")
+            }
+        }
         scanner = view
         root.addView(
             view,
