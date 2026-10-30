@@ -11,6 +11,15 @@ and open `http://localhost:8000`.
 
 ## Publish on GitHub Pages
 
+`workflow_dispatch` also works: Actions → **Deploy website to GitHub Pages** →
+*Run workflow*.
+
+> **Only `pages.yml` may deploy Pages.** Never upload the repository root from
+> a Pages workflow. `static.yml` used to do exactly that; the root `index.html`
+> is the Vite dev shell (`<div id="root">` + `/src/client/main.tsx`), so the
+> custom domain served a blank page. `pages.yml` publishes `website/` only and
+> fails the build if a dev shell or absolute asset path appears.
+
 1. Merge the website and `.github/workflows/pages.yml` into `main`.
 2. In the GitHub repository, open **Settings → Pages → Build and deployment** and
    select **GitHub Actions** as the source. The workflow runs when website files

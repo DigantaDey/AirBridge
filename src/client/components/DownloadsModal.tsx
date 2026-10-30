@@ -40,14 +40,14 @@ const DESKTOP_ASSETS: AssetCard[] = [
     id: "mac-arm",
     title: "macOS",
     subtitle: "Apple silicon (M1–M4)",
-    file: "AirBridge-macos-arm64",
+    file: "AirBridge-darwin-arm64",
     icon: Laptop,
   },
   {
     id: "mac-x64",
     title: "macOS",
     subtitle: "Intel",
-    file: "AirBridge-macos-x64",
+    file: "AirBridge-darwin-x64",
     icon: Laptop,
   },
   {
