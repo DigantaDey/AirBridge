@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+.vite/
+
+# Logs & runtime
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Local environment & test artifacts
+.env
+.env.local
+coverage/
+tmp/
+
+# Generated local TLS CA (default lives in ~/.airbridge, never commit keys)
+.airbridge/
+
+# Desktop single-file build outputs
+dist-bin/
+
+# Android build outputs (Gradle + local verify.sh)
+.gradle/
+android/build/
+android/app/build/
+android/engine/build/
+build/verify/

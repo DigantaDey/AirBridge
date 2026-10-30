@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#0b0f17" />
+  <title>AirBridge — Scan</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      margin: 0; height: 100%; background: #0b0f17; color: #e8eefc;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      overflow: hidden; touch-action: none;
+    }
+    #stage { position: fixed; inset: 0; }
+    #video {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      object-fit: cover; background: #0b0f17;
+    }
+    #shade {
+      position: absolute; inset: 0; pointer-events: none;
+      background:
+        linear-gradient(to bottom, rgba(11,15,23,.78) 0%, rgba(11,15,23,0) 22%, rgba(11,15,23,0) 62%, rgba(11,15,23,.78) 100%),
+        radial-gradient(120% 80% at 50% 50%, rgba(0,0,0,0) 55%, rgba(0,0,0,.55) 100%);
+    }
+    #frame {
+      position: absolute; top: 50%; left: 50%;
+      width: min(72vw, 300px); height: min(72vw, 300px);
+      transform: translate(-50%, -50%);
+      border: 2px solid rgba(255,255,255,.92);
+      border-radius: 22px;
+      box-shadow: 0 0 0 9999px rgba(11,15,23,.42);
+    }
+    #frame::before, #frame::after {
+      content: ""; position: absolute; width: 34px; height: 34px;
+      border: 4px solid #4cc2ff;
+    }
+    #frame::before { top: -2px; left: -2px; border-right: 0; border-bottom: 0; border-top-left-radius: 22px; }
+    #frame::after { bottom: -2px; right: -2px; border-left: 0; border-top: 0; border-bottom-right-radius: 22px; }
+    #laser {
+      position: absolute; left: 6%; right: 6%; top: 50%; height: 2px;
+      background: linear-gradient(to right, rgba(76,194,255,0), #4cc2ff, rgba(76,194,255,0));
+      box-shadow: 0 0 12px 2px rgba(76,194,255,.65);
+      animation: sweep 2.4s ease-in-out infinite;
+    }
+    @keyframes sweep {
+      0% { top: 14%; opacity: .2; }
+      50% { top: 86%; opacity: 1; }
+      100% { top: 14%; opacity: .2; }
+    }
+    #topbar {
+      position: absolute; top: 0; left: 0; right: 0;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: max(14px, env(safe-area-inset-top)) 16px 14px;
+      background: linear-gradient(to bottom, rgba(11,15,23,.85), rgba(11,15,23,0));
+    }
+    #brand { display: flex; align-items: center; gap: 9px; font-weight: 650; font-size: 15px; letter-spacing: -.02em; }
+    #brand .mark {
+      width: 24px; height: 24px; border: 1px solid #e8eefc; border-radius: 7px;
+      display: grid; place-items: center; font-size: 12px; font-weight: 700;
+    }
+    #close {
+      border: 0; background: rgba(255,255,255,.14); color: #fff;
+      width: 42px; height: 42px; border-radius: 50%; font-size: 22px; line-height: 1;
+      display: grid; place-items: center; cursor: pointer;
+    }
+    #close:active { background: rgba(255,255,255,.28); }
+    #caption {
+      position: absolute; left: 0; right: 0; bottom: 0;
+      padding: 18px 22px max(20px, env(safe-area-inset-bottom));
+      background: linear-gradient(to top, rgba(11,15,23,.92), rgba(11,15,23,0));
+      text-align: center;
+    }
+    #caption h1 { margin: 0 0 6px; font-size: 17px; font-weight: 600; }
+    #caption p { margin: 0; font-size: 12.5px; color: #9aa7c2; line-height: 1.45; }
+    #status {
+      margin-top: 10px; font-size: 12.5px; color: #ffd479; min-height: 18px;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #ffd479; animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: .35; } 50% { opacity: 1; } }
+    #error {
+      position: absolute; inset: 0; display: none; flex-direction: column;
+      align-items: center; justify-content: center; gap: 14px; padding: 32px; text-align: center;
+    }
+    #error h2 { margin: 0; font-size: 17px; }
+    #error p { margin: 0; color: #9aa7c2; font-size: 13px; line-height: 1.5; max-width: 320px; }
+    #error button {
+      margin-top: 6px; border: 0; background: #4cc2ff; color: #062033;
+      font-weight: 650; font-size: 14px; padding: 12px 22px; border-radius: 999px; cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <video id="video" autoplay playsinline muted></video>
+    <div id="shade"></div>
+    <div id="frame"><div id="laser"></div></div>
+  </div>
+
+  <div id="topbar">
+    <div id="brand"><span class="mark">A</span>AirBridge</div>
+    <button id="close" aria-label="Close scanner">&times;</button>
+  </div>
+
+  <div id="caption">
+    <h1>Scan the AirBridge QR code</h1>
+    <p>Point the camera at the code shown on your other device.</p>
+    <div id="status"></div>
+  </div>
+
+  <div id="error">
+    <h2>Camera unavailable</h2>
+    <p id="errorText">Grant camera access to scan a QR code, or close this and enter the address manually.</p>
+    <button id="retry">Try again</button>
+  </div>
+
+  <script src="jsqr.js"></script>
+  <script>
+    (function () {
+      var video = document.getElementById('video');
+      var status = document.getElementById('status');
+      var errorBox = document.getElementById('error');
+      var errorText = document.getElementById('errorText');
+      var canvas = document.createElement('canvas');
+      var ctx = canvas.getContext('2d', { willReadFrequently: true });
+      var stream = null;
+      var raf = 0;
+      var lastTick = 0;
+      var decodeSize = 360;
+
+      function setStatus(html) { status.innerHTML = html; }
+
+      function fail(message) {
+        errorText.textContent = message;
+        errorBox.style.display = 'flex';
+        if (stream) { stopStream(); }
+      }
+
+      function stopStream() {
+        if (stream) {
+          stream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} });
+          stream = null;
+        }
+        cancelAnimationFrame(raf);
+      }
+
+      function finish(text) {
+        if (!text) return;
+        stopStream();
+        if (window.AirBridgeNative && typeof window.AirBridgeNative.onScan === 'function') {
+          window.AirBridgeNative.onScan(text);
+        }
+      }
+
+      function tick(now) {
+        raf = requestAnimationFrame(tick);
+        if (now - lastTick < 90) return; // ~11 fps — plenty for a QR
+        lastTick = now;
+        var w = video.videoWidth, h = video.videoHeight;
+        if (!w || !h) return;
+        var scale = Math.min(decodeSize / w, decodeSize / h);
+        var sw = Math.max(1, Math.round(w * scale));
+        var sh = Math.max(1, Math.round(h * scale));
+        if (canvas.width !== sw || canvas.height !== sh) { canvas.width = sw; canvas.height = sh; }
+        ctx.drawImage(video, 0, 0, sw, sh);
+        var imageData;
+        try { imageData = ctx.getImageData(0, 0, sw, sh); } catch (e) { return; }
+        var code = jsQR(imageData.data, sw, sh, { inversionAttempts: 'attemptBoth' });
+        if (code && code.data) {
+          finish(code.data);
+        }
+      }
+
+      function start() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          fail('This browser cannot access the camera. Close this screen and enter the address manually.');
+          return;
+        }
+        setStatus('<span class="dot"></span>Starting camera…');
+        navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false
+        }).then(function (s) {
+          stream = s;
+          video.srcObject = s;
+          video.onloadedmetadata = function () {
+            setStatus('<span class="dot"></span>Scanning…');
+            raf = requestAnimationFrame(tick);
+          };
+        }).catch(function (err) {
+          var msg = 'Could not start the camera.';
+          if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
+            msg = 'Camera permission was denied. Grant access and try again, or close this screen.';
+          } else if (err && err.name === 'NotFoundError') {
+            msg = 'No camera was found on this device. Close this screen and enter the address manually.';
+          }
+          fail(msg);
+        });
+      }
+
+      document.getElementById('close').addEventListener('click', function () {
+        if (window.AirBridgeNative && typeof window.AirBridgeNative.onCancel === 'function') {
+          window.AirBridgeNative.onCancel();
+        } else {
+          window.history.back();
+        }
+      });
+      document.getElementById('retry').addEventListener('click', function () {
+        errorBox.style.display = 'none';
+        start();
+      });
+
+      start();
+    })();
+  </script>
+</body>
+</html>

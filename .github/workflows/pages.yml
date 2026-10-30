@@ -1,0 +1,59 @@
+name: Deploy website to GitHub Pages
+
+# This is the ONLY Pages workflow. It publishes `website/` (the standalone
+# marketing site). Never publish the repository root here: its index.html is the
+# Vite dev shell (`<div id="root">` + /src/client/main.tsx) which needs a bundler
+# and renders blank when served as static files — that is what airbridge.fyi used
+# to show.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build site artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: Sanity-check the published site
+        run: |
+          set -euo pipefail
+          test -f website/index.html || { echo "::error title=missing website::website/index.html not found"; exit 1; }
+          test -f website/styles.css || { echo "::error title=missing styles::website/styles.css not found"; exit 1; }
+          if grep -q 'src/client/main.tsx' website/index.html; then
+            echo "::error title=dev shell published::website/index.html references the Vite dev entry"
+            exit 1
+          fi
+          if grep -q 'src="/' website/index.html; then
+            echo "::error title=absolute asset path::website/index.html must use relative paths for Pages subpaths"
+            exit 1
+          fi
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website
+
+  deploy:
+    name: Deploy
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

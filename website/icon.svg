@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="48" y1="32" x2="464" y2="480" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#111520"/>
+      <stop offset="100%" stop-color="#07090E"/>
+    </linearGradient>
+    <linearGradient id="beam" x1="120" y1="256" x2="392" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34D399"/>
+      <stop offset="50%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#818CF8"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#bg)"/>
+  <rect x="8" y="8" width="496" height="496" rx="108" stroke="rgba(255,255,255,0.12)" stroke-width="4"/>
+  <!-- Concentric AirBridge radar arcs -->
+  <circle cx="256" cy="256" r="176" stroke="url(#beam)" stroke-opacity="0.22" stroke-width="6" stroke-dasharray="14 14"/>
+  <circle cx="256" cy="256" r="124" stroke="url(#beam)" stroke-opacity="0.45" stroke-width="6"/>
+  <circle cx="256" cy="256" r="72" stroke="url(#beam)" stroke-opacity="0.75" stroke-width="6"/>
+  <!-- Bidirectional Warp Bridge -->
+  <path d="M148 232H352L314 194" stroke="#34D399" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M364 280H160L198 318" stroke="#38BDF8" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Center Core -->
+  <circle cx="256" cy="256" r="18" fill="#F8FAFC"/>
+</svg>
