@@ -290,10 +290,14 @@ class QrScannerView(context: Context) : FrameLayout(context) {
         if (surface != null && surface.isValid) targets.add(surface)
         targets.add(imageReader.surface)
         try {
-            val request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                for (target in targets) addTarget(target)
-                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+            for (target in targets) builder.addTarget(target)
+            // Fixed-focus cameras reject continuous AF; the preview still works.
+            try {
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            } catch (_: Exception) {
             }
+            val request = builder
             @Suppress("DEPRECATION")
             device.createCaptureSession(targets, object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(configured: CameraCaptureSession) {

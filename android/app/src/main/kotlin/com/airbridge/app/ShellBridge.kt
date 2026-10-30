@@ -17,6 +17,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.OutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 
 /**
  * `window.AirBridgeAndroid` — the only bridge between the web UI and Android.
@@ -158,6 +160,53 @@ class ShellBridge(private val activity: MainActivity) {
         }
     }
 
+    /**
+     * Fetches a download the page linked to on the relay origin (the in-app
+     * Download centre's local artifacts, for instance) and writes it through the
+     * same save path. Runs on a worker thread: HttpURLConnection to loopback is
+     * permitted by the network security config.
+     */
+    fun downloadFromRelay(url: String, suggestedName: String, mimeType: String) {
+        Thread {
+            var handle = -1
+            try {
+                val connection = URL(url).openConnection() as HttpURLConnection
+                connection.connectTimeout = 10_000
+                connection.readTimeout = 30_000
+                connection.instanceFollowRedirects = true
+                try {
+                    if (connection.responseCode !in 200..299) {
+                        Log.w(TAG, "download failed: HTTP ${connection.responseCode} for $url")
+                        return@Thread
+                    }
+                    val name = suggestedName.ifEmpty { "airbridge-file" }
+                    val mime = connection.contentType?.substringBefore(';')?.trim()
+                        ?.takeIf { it.isNotEmpty() && it != "application/octet-stream" }
+                        ?: mimeType.ifBlank { "application/octet-stream" }
+                    handle = beginSave(name, mime)
+                    if (handle < 0) return@Thread
+                    connection.inputStream.use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            val chunk = Base64.encodeToString(buffer, 0, read, Base64.NO_WRAP)
+                            if (!appendSave(handle, chunk)) throw IOException("write failed")
+                        }
+                    }
+                    finishSave(handle)
+                    handle = -1
+                } finally {
+                    connection.disconnect()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "download failed for $url: ${e.message}")
+            } finally {
+                if (handle >= 0) abortSave(handle)
+            }
+        }.also { it.isDaemon = true }.start()
+    }
+
     // ------------------------------------------------- connect screen (unpaired)
 
     /** JSON describing the shell so the connect page can render itself. */
@@ -216,7 +265,16 @@ class ShellBridge(private val activity: MainActivity) {
         }
         val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
             ?: throw IOException("MediaStore refused the download")
-        val stream = resolver.openOutputStream(uri) ?: throw IOException("MediaStore gave no stream")
+        val stream = try {
+            resolver.openOutputStream(uri) ?: throw IOException("MediaStore gave no stream")
+        } catch (e: Exception) {
+            // Do not leave a pending row behind when the write could not start.
+            try {
+                resolver.delete(uri, null, null)
+            } catch (_: Exception) {
+            }
+            throw e
+        }
         return SaveSession(
             name = name,
             stream = stream,

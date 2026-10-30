@@ -12,6 +12,7 @@ import android.view.ViewGroup
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -48,6 +49,7 @@ class MainActivity : Activity() {
     private var pendingChooser: ValueCallback<Array<Uri>>? = null
     private var pendingScanAfterPermission = false
     private var connectedLink: PairingLink? = null
+    private lateinit var bridge: ShellBridge
 
     /** Computers announced over mDNS, keyed by base address. */
     private val nearby = LinkedHashMap<String, NearbyHost>()
@@ -122,10 +124,17 @@ class MainActivity : Activity() {
             settings.cacheMode = WebSettings.LOAD_DEFAULT
             webViewClient = ShellWebViewClient()
             webChromeClient = ShellChromeClient()
-            addJavascriptInterface(ShellBridge(this@MainActivity), BRIDGE_NAME)
-            setDownloadListener { url, _, _, _, _ ->
+            bridge = ShellBridge(this@MainActivity)
+            addJavascriptInterface(bridge, BRIDGE_NAME)
+            setDownloadListener { url, _, contentDisposition, mimeType, _ ->
+                // blob:/data: downloads are handled by the page through the bridge.
                 if (url.startsWith("blob:") || url.startsWith("data:")) return@setDownloadListener
-                openExternally(Uri.parse(url))
+                val uri = Uri.parse(url)
+                if (isShellPage(uri)) {
+                    bridge.downloadFromRelay(url, downloadName(uri, contentDisposition), mimeType.orEmpty())
+                } else {
+                    openExternally(uri)
+                }
             }
         }
         root.addView(
@@ -144,6 +153,23 @@ class MainActivity : Activity() {
             Log.w(TAG, "web renderer gone (crashed=${detail.didCrash()})")
             recreate()
             return true
+        }
+
+        /**
+         * The paired computer is off or off the network: Chromium would show its
+         * own error page, which leaves the user stuck in the shell. Fall back to
+         * the connect screen (last address pre-filled) instead.
+         */
+        override fun onReceivedError(
+            view: WebView,
+            request: WebResourceRequest,
+            error: WebResourceError,
+        ) {
+            if (!request.isForMainFrame) return
+            val host = connectedLink?.host ?: "your computer"
+            Log.w(TAG, "main frame failed: ${error.description} ($host)")
+            toast("Could not reach $host")
+            root.post { showConnectScreen() }
         }
 
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -221,6 +247,13 @@ class MainActivity : Activity() {
         if (scheme != "http" && scheme != "https") return false
         val host = uri.host?.lowercase() ?: return false
         return host == "127.0.0.1" || host == "localhost" || host == CONNECT_HOST
+    }
+
+    /** Best-effort file name for a download link. */
+    private fun downloadName(uri: Uri, contentDisposition: String?): String {
+        val quoted = contentDisposition?.substringAfter("filename=", "")?.trim()?.trim('"')
+        if (!quoted.isNullOrBlank() && quoted != contentDisposition) return quoted.substringAfterLast('/')
+        return uri.lastPathSegment?.substringAfterLast('/')?.ifBlank { null } ?: "airbridge-file"
     }
 
     private fun openExternally(uri: Uri) {

@@ -155,7 +155,7 @@ describe("unpaired connect screen", () => {
     expect(document.getElementById("shell-note")?.textContent).toContain("no camera");
   });
 
-  it("shows the paired address and offers it as a hint", () => {
+  it("pre-fills the last paired address so retrying is one tap", () => {
     const { document } = mount({
       state: () =>
         JSON.stringify({ paired: true, address: "https://192.168.1.5", pairCode: "ABCDEF", camera: true }),
@@ -166,9 +166,8 @@ describe("unpaired connect screen", () => {
     });
 
     expect(document.getElementById("state-label")?.textContent).toBe("Paired with https://192.168.1.5");
-    expect((document.getElementById("address") as HTMLInputElement).placeholder).toBe(
-      "https://192.168.1.5",
-    );
+    // Pre-filled, so a retry (or a reconnect after the computer was asleep) is one tap.
+    expect((document.getElementById("address") as HTMLInputElement).value).toBe("https://192.168.1.5");
   });
 
   it("degrades gracefully when the page is opened outside the app", () => {

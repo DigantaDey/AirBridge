@@ -319,7 +319,10 @@
           }
           var state = parse(bridge.state(), {});
           stateEl.textContent = state.paired ? "Paired with " + state.address : "Not connected";
-          if (state.address && !inputEl.value) inputEl.placeholder = state.address;
+          // Pre-fill the last computer so "retry" is one tap after it was unreachable.
+          if (state.address && !inputEl.value) {
+            inputEl.value = state.address;
+          }
           noteEl.textContent = state.camera ? "AirBridge for Android" : "AirBridge for Android · no camera";
           renderHosts(parse(bridge.nearbyHosts(), []));
         }
