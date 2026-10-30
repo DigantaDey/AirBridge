@@ -47,7 +47,8 @@ mkdir -p "$INSTALL_DIR"
 bin="$INSTALL_DIR/AirBridge"
 tmp="$(mktemp "${TMPDIR:-/tmp}/airbridge.XXXXXX")"
 sums="$(mktemp "${TMPDIR:-/tmp}/airbridge-sums.XXXXXX")"
-cleanup() { rm -f "$tmp" "$sums"; }
+errlog="$(mktemp "${TMPDIR:-/tmp}/airbridge-err.XXXXXX")"
+cleanup() { rm -f "$tmp" "$sums" "$errlog"; }
 trap cleanup EXIT
 
 # --- release URLs -----------------------------------------------------------
@@ -74,10 +75,15 @@ if [ "$platform" = "Linux" ]; then
   fi
 fi
 
+# -s keeps the progress meter quiet; 2>$errlog preserves the reason a download
+# failed so the error message can be specific instead of a bare curl exit code.
 fetch() { # fetch <url> <dest>
-  curl -fL --proto '=https' --tlsv1.2 --connect-timeout 20 \
-       --retry 2 --retry-delay 1 -o "$2" "$1" 2>/dev/null
+  : > "$errlog"
+  curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 20 \
+       --retry 2 --retry-delay 1 -o "$2" "$1" 2>"$errlog"
 }
+
+last_error() { [ -s "$errlog" ] && sed 's/^/  /' "$errlog" >&2 || true; }
 
 # Ask the GitHub API for the newest release and return the asset name that
 # matches this platform — tolerates historical names such as macOS-*.
@@ -127,7 +133,12 @@ download_binary() {
     fi
   fi
 
-  echo "✖ no prebuilt AirBridge binary is published for ${platform}/${a} yet." >&2
+  if grep -qi '404\|not found' "$errlog" 2>/dev/null; then
+    echo "✖ no prebuilt AirBridge binary is published for ${platform}/${a} yet." >&2
+  else
+    echo "✖ could not download ${asset} — the network request failed:" >&2
+    last_error
+  fi
   return 1
 }
 
@@ -171,8 +182,7 @@ install_from_source() {
   fi
   mkdir -p "$(dirname "$src")"
   if [ -d "$src/.git" ]; then
-    git -C "$src" fetch --depth 1 origin "$(git -C "$src" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)" >/dev/null 2>&1 || true
-    git -C "$src" pull --ff-only >/dev/null 2>&1 || true
+    git -C "$src" pull --ff-only --depth 1 >/dev/null 2>&1 || true
   else
     rm -rf "$src"
     git clone --depth 1 "https://github.com/${REPO}.git" "$src" >/dev/null 2>&1 || {
@@ -212,6 +222,17 @@ else
   verify_checksum
   chmod +x "$tmp"
   mv "$tmp" "$bin.tmp"
+  # A binary that cannot report its version is the wrong arch, truncated, or
+  # unsigned in a way the kernel refuses (Apple silicon kills unsigned arm64).
+  if ! "$bin.tmp" --version >/dev/null 2>"$errlog"; then
+    echo "✖ the downloaded binary failed to start:" >&2
+    last_error
+    rm -f "$bin.tmp"
+    if [ "${AIRBRIDGE_ALLOW_SOURCE:-1}" = "0" ]; then exit 1; fi
+    echo "▸ trying a local source build instead"
+    install_from_source || exit 1
+    mode="source"
+  fi
 fi
 
 chmod +x "$bin.tmp"
