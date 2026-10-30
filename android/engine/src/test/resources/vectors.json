@@ -1,0 +1,246 @@
+{
+ "identities": [
+  {
+   "pkcs8": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgoy31tPaa6CXuyOJp37pOzrG-cXmWdoDLaepCTfXcXxihRANCAAQ4ATRCwB69a7XJIrFS_dxX7h48EzuvJ_bFitJmXnz41xwqyxDt21t6MD9g2DyPH4F8tgOQndPbOGwvyichLhne",
+   "peerPub": "BHkLKJh-7zYU0LUgE2McPYsjhWFXxdaSPOHPurSQU1SHESfrOzbJsj12qe4jOQWUTSolbhhvjtO9EVCtvHEjzSQ",
+   "sharedB64": "H661ZNAt6xlT6qJJ4oAvAr9u2K2fcHF87oeIgA95Wgo"
+  },
+  {
+   "pkcs8": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg3wYEaAwj3v9yqgmIIniDkEL46qSdU5OOO7m4QVk5sGehRANCAAR5CyiYfu82FNC1IBNjHD2LI4VhV8XWkjzhz7q0kFNUhxEn6zs2ybI9dqnuIzkFlE0qJW4Yb47TvRFQrbxxI80k",
+   "peerPub": "BDgBNELAHr1rtckisVL93FfuHjwTO68n9sWK0mZefPjXHCrLEO3bW3owP2DYPI8fgXy2A5Cd09s4bC_KJyEuGd4",
+   "sharedB64": "H661ZNAt6xlT6qJJ4oAvAr9u2K2fcHF87oeIgA95Wgo"
+  }
+ ],
+ "sessions": [
+  {
+   "pkcs8": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgoy31tPaa6CXuyOJp37pOzrG-cXmWdoDLaepCTfXcXxihRANCAAQ4ATRCwB69a7XJIrFS_dxX7h48EzuvJ_bFitJmXnz41xwqyxDt21t6MD9g2DyPH4F8tgOQndPbOGwvyichLhne",
+   "pubA": "BDgBNELAHr1rtckisVL93FfuHjwTO68n9sWK0mZefPjXHCrLEO3bW3owP2DYPI8fgXy2A5Cd09s4bC_KJyEuGd4",
+   "pubB": "BHkLKJh-7zYU0LUgE2McPYsjhWFXxdaSPOHPurSQU1SHESfrOzbJsj12qe4jOQWUTSolbhhvjtO9EVCtvHEjzSQ",
+   "sas": "282 · 837",
+   "fingerprint": "DEB0:7E8F:50EA",
+   "hkdfKeyB64": "tRE4tYYHoWEcEA4oEJTOKWqbHBeDVdsx03JBoz3qcJk"
+  }
+ ],
+ "envelopes": [
+  {
+   "pkcs8": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgoy31tPaa6CXuyOJp37pOzrG-cXmWdoDLaepCTfXcXxihRANCAAQ4ATRCwB69a7XJIrFS_dxX7h48EzuvJ_bFitJmXnz41xwqyxDt21t6MD9g2DyPH4F8tgOQndPbOGwvyichLhne",
+   "pubA": "BDgBNELAHr1rtckisVL93FfuHjwTO68n9sWK0mZefPjXHCrLEO3bW3owP2DYPI8fgXy2A5Cd09s4bC_KJyEuGd4",
+   "pubB": "BHkLKJh-7zYU0LUgE2McPYsjhWFXxdaSPOHPurSQU1SHESfrOzbJsj12qe4jOQWUTSolbhhvjtO9EVCtvHEjzSQ",
+   "plaintext": "{\"kind\":\"ping\",\"ts\":1700000000000}",
+   "ivB64": "ILNrXYTexeC69Y8g",
+   "ciphertextB64": "M8RQrG7SfyLs_sSh7pxpIHE5Twf30FNoZuiwUgFUIidicfDRsEid8gb_vxIOC546fL0"
+  }
+ ],
+ "chunks": [
+  {
+   "pkcs8": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgoy31tPaa6CXuyOJp37pOzrG-cXmWdoDLaepCTfXcXxihRANCAAQ4ATRCwB69a7XJIrFS_dxX7h48EzuvJ_bFitJmXnz41xwqyxDt21t6MD9g2DyPH4F8tgOQndPbOGwvyichLhne",
+   "pubA": "BDgBNELAHr1rtckisVL93FfuHjwTO68n9sWK0mZefPjXHCrLEO3bW3owP2DYPI8fgXy2A5Cd09s4bC_KJyEuGd4",
+   "pubB": "BHkLKJh-7zYU0LUgE2McPYsjhWFXxdaSPOHPurSQU1SHESfrOzbJsj12qe4jOQWUTSolbhhvjtO9EVCtvHEjzSQ",
+   "fileIndex": 3,
+   "chunkIndex": 41,
+   "plainB64": "ByZFZIOiweD_Hj1ce5q52PcWNVRzkrHQ7w4tTGuKqcjnBiVEY4KhwN_-HTxbepm41_YVNFNykbDP7g0sS2qJqMfmBSRDYoGgv979HDtaeZi31vUUM1JxkK_O7QwrSmmIp8blBCNCYYCfvt38GzpZeJe21fQTMlFwj67N7AsqSWiHpsXkAyJBYH-evdz7GjlYd5a11PMSMVBvjq3M6wopSGeGpcTjAiFAX36dvNv6GThXdpW00_IRME9ujazL6gkoR2aFpMPiASA_Xn2cu9r5GDdWdZSz0vEQL05tjKvK6QgnRmWEo8LhAB8-XXybutn4FzZVdJOy0fAPLk1si6rJ6AcmRWSDosHg_x49XHuaudj3FjVUc5Kx0O8OLUxriqnI5wYlRGOCocDf_h08W3qZuNf2FTRTcpGwz-4NLEtqiajH5gUkQ2KBoL_e_Rw7WnmYt9b1FDNScZCvzu0MK0ppiKfG5QQjQmGAn77d_Bs6WXiXttX0EzJRcI-uzewLKkloh6bF5AMiQWB_nr3c-xo5WHeWtdTzEjFQb46tzOsKKUhnhqXE4wIhQF9-nbzb-hk4V3aVtNPyETBPbo2sy-oJKEdmhaTD4gEgP159nLva-Rg3VnWUs9LxEC9ObYyryukIJ0ZlhKPC4QAfPl18m7rZ-Bc2VXSTstHwDy5NbIuqyegHJkVkgw",
+   "ivB64": "JnCdwwAAAAMAAAAp",
+   "ciphertextB64": "3aNkQWDfk8NMRI3v3-7iMhWrk0nfnr-mBLMYs2pobncN5NDUbydLWY4B82oUm4JoLNb-Lk0XvCi_tWr-jxDIdF9hnLLgcRnCRmaaXDpCmNcZdKHSEUUYrSYoBsGPItURSo-_qNIWm88X27fxdtq3TFoLXNOucikfU0rBv2-clkQG-ojcI1G5bx5kB_T3QS-rrdrj5oWhE-F-IYdrQful_HO7szGFLXe3zwCW-mcSBgN5NuGxGVcNu165ysvXW3-k-Og0iZMik18l2W0Su95GDFXaI0rL1n_O3p63d0x9Mm_csP_GzcJJ4ZbvOQmpAoSIrpGgurYo_ZEedjL4x815dzJtWnViZ1bfO61Rn5JhXv0moveNvmxQrgrTROQ4sPr6CVefzEZDw39QoP6h9S0Lv0HEWi5yYWLTKvHymamExaJSNJA22bnpGifs_KFr2S9ANDjwzhx7oObaJHqp2H9CQuswHFJirqozVtLNuT82u-ubm5qxOPHdQadn5OOENfHvgfVCUftMI_38CnMXRD04aGU2eYNZdj7WYIKA3IyQOYz0nDimokEsYFmCaGKgWeGZoA4WS9D9sZQesrxR5xmRFMsOq8z3gat6TG452PZWgGCq3_W286li59Em1xJ7E1uulfQv8rdH4_LqjFD8ru2ETrMuC8yhsyVtkfK7ZJqi2cNiq9DAlJ4Wf97Ll1wsYQ1yQ1lDbHE"
+  }
+ ],
+ "chunkFrames": [
+  {
+   "transferId": "0123456789abcdef",
+   "fileIndex": 3,
+   "chunkIndex": 41,
+   "ivB64": "JnCdwwAAAAMAAAAp",
+   "ciphertextB64": "3aNkQWDfk8NMRI3v3-7iMhWrk0nfnr-mBLMYs2pobncN5NDUbydLWY4B82oUm4JoLNb-Lk0XvCi_tWr-jxDIdF9hnLLgcRnCRmaaXDpCmNcZdKHSEUUYrSYoBsGPItURSo-_qNIWm88X27fxdtq3TFoLXNOucikfU0rBv2-clkQG-ojcI1G5bx5kB_T3QS-rrdrj5oWhE-F-IYdrQful_HO7szGFLXe3zwCW-mcSBgN5NuGxGVcNu165ysvXW3-k-Og0iZMik18l2W0Su95GDFXaI0rL1n_O3p63d0x9Mm_csP_GzcJJ4ZbvOQmpAoSIrpGgurYo_ZEedjL4x815dzJtWnViZ1bfO61Rn5JhXv0moveNvmxQrgrTROQ4sPr6CVefzEZDw39QoP6h9S0Lv0HEWi5yYWLTKvHymamExaJSNJA22bnpGifs_KFr2S9ANDjwzhx7oObaJHqp2H9CQuswHFJirqozVtLNuT82u-ubm5qxOPHdQadn5OOENfHvgfVCUftMI_38CnMXRD04aGU2eYNZdj7WYIKA3IyQOYz0nDimokEsYFmCaGKgWeGZoA4WS9D9sZQesrxR5xmRFMsOq8z3gat6TG452PZWgGCq3_W286li59Em1xJ7E1uulfQv8rdH4_LqjFD8ru2ETrMuC8yhsyVtkfK7ZJqi2cNiq9DAlJ4Wf97Ll1wsYQ1yQ1lDbHE",
+   "frameB64": "ATAxMjM0NTY3ODlhYmNkZWYAAAADAAAAKSZwncMAAAADAAAAKd2jZEFg35PDTESN79_u4jIVq5NJ356_pgSzGLNqaG53DeTQ1G8nS1mOAfNqFJuCaCzW_i5NF7wov7Vq_o8QyHRfYZyy4HEZwkZmmlw6QpjXGXSh0hFFGK0mKAbBjyLVEUqPv6jSFpvPF9u38Xbat0xaC1zTrnIpH1NKwb9vnJZEBvqI3CNRuW8eZAf090Evq63a4-aFoRPhfiGHa0H7pfxzu7MxhS13t88AlvpnEgYDeTbhsRlXDbteucrL11t_pPjoNImTIpNfJdltErveRgxV2iNKy9Z_zt6et3dMfTJv3LD_xs3CSeGW7zkJqQKEiK6RoLq2KP2RHnYy-MfNeXcybVp1YmdW3zutUZ-SYV79JqL3jb5sUK4K00TkOLD6-glXn8xGQ8N_UKD-ofUtC79BxFoucmFi0yrx8pmphMWiUjSQNtm56Ron7Pyha9kvQDQ48M4ce6Dm2iR6qdh_QkLrMBxSYq6qM1bSzbk_Nrvrm5uasTjx3UGnZ-TjhDXx74H1QlH7TCP9_ApzF0Q9OGhlNnmDWXY-1mCCgNyMkDmM9Jw4pqJBLGBZgmhioFnhmaAOFkvQ_bGUHrK8UecZkRTLDqvM94GrekxuOdj2VoBgqt_1tvOpYufRJtcSexNbrpX0L_K3R-Py6oxQ_K7thE6zLgvMobMlbZHyu2SaotnDYqvQwJSeFn_ey5dcLGENckNZQ2xx"
+  }
+ ],
+ "routedFrames": [
+  {
+   "target": "fedcba9876543210",
+   "source": "0123456789abcdef",
+   "payloadB64": "eyJraW5kIjoiY2xpcGJvYXJkLWJlYW0iLCJiZWFtSWQiOiIwMGZmZWVkZGNjYmJhYTk5In0",
+   "frameB64": "AmZlZGNiYTk4NzY1NDMyMTAwMTIzNDU2Nzg5YWJjZGVmeyJraW5kIjoiY2xpcGJvYXJkLWJlYW0iLCJiZWFtSWQiOiIwMGZmZWVkZGNjYmJhYTk5In0"
+  }
+ ],
+ "pairCodes": [
+  {
+   "randomHex": "a142ff071988c001",
+   "code": "34Z9TA"
+  },
+  {
+   "raw": "ab-cd-ef",
+   "normalized": "ABCDEF",
+   "formatted": "ABC-DEF",
+   "valid": false
+  },
+  {
+   "raw": "XY Z1-2",
+   "normalized": "XYZL2",
+   "formatted": "XYZ-L2",
+   "valid": false
+  },
+  {
+   "raw": "short",
+   "normalized": "SHQRT",
+   "formatted": "SHQ-RT",
+   "valid": false
+  },
+  {
+   "raw": "abcdefghij",
+   "normalized": "ABCDEF",
+   "formatted": "ABC-DEF",
+   "valid": false
+  },
+  {
+   "raw": "123456",
+   "normalized": "L23456",
+   "formatted": "L23-456",
+   "valid": false
+  },
+  {
+   "raw": "  mix ed 9 ",
+   "normalized": "MJXED9",
+   "formatted": "MJX-ED9",
+   "valid": false
+  }
+ ],
+ "classify": [
+  {
+   "text": "https://example.com:8443/path?q=1",
+   "kind": "url"
+  },
+  {
+   "text": "http://192.168.1.10:3411/airbridge",
+   "kind": "url"
+  },
+  {
+   "text": "user@example.com",
+   "kind": "text"
+  },
+  {
+   "text": "491044",
+   "kind": "otp"
+  },
+  {
+   "text": "12345678",
+   "kind": "otp"
+  },
+  {
+   "text": "your verification code is 482913",
+   "kind": "otp"
+  },
+  {
+   "text": "otp 1234",
+   "kind": "otp"
+  },
+  {
+   "text": "hello world",
+   "kind": "text"
+  },
+  {
+   "text": "const x = 1;\nreturn x;",
+   "kind": "code"
+  },
+  {
+   "text": "curl -X POST http://localhost/v1\nnpm install -g airbridge",
+   "kind": "text"
+  },
+  {
+   "text": "{\"a\": 1}",
+   "kind": "text"
+  },
+  {
+   "text": "987654321012345",
+   "kind": "text"
+  },
+  {
+   "text": "PIN: 9921",
+   "kind": "otp"
+  },
+  {
+   "text": "plain\nmulti line text without code markers",
+   "kind": "text"
+  }
+ ],
+ "manifests": [
+  {
+   "filesJson": "[{\"index\":0,\"name\":\"a.bin\",\"size\":1048576,\"chunkSize\":262144,\"totalChunks\":4}]",
+   "totalBytes": 1048576,
+   "expected": true,
+   "actualTs": true
+  },
+  {
+   "filesJson": "[{\"index\":0,\"name\":\"empty.bin\",\"size\":0,\"chunkSize\":65536,\"totalChunks\":1}]",
+   "totalBytes": 0,
+   "expected": true,
+   "actualTs": true
+  },
+  {
+   "filesJson": "[{\"index\":0,\"name\":\"a.bin\",\"size\":4096,\"chunkSize\":65536,\"totalChunks\":1,\"previewDataUrl\":\"data:image/png;base64,iVBOR\"}]",
+   "totalBytes": 4096,
+   "expected": true,
+   "actualTs": true
+  },
+  {
+   "filesJson": "[{\"index\":1,\"name\":\"a.bin\",\"size\":4096,\"chunkSize\":65536,\"totalChunks\":1}]",
+   "totalBytes": 4096,
+   "expected": false,
+   "actualTs": false
+  },
+  {
+   "filesJson": "[{\"index\":0,\"name\":\"a.bin\",\"size\":4096,\"chunkSize\":8192,\"totalChunks\":1}]",
+   "totalBytes": 4096,
+   "expected": false,
+   "actualTs": false
+  },
+  {
+   "filesJson": "[{\"index\":0,\"name\":\"a.bin\",\"size\":4096,\"chunkSize\":65536,\"totalChunks\":9}]",
+   "totalBytes": 4096,
+   "expected": false,
+   "actualTs": false
+  },
+  {
+   "filesJson": "[{\"index\":0,\"name\":\"a.bin\",\"size\":4096,\"chunkSize\":65536,\"totalChunks\":1}]",
+   "totalBytes": 4097,
+   "expected": false,
+   "actualTs": false
+  },
+  {
+   "filesJson": "[]",
+   "totalBytes": 0,
+   "expected": false,
+   "actualTs": false
+  },
+  {
+   "filesJson": "[{\"index\":0,\"name\":\"a.bin\",\"size\":4096,\"chunkSize\":65536,\"totalChunks\":1,\"previewDataUrl\":\"data:text/plain;base64,SGk=\"}]",
+   "totalBytes": 4096,
+   "expected": false,
+   "actualTs": false
+  },
+  {
+   "filesJson": "[{\"index\":0,\"name\":\"f0.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":1,\"name\":\"f1.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":2,\"name\":\"f2.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":3,\"name\":\"f3.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":4,\"name\":\"f4.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":5,\"name\":\"f5.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":6,\"name\":\"f6.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":7,\"name\":\"f7.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":8,\"name\":\"f8.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":9,\"name\":\"f9.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":10,\"name\":\"f10.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":11,\"name\":\"f11.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":12,\"name\":\"f12.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":13,\"name\":\"f13.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":14,\"name\":\"f14.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":15,\"name\":\"f15.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":16,\"name\":\"f16.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":17,\"name\":\"f17.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":18,\"name\":\"f18.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":19,\"name\":\"f19.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":20,\"name\":\"f20.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":21,\"name\":\"f21.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":22,\"name\":\"f22.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":23,\"name\":\"f23.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":24,\"name\":\"f24.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":25,\"name\":\"f25.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":26,\"name\":\"f26.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":27,\"name\":\"f27.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":28,\"name\":\"f28.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":29,\"name\":\"f29.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":30,\"name\":\"f30.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":31,\"name\":\"f31.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":32,\"name\":\"f32.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":33,\"name\":\"f33.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":34,\"name\":\"f34.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":35,\"name\":\"f35.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":36,\"name\":\"f36.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":37,\"name\":\"f37.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":38,\"name\":\"f38.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":39,\"name\":\"f39.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":40,\"name\":\"f40.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":41,\"name\":\"f41.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":42,\"name\":\"f42.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":43,\"name\":\"f43.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":44,\"name\":\"f44.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":45,\"name\":\"f45.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":46,\"name\":\"f46.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":47,\"name\":\"f47.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":48,\"name\":\"f48.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":49,\"name\":\"f49.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":50,\"name\":\"f50.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":51,\"name\":\"f51.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":52,\"name\":\"f52.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":53,\"name\":\"f53.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":54,\"name\":\"f54.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":55,\"name\":\"f55.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":56,\"name\":\"f56.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":57,\"name\":\"f57.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":58,\"name\":\"f58.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":59,\"name\":\"f59.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":60,\"name\":\"f60.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":61,\"name\":\"f61.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":62,\"name\":\"f62.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":63,\"name\":\"f63.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":64,\"name\":\"f64.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":65,\"name\":\"f65.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":66,\"name\":\"f66.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":67,\"name\":\"f67.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":68,\"name\":\"f68.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":69,\"name\":\"f69.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":70,\"name\":\"f70.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":71,\"name\":\"f71.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":72,\"name\":\"f72.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":73,\"name\":\"f73.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":74,\"name\":\"f74.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":75,\"name\":\"f75.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":76,\"name\":\"f76.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":77,\"name\":\"f77.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":78,\"name\":\"f78.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":79,\"name\":\"f79.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":80,\"name\":\"f80.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":81,\"name\":\"f81.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":82,\"name\":\"f82.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":83,\"name\":\"f83.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":84,\"name\":\"f84.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":85,\"name\":\"f85.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":86,\"name\":\"f86.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":87,\"name\":\"f87.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":88,\"name\":\"f88.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":89,\"name\":\"f89.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":90,\"name\":\"f90.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":91,\"name\":\"f91.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":92,\"name\":\"f92.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":93,\"name\":\"f93.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":94,\"name\":\"f94.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":95,\"name\":\"f95.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":96,\"name\":\"f96.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":97,\"name\":\"f97.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":98,\"name\":\"f98.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":99,\"name\":\"f99.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1},{\"index\":100,\"name\":\"f100.bin\",\"size\":1024,\"chunkSize\":65536,\"totalChunks\":1}]",
+   "totalBytes": 103424,
+   "expected": false,
+   "actualTs": false
+  },
+  {
+   "filesJson": "[{\"index\":0,\"name\":\"a.bin\",\"size\":4096,\"chunkSize\":65536,\"totalChunks\":1}]",
+   "totalBytes": null,
+   "expected": false,
+   "actualTs": false
+  },
+  {
+   "filesJson": "[{\"index\":0,\"name\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"size\":4096,\"chunkSize\":65536,\"totalChunks\":1}]",
+   "totalBytes": 4096,
+   "expected": false,
+   "actualTs": false
+  }
+ ],
+ "hkdf": [
+  {
+   "ikmB64": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo",
+   "saltB64": "8YWS-s2u2r_dT54V8Pktw8DBGbTDoedN2PmWI0g5GYQ",
+   "info": "airbridge-warp-e2ee-v1",
+   "keyB64": "KnNsp4LOkfuXbbs3b3-IqBrWZt2PXcJeeEKHIcrC6pE"
+  }
+ ]
+}

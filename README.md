@@ -426,3 +426,30 @@ installable packages.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+---
+
+## Install (free, no Apple / Microsoft accounts)
+
+Every release ships single-file binaries for **macOS (Apple silicon + Intel),
+Windows x64/ARM64, and Linux (x64/ARM64, glibc + static)** plus an Android APK:
+
+```bash
+# macOS / Linux — installs to ~/.local/bin, optional --autostart login item
+curl -fsSL https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.sh | bash
+```
+
+```powershell
+# Windows — %LOCALAPPDATA%\AirBridge via inbox curl (no SmartScreen sheet)
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.ps1 -UseBasicParsing | iex"
+```
+
+Android 8.0+: sideload `AirBridge.apk` from the release page (updates install
+over the previous version). Releases are integrity-checked with
+`SHA256SUMS.txt`.
+
+Why this needs **no paid signatures**: macOS binaries are ad-hoc signed on CI
+and curl-installed files carry no quarantine/Gatekeeper flag; Windows uses a
+portable EXE fetched without Mark-of-the-Web (SignPath free OSS signing is the
+optional upgrade path). Full story, matrix, and CI flow:
+[docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).

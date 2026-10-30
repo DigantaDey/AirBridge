@@ -4,6 +4,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import tlsModule from 'node:tls';
 import type { TLSSocket } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
@@ -63,6 +64,12 @@ export interface AirBridgeServerOptions {
   tlsKeyPath?: string;
   /** Directory for the auto-generated local CA. Default `~/.airbridge/tls`. */
   tlsDir?: string;
+  /**
+   * Built client files (path -> base64) embedded into a single-file desktop
+   * executable at packaging time. Used when no dist/client directory exists
+   * on disk — see scripts/generate-embedded-client.mjs.
+   */
+  clientAssets?: Record<string, string>;
 }
 
 export interface AirBridgeServerInstance {
@@ -139,6 +146,10 @@ export async function createAirBridgeServer(
 
   const httpServer = http.createServer(app);
   const httpsServer = tls ? https.createServer({ key: tls.key, cert: tls.cert }, app) : null;
+  // SecureContext for the dispatcher's explicit TLS termination (see below).
+  const httpsSecureContext = tls
+    ? tlsModule.createSecureContext({ key: tls.key, cert: tls.cert })
+    : null;
   // Disable Nagle on transfer sockets (also covers dispatcher-handed sockets
   // in TLS mode, which arrive via emit('connection')).
   httpServer.on('connection', (socket) => (socket as net.Socket).setNoDelay(true));
@@ -525,7 +536,12 @@ export async function createAirBridgeServer(
   httpsServer?.on('upgrade', handleUpgrade(true));
 
   if (mode === 'development') {
-    const { createServer: createViteServer } = await import('vite');
+    // Split the specifier so bundlers (Bun single-file executables) never try
+    // to resolve vite at build time: the packaged binary is always
+    // production-mode, but a static import would drag the whole dev server
+    // into the bundle or fail the build.
+    const viteSpecifier = ['vi', 'te'].join('');
+    const { createServer: createViteServer } = await import(viteSpecifier);
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -553,6 +569,41 @@ export async function createAirBridgeServer(
       app.get('*', (_req, res) => {
         res.sendFile(path.join(clientDist, 'index.html'));
       });
+    } else if (options.clientAssets && options.clientAssets['/index.html']) {
+      // Single-file desktop executables carry the built client inside the
+      // binary (path -> base64). Disk always wins when present so a
+      // development checkout keeps serving fresh assets.
+      const assets = options.clientAssets;
+      const indexHtml = Buffer.from(assets['/index.html'], 'base64');
+      const contentTypeFor = (filePath: string): string => {
+        if (filePath.endsWith('.html')) return 'text/html; charset=utf-8';
+        if (filePath.endsWith('.js')) return 'text/javascript; charset=utf-8';
+        if (filePath.endsWith('.css')) return 'text/css; charset=utf-8';
+        if (filePath.endsWith('.svg')) return 'image/svg+xml';
+        if (filePath.endsWith('.webmanifest')) return 'application/manifest+json';
+        if (filePath.endsWith('.json')) return 'application/json; charset=utf-8';
+        if (filePath.endsWith('.png')) return 'image/png';
+        if (filePath.endsWith('.woff2')) return 'font/woff2';
+        return 'application/octet-stream';
+      };
+      app.get('*', (req, res) => {
+        const requested = req.path === '/' ? '/index.html' : req.path;
+        const embedded = assets[requested];
+        if (embedded !== undefined) {
+          res.setHeader('Content-Type', contentTypeFor(requested));
+          res.setHeader(
+            'Cache-Control',
+            requested === '/index.html'
+              ? 'no-cache'
+              : 'public, max-age=31536000, immutable'
+          );
+          res.send(Buffer.from(embedded, 'base64'));
+          return;
+        }
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.send(indexHtml);
+      });
     }
   }
 
@@ -575,12 +626,34 @@ export async function createAirBridgeServer(
       socket.once('data', (firstChunk) => {
         socket.removeListener('error', onPeekError);
         socket.pause();
-        const target = firstChunk[0] === 0x16 ? httpsServer : httpServer;
-        socket.unshift(firstChunk);
-        target.emit('connection', socket);
-        process.nextTick(() => {
-          if (!socket.destroyed) socket.resume();
-        });
+        if (firstChunk[0] === 0x16 && httpsSecureContext) {
+          // Terminate TLS here, then hand the *decrypted* stream to the HTTP
+          // server. Emitting 'connection' on an https.Server only TLS-wraps
+          // inside Node's native listen path; hand-off sockets bypass it in
+          // Bun (the single-file desktop runtime), which silently parsed the
+          // ClientHello as HTTP and answered "400 Bad Request". Wrapping
+          // explicitly keeps `req.socket.encrypted` semantics (TLSSocket)
+          // identical for both runtimes.
+          socket.unshift(firstChunk);
+          const tlsSocket = new tlsModule.TLSSocket(socket, {
+            isServer: true,
+            secureContext: httpsSecureContext,
+            ALPNProtocols: ['http/1.1'],
+          });
+          tlsSocket.on('error', () => tlsSocket.destroy());
+          tlsSocket.on('secure', () => {
+            httpServer.emit('connection', tlsSocket);
+            process.nextTick(() => {
+              if (!tlsSocket.destroyed) tlsSocket.resume();
+            });
+          });
+        } else {
+          socket.unshift(firstChunk);
+          httpServer.emit('connection', socket);
+          process.nextTick(() => {
+            if (!socket.destroyed) socket.resume();
+          });
+        }
       });
     });
   }
@@ -665,9 +738,18 @@ export function describeTlsSetup(instance: AirBridgeServerInstance): string[] {
   return lines;
 }
 
-// Direct entrypoint execution
+// Direct entrypoint execution (tsx/node running this file). Single-file
+// desktop executables are excluded: inside a Bun-compiled binary both
+// argv[1] and import.meta.url resolve to the same virtual `/$bunfs/...`
+// path, which would make this guard match and silently boot a second
+// dev-mode server (which then fails trying to import vite).
 const currentFile = fileURLToPath(import.meta.url);
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(currentFile)) {
+const isCompiledBinary = currentFile.includes('$bunfs');
+if (
+  !isCompiledBinary &&
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === path.resolve(currentFile)
+) {
   createAirBridgeServer()
     .then((instance) => {
       console.log(`\n${describeTlsSetup(instance).join('\n')}\n`);
