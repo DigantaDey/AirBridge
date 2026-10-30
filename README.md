@@ -426,3 +426,9 @@ installable packages.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Project website
+
+The standalone static site lives in `website/`. It is separate from the AirBridge
+service and can be published on GitHub Pages. See [website/README.md](website/README.md)
+for local preview, Pages deployment, and custom-domain setup.
