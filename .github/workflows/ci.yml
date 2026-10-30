@@ -32,11 +32,25 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      # Explicit Android SDK: runner images drift, and AGP needs a licensed
-      # sdk dir (ANDROID_HOME) with the compileSdk platform present.
-      - uses: android-actions/setup-android@v3
-      - name: Install Android platform + build-tools
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      # Use the runner image's preinstalled Android SDK (third-party setup
+      # actions lag image migrations); install exactly what we compile against.
+      - name: Ensure Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "SDK_ROOT=$SDK_ROOT"
+          if [ ! -d "$SDK_ROOT" ]; then
+            echo "::error title=Android SDK missing::No Android SDK at $SDK_ROOT (ANDROID_HOME=${ANDROID_HOME:-unset})"
+            exit 1
+          fi
+          SDKMGR="$(find "$SDK_ROOT/cmdline-tools" -name sdkmanager -type f 2>/dev/null | sort | tail -1)"
+          if [ -z "$SDKMGR" ]; then
+            echo "::error title=sdkmanager missing::No sdkmanager under $SDK_ROOT/cmdline-tools — runner image layout changed"
+            exit 1
+          fi
+          yes | "$SDKMGR" --licenses >/dev/null 2>&1 || true
+          "$SDKMGR" --install "platforms;android-35" "build-tools;35.0.0" 2>&1 | tail -5
       - uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: 8.14.3
