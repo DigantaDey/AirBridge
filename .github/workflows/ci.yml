@@ -27,16 +27,29 @@ jobs:
     name: Android (engine vectors + app APK)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
+      # Explicit Android SDK: runner images drift, and AGP needs a licensed
+      # sdk dir (ANDROID_HOME) with the compileSdk platform present.
+      - uses: android-actions/setup-android@v3
+      - name: Install Android platform + build-tools
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: 8.14.3
+      # :engine:check (vectors) + assembleDebug only — root `check` would also
+      # run :app:lint, which is not part of this gate.
       - name: Engine vectors + typecheck + debug APK
-        run: gradle -p android check :app:assembleDebug --no-daemon
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle -p android :engine:check :app:assembleDebug --no-daemon 2>&1 | tee gradle-build.log || {
+            echo "::error title=Android Gradle build failed::$(tail -n 40 gradle-build.log | tr '\n' '|' | cut -c1-3000)"
+            exit 1
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: airbridge-debug-apk
