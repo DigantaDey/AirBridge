@@ -112,7 +112,15 @@ Nothing writes outside the user's home/profile; no `sudo`, no UAC, no admin.
 
 ## Release flow
 
-1. Push a tag `v*`.
+A release **must** exist: `install.sh` and `install.ps1` resolve
+`releases/latest/download/…`, so with zero published releases every download
+404s. Cut one with either path:
+
+* **no checkout** — Actions → **Release** → *Run workflow* → version
+  (`1.2.0`, a `v` prefix is added automatically); or
+* **from git** — `git tag v1.2.0 && git push origin v1.2.0`.
+
+1. Push a tag `v*` (or dispatch the workflow).
 2. `.github/workflows/release.yml`:
    * **linux-windows** job: `build-desktop.mjs --only linux` and
      `--only windows --skip-client` (bun cross-compiles from Linux);
@@ -122,6 +130,19 @@ Nothing writes outside the user's home/profile; no `sudo`, no UAC, no admin.
    * **publish** job: downloads all artifacts, writes `SHA256SUMS.txt`,
      `gh release create` with every binary + APK.
 3. Users run `install.sh` / `install.ps1` or grab files from the release page.
+
+## Asset names (must stay in sync)
+
+| Where | Name |
+|---|---|
+| `scripts/build-desktop.mjs` | `AirBridge-darwin-<arch>`, `AirBridge-linux-<arch>[-musl]`, `AirBridge-windows-<arch>.exe` |
+| `install.sh` | requests `AirBridge-<os>-<arch>`, `-musl` only on Linux, then falls back to the GitHub API manifest |
+| `install.ps1` | requests `AirBridge-windows-<arch>.exe` |
+| `src/client/components/DownloadsModal.tsx` | same names as the release assets |
+
+macOS builds were previously emitted as `AirBridge-macos-*` while every
+installer asked for `AirBridge-darwin-*` — that mismatch, not just the missing
+release, is why `curl … | bash` failed on a Mac.
 
 ## Local reproduction
 

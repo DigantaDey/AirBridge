@@ -444,15 +444,38 @@ curl -fsSL https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.s
 powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.ps1 -UseBasicParsing | iex"
 ```
 
-Android 8.0+: sideload `AirBridge.apk` from the release page (updates install
-over the previous version). Releases are integrity-checked with
-`SHA256SUMS.txt`.
+Android 8.0+: sideload `AirBridge.apk` from the [latest
+release](https://github.com/DigantaDey/AirBridge/releases/latest) (updates
+install over the previous version). Releases are integrity-checked with
+`SHA256SUMS.txt`; the installer verifies the checksum before it writes the
+binary.
+
+Asset names are `AirBridge-<os>-<arch>` with `darwin`, `linux`, `windows` as
+`<os>` (`macOS` used to be called `macos`, which is why the old installer
+404'd), plus `AirBridge-linux-<arch>-musl` for static Linux builds.
+
+No prebuilt binary published for your machine? The installer falls back to a
+local source build automatically — or force it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.sh | bash -s -- --from-source
+```
 
 Why this needs **no paid signatures**: macOS binaries are ad-hoc signed on CI
 and curl-installed files carry no quarantine/Gatekeeper flag; Windows uses a
 portable EXE fetched without Mark-of-the-Web (SignPath free OSS signing is the
 optional upgrade path). Full story, matrix, and CI flow:
 [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
+
+### Cutting a release
+
+`install.sh` / `install.ps1` read `releases/latest/download/…`, so a GitHub
+release must exist before the one-liners work. Publish one either by pushing a
+tag (`git tag v1.0.0 && git push origin v1.0.0`) or without a local checkout:
+**Actions → Release → Run workflow → version `1.0.0`**.
+([`release.yml`](.github/workflows/release.yml) builds every desktop target,
+ad-hoc signs the macOS binaries, builds the APK, and attaches all of them plus
+`SHA256SUMS.txt`.)
 
 ### Download center inside the app + universal CLI
 

@@ -3,10 +3,22 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # Cut a release without touching your laptop: Actions → Release → Run workflow.
+  # The inputs.version tag (e.g. 1.2.0) is created at the commit being built, so
+  # install.sh / install.ps1 (which read releases/latest/download/…) pick it up.
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish, e.g. 1.2.0 (defaults to package.json)'
+        required: false
+        type: string
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   desktop-linux-windows:
@@ -23,6 +35,15 @@ jobs:
         run: node scripts/build-desktop.mjs --only linux
       - name: Build Windows targets (reuse embedded client)
         run: node scripts/build-desktop.mjs --only windows --skip-client
+      - name: Verify asset names
+        run: |
+          set -euo pipefail
+          ls -l dist-bin
+          for want in AirBridge-linux-x64 AirBridge-linux-arm64 \
+                      AirBridge-linux-x64-musl AirBridge-linux-arm64-musl \
+                      AirBridge-windows-x64.exe AirBridge-windows-arm64.exe; do
+            test -f "dist-bin/$want" || { echo "::error title=missing artifact::$want was not built"; exit 1; }
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-linux-windows
@@ -48,6 +69,8 @@ jobs:
       # Apple Developer account, no notarization).
       - name: Ad-hoc sign
         run: |
+          set -euo pipefail
+          ls -l dist-bin
           for f in dist-bin/AirBridge-darwin-*; do
             codesign --force -s - "$f"
             codesign --verify --verbose=2 "$f"
@@ -109,7 +132,7 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     needs: [desktop-linux-windows, desktop-darwin, android-apk]
     runs-on: ubuntu-latest
     steps:
@@ -118,13 +141,43 @@ jobs:
         with:
           path: dist-bin
           merge-multiple: true
+      - name: Resolve release tag
+        id: tag
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${INPUT_VERSION:-}"
+            if [ -z "$tag" ]; then
+              tag="$(node -p "require('./package.json').version")"
+            fi
+            case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          echo "Resolved release tag: $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Checksums
         working-directory: dist-bin
-        run: sha256sum $(ls | sort) > SHA256SUMS.txt && cat SHA256SUMS.txt
-      - name: Create release
+        run: |
+          set -euo pipefail
+          ls -l
+          find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%f\n' | sort \
+            | xargs -r sha256sum > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create or update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist-bin/* \
-            --title "AirBridge $GITHUB_REF_NAME" \
-            --generate-notes
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist-bin/* --clobber
+          else
+            gh release create "$TAG" dist-bin/* \
+              --target "$GITHUB_SHA" \
+              --title "AirBridge $TAG" \
+              --generate-notes \
+              --latest
+          fi

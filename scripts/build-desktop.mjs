@@ -26,8 +26,8 @@ const assetsFile = path.join(root, 'packaging', 'clientAssets.json');
 const stubContent = fs.readFileSync(assetsFile, 'utf8'); // committed stub — restored in finally
 
 const TARGETS = [
-  { flag: 'bun-darwin-aarch64', out: 'AirBridge-macos-arm64' },
-  { flag: 'bun-darwin-x64', out: 'AirBridge-macos-x64' },
+  { flag: 'bun-darwin-aarch64', out: 'AirBridge-darwin-arm64' },
+  { flag: 'bun-darwin-x64', out: 'AirBridge-darwin-x64' },
   { flag: 'bun-windows-x64', out: 'AirBridge-windows-x64.exe' },
   { flag: 'bun-windows-aarch64', out: 'AirBridge-windows-arm64.exe' },
   { flag: 'bun-linux-x64', out: 'AirBridge-linux-x64' },
