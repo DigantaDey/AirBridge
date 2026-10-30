@@ -427,8 +427,43 @@ installable packages.
 
 MIT. See [LICENSE](LICENSE).
 
-## Project website
+---
 
-The standalone static site lives in `website/`. It is separate from the AirBridge
-service and can be published on GitHub Pages. See [website/README.md](website/README.md)
-for local preview, Pages deployment, and custom-domain setup.
+## Install (free, no Apple / Microsoft accounts)
+
+Every release ships single-file binaries for **macOS (Apple silicon + Intel),
+Windows x64/ARM64, and Linux (x64/ARM64, glibc + static)** plus an Android APK:
+
+```bash
+# macOS / Linux — installs to ~/.local/bin, optional --autostart login item
+curl -fsSL https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.sh | bash
+```
+
+```powershell
+# Windows — %LOCALAPPDATA%\AirBridge via inbox curl (no SmartScreen sheet)
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.ps1 -UseBasicParsing | iex"
+```
+
+Android 8.0+: sideload `AirBridge.apk` from the release page (updates install
+over the previous version). Releases are integrity-checked with
+`SHA256SUMS.txt`.
+
+Why this needs **no paid signatures**: macOS binaries are ad-hoc signed on CI
+and curl-installed files carry no quarantine/Gatekeeper flag; Windows uses a
+portable EXE fetched without Mark-of-the-Web (SignPath free OSS signing is the
+optional upgrade path). Full story, matrix, and CI flow:
+[docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
+
+### Download center inside the app + universal CLI
+
+Once AirBridge is running anywhere, open its web UI and click **Downloads**:
+every platform build is listed there (the visitor's device is highlighted).
+Artifacts dropped next to the running binary are served straight from that
+machine over the LAN — a phone can install the APK without internet access;
+everything else links to GitHub Releases with `SHA256SUMS.txt` verification.
+
+**No build for your platform?** AirBridge is truly cross-platform via the CLI:
+`npx airbridge` (Node 20+) — or the single-file binary itself — starts the
+server on any OS and **prints a pairing QR in the terminal**; scanning it with
+a phone opens the page already inside the host's pairing group
+(`?pair=<code>`, first-claim scoped, rotate anytime).

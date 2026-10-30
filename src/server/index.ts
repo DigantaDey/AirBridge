@@ -4,6 +4,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import tlsModule from 'node:tls';
 import type { TLSSocket } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
@@ -63,6 +64,14 @@ export interface AirBridgeServerOptions {
   tlsKeyPath?: string;
   /** Directory for the auto-generated local CA. Default `~/.airbridge/tls`. */
   tlsDir?: string;
+  /**
+   * Built client files (path -> base64) embedded into a single-file desktop
+   * executable at packaging time. Used when no dist/client directory exists
+   * on disk — see scripts/generate-embedded-client.mjs.
+   */
+  clientAssets?: Record<string, string>;
+  /** App version reported by /api/downloads (desktop entries pass pkg.version). */
+  version?: string;
 }
 
 export interface AirBridgeServerInstance {
@@ -134,11 +143,42 @@ export async function createAirBridgeServer(
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    if (mode !== 'development') {
+      // Everything the app loads is same-origin (no CDNs, no inline scripts);
+      // style 'unsafe-inline' covers React style attributes only.
+      res.setHeader(
+        'Content-Security-Policy',
+        [
+          "default-src 'none'",
+          "script-src 'self'",
+          "style-src 'self' 'unsafe-inline'",
+          "img-src 'self' data: blob:",
+          "font-src 'self' data:",
+          "connect-src 'self' ws: wss:",
+          "worker-src 'self' blob:",
+          "media-src 'self' blob:",
+          "manifest-src 'self'",
+          "frame-ancestors 'none'",
+          "base-uri 'self'",
+          "form-action 'self'",
+          "object-src 'none'",
+        ].join('; ')
+      );
+      res.setHeader(
+        'Permissions-Policy',
+        'camera=(), microphone=(), geolocation=(), payment=(), usb=()'
+      );
+      res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    }
     next();
   });
 
   const httpServer = http.createServer(app);
   const httpsServer = tls ? https.createServer({ key: tls.key, cert: tls.cert }, app) : null;
+  // SecureContext for the dispatcher's explicit TLS termination (see below).
+  const httpsSecureContext = tls
+    ? tlsModule.createSecureContext({ key: tls.key, cert: tls.cert })
+    : null;
   // Disable Nagle on transfer sockets (also covers dispatcher-handed sockets
   // in TLS mode, which arrive via emit('connection')).
   httpServer.on('connection', (socket) => (socket as net.Socket).setNoDelay(true));
@@ -421,6 +461,89 @@ export async function createAirBridgeServer(
   );
 
   // Query what a resumable receive has already landed on disk (loopback only).
+  // ---------------------------------------------------------------------------
+  // Download center. The web UI links here so any device on the LAN can grab
+  // the right build: artifacts dropped next to the running binary (or in
+  // $AIRBRIDGE_ARTIFACTS_DIR) are served directly; everything else links to
+  // GitHub Releases. Only exact, whitelisted file names are ever served —
+  // no directory listing, no path traversal.
+  // ---------------------------------------------------------------------------
+  const githubRepo = process.env.AIRBRIDGE_GITHUB_REPO || 'DigantaDey/AirBridge';
+  const DOWNLOADABLE_NAME =
+    /^AirBridge-(macos|linux|windows)-(x64|arm64)(-musl)?(\.exe)?$|^AirBridge\.apk$|^SHA256SUMS\.txt$/;
+  const artifactDirs = (): string[] => {
+    const dirs: string[] = [path.dirname(process.execPath), process.cwd()];
+    if (process.env.AIRBRIDGE_ARTIFACTS_DIR) {
+      dirs.unshift(path.resolve(process.env.AIRBRIDGE_ARTIFACTS_DIR));
+    }
+    return [...new Set(dirs)];
+  };
+  const findArtifact = async (
+    name: string
+  ): Promise<{ abs: string; size: number } | null> => {
+    for (const dir of artifactDirs()) {
+      const abs = path.resolve(dir, name);
+      // Basename-only: the resolved file must sit directly in a search dir.
+      if (path.dirname(abs) !== path.resolve(dir)) continue;
+      try {
+        const st = await fs.promises.stat(abs);
+        if (st.isFile()) return { abs, size: st.size };
+      } catch {
+        /* try the next dir */
+      }
+    }
+    return null;
+  };
+
+  app.get('/api/downloads', async (_req: Request, res: Response) => {
+    const names = new Set<string>();
+    for (const dir of artifactDirs()) {
+      try {
+        for (const entry of await fs.promises.readdir(dir)) {
+          if (DOWNLOADABLE_NAME.test(entry)) names.add(entry);
+        }
+      } catch {
+        /* unreadable dir — skip */
+      }
+    }
+    const files: Array<{ name: string; size: number; url: string }> = [];
+    for (const name of [...names].sort()) {
+      const found = await findArtifact(name);
+      if (found) files.push({ name, size: found.size, url: `/downloads/${name}` });
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      version: options.version ?? process.env.AIRBRIDGE_VERSION ?? 'dev',
+      platform: process.platform,
+      arch: process.arch,
+      githubRelease: `https://github.com/${githubRepo}/releases/latest`,
+      files,
+    });
+  });
+
+  app.get('/downloads/:name', async (req: Request, res: Response) => {
+    const name = req.params.name;
+    if (!name || !DOWNLOADABLE_NAME.test(name)) {
+      res.status(404).end();
+      return;
+    }
+    const found = await findArtifact(name);
+    if (!found) {
+      res.status(404).end();
+      return;
+    }
+    res.setHeader(
+      'Content-Type',
+      name.endsWith('.txt') ? 'text/plain; charset=utf-8' : 'application/octet-stream'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Security-Policy', "default-src 'none'");
+    fs.createReadStream(found.abs)
+      .on('error', () => res.destroy())
+      .pipe(res);
+  });
+
   app.get('/api/daemon/received', async (req: Request, res: Response) => {
     if (!daemonCfg.enabled) {
       res.status(403).json({ error: 'Local daemon mode is disabled.' });
@@ -525,7 +648,12 @@ export async function createAirBridgeServer(
   httpsServer?.on('upgrade', handleUpgrade(true));
 
   if (mode === 'development') {
-    const { createServer: createViteServer } = await import('vite');
+    // Split the specifier so bundlers (Bun single-file executables) never try
+    // to resolve vite at build time: the packaged binary is always
+    // production-mode, but a static import would drag the whole dev server
+    // into the bundle or fail the build.
+    const viteSpecifier = ['vi', 'te'].join('');
+    const { createServer: createViteServer } = await import(viteSpecifier);
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -553,6 +681,41 @@ export async function createAirBridgeServer(
       app.get('*', (_req, res) => {
         res.sendFile(path.join(clientDist, 'index.html'));
       });
+    } else if (options.clientAssets && options.clientAssets['/index.html']) {
+      // Single-file desktop executables carry the built client inside the
+      // binary (path -> base64). Disk always wins when present so a
+      // development checkout keeps serving fresh assets.
+      const assets = options.clientAssets;
+      const indexHtml = Buffer.from(assets['/index.html'], 'base64');
+      const contentTypeFor = (filePath: string): string => {
+        if (filePath.endsWith('.html')) return 'text/html; charset=utf-8';
+        if (filePath.endsWith('.js')) return 'text/javascript; charset=utf-8';
+        if (filePath.endsWith('.css')) return 'text/css; charset=utf-8';
+        if (filePath.endsWith('.svg')) return 'image/svg+xml';
+        if (filePath.endsWith('.webmanifest')) return 'application/manifest+json';
+        if (filePath.endsWith('.json')) return 'application/json; charset=utf-8';
+        if (filePath.endsWith('.png')) return 'image/png';
+        if (filePath.endsWith('.woff2')) return 'font/woff2';
+        return 'application/octet-stream';
+      };
+      app.get('*', (req, res) => {
+        const requested = req.path === '/' ? '/index.html' : req.path;
+        const embedded = assets[requested];
+        if (embedded !== undefined) {
+          res.setHeader('Content-Type', contentTypeFor(requested));
+          res.setHeader(
+            'Cache-Control',
+            requested === '/index.html'
+              ? 'no-cache'
+              : 'public, max-age=31536000, immutable'
+          );
+          res.send(Buffer.from(embedded, 'base64'));
+          return;
+        }
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.send(indexHtml);
+      });
     }
   }
 
@@ -575,12 +738,34 @@ export async function createAirBridgeServer(
       socket.once('data', (firstChunk) => {
         socket.removeListener('error', onPeekError);
         socket.pause();
-        const target = firstChunk[0] === 0x16 ? httpsServer : httpServer;
-        socket.unshift(firstChunk);
-        target.emit('connection', socket);
-        process.nextTick(() => {
-          if (!socket.destroyed) socket.resume();
-        });
+        if (firstChunk[0] === 0x16 && httpsSecureContext) {
+          // Terminate TLS here, then hand the *decrypted* stream to the HTTP
+          // server. Emitting 'connection' on an https.Server only TLS-wraps
+          // inside Node's native listen path; hand-off sockets bypass it in
+          // Bun (the single-file desktop runtime), which silently parsed the
+          // ClientHello as HTTP and answered "400 Bad Request". Wrapping
+          // explicitly keeps `req.socket.encrypted` semantics (TLSSocket)
+          // identical for both runtimes.
+          socket.unshift(firstChunk);
+          const tlsSocket = new tlsModule.TLSSocket(socket, {
+            isServer: true,
+            secureContext: httpsSecureContext,
+            ALPNProtocols: ['http/1.1'],
+          });
+          tlsSocket.on('error', () => tlsSocket.destroy());
+          tlsSocket.on('secure', () => {
+            httpServer.emit('connection', tlsSocket);
+            process.nextTick(() => {
+              if (!tlsSocket.destroyed) tlsSocket.resume();
+            });
+          });
+        } else {
+          socket.unshift(firstChunk);
+          httpServer.emit('connection', socket);
+          process.nextTick(() => {
+            if (!socket.destroyed) socket.resume();
+          });
+        }
       });
     });
   }
@@ -665,9 +850,18 @@ export function describeTlsSetup(instance: AirBridgeServerInstance): string[] {
   return lines;
 }
 
-// Direct entrypoint execution
+// Direct entrypoint execution (tsx/node running this file). Single-file
+// desktop executables are excluded: inside a Bun-compiled binary both
+// argv[1] and import.meta.url resolve to the same virtual `/$bunfs/...`
+// path, which would make this guard match and silently boot a second
+// dev-mode server (which then fails trying to import vite).
 const currentFile = fileURLToPath(import.meta.url);
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(currentFile)) {
+const isCompiledBinary = currentFile.includes('$bunfs');
+if (
+  !isCompiledBinary &&
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === path.resolve(currentFile)
+) {
   createAirBridgeServer()
     .then((instance) => {
       console.log(`\n${describeTlsSetup(instance).join('\n')}\n`);

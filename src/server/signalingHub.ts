@@ -128,6 +128,19 @@ function sanitizePeerId(candidate?: string): string {
 }
 
 export class SignalingHub {
+  /**
+   * Session QR pair code: the FIRST hello-less client claims it, so the
+   * startup QR (which embeds `?pair=<code>`) lands the phone in the same
+   * pairing group as whoever opens the page first. Later hello-less clients
+   * keep distinct random codes — paired-only isolation is unchanged, and an
+   * explicit `?pair=`/`join-pair` is always honored. Scanning the terminal
+   * QR requires the same physical access as reading the code on screen.
+   */
+  private readonly defaultPairCode = generatePairCode(crypto.randomBytes(8));
+  private defaultPairCodeClaimed = false;
+  /** Last pair code per peerId so reconnects rejoin their existing group. */
+  private readonly pairCodeByPeer = new Map<string, string>();
+
   public readonly wss: WebSocketServer;
   private readonly clients = new Map<string, ConnectedClient>();
   private readonly pingTimer: NodeJS.Timeout;
@@ -180,6 +193,19 @@ export class SignalingHub {
       }
     }, 25_000);
     this.pingTimer.unref();
+  }
+
+  /** Pair code embedded in the startup QR (claimed by the first client). */
+  getDefaultPairCode(): string {
+    return this.defaultPairCode;
+  }
+
+  private rememberPairCode(peerId: string, pairCode: string): void {
+    if (this.pairCodeByPeer.size >= 512) {
+      const oldest = this.pairCodeByPeer.keys().next().value;
+      if (oldest !== undefined) this.pairCodeByPeer.delete(oldest);
+    }
+    this.pairCodeByPeer.set(peerId, pairCode);
   }
 
   public getStats(): { connectedPeers: number } {
@@ -303,9 +329,19 @@ export class SignalingHub {
         }
 
         const requestedPair = msg.pairCode ? normalizePairCode(msg.pairCode) : '';
-        const pairCode = isValidPairCode(requestedPair)
-          ? requestedPair
-          : generatePairCode(crypto.randomBytes(8));
+        let pairCode: string;
+        if (isValidPairCode(requestedPair)) {
+          pairCode = requestedPair;
+        } else if (this.pairCodeByPeer.has(peerId)) {
+          // Reconnect: rejoin the group this peerId last belonged to.
+          pairCode = this.pairCodeByPeer.get(peerId)!;
+        } else if (!this.defaultPairCodeClaimed) {
+          pairCode = this.defaultPairCode;
+          this.defaultPairCodeClaimed = true;
+        } else {
+          pairCode = generatePairCode(crypto.randomBytes(8));
+        }
+        this.rememberPairCode(peerId, pairCode);
 
         registeredClient = {
           peerId,
@@ -373,6 +409,7 @@ export class SignalingHub {
           }
           const prevPairCode = registeredClient.pairCode;
           registeredClient.pairCode = normalized;
+          this.rememberPairCode(registeredClient.peerId, normalized);
           this.sendJson(ws, {
             type: 'pair-updated',
             pairCode: normalized,
@@ -387,6 +424,7 @@ export class SignalingHub {
           const prevPairCode = registeredClient.pairCode;
           const fresh = generatePairCode(crypto.randomBytes(8));
           registeredClient.pairCode = fresh;
+          this.rememberPairCode(registeredClient.peerId, fresh);
           this.sendJson(ws, {
             type: 'pair-updated',
             pairCode: fresh,
