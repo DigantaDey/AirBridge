@@ -58,4 +58,8 @@ android {
 
 dependencies {
     implementation(project(":engine"))
+    // QR decoding for the pairing scanner. Framework Camera2 does the preview and
+    // frame plumbing, so only the pure-Java decoder is pulled in (~600 kB, no
+    // Play Services, works offline).
+    implementation("com.google.zxing:core:3.5.3")
 }

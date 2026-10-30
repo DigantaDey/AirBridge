@@ -2,395 +2,425 @@ package com.airbridge.app
 
 import android.Manifest
 import android.app.Activity
-import android.app.AlertDialog
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.view.View
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ListView
-import android.widget.ScrollView
-import android.widget.TextView
+import android.util.Log
+import android.view.ViewGroup
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.Toast
-import com.airbridge.engine.AirBridgeEngine
-import com.airbridge.engine.EngineListener
-import com.airbridge.engine.Peer
-import com.airbridge.engine.TransferView
-import com.airbridge.engine.formatBytes
+import com.airbridge.engine.PairingLink
+
+/** A computer that announced itself over mDNS. */
+data class NearbyHost(val name: String, val address: String)
 
 /**
- * Framework-Views UI (no AndroidX): connect via mDNS or URL, pick a peer,
- * send files/clipboard, accept incoming offers. The engine itself lives in
- * [EngineService]; this activity only attaches/detaches listeners.
+ * The Android app *is* the web app.
+ *
+ * The desktop server already ships this exact UI, so the phone renders the same
+ * page in a WebView instead of re-implementing it: every screen, feature and
+ * fix lands on both devices at once. [LoopbackRelay] puts that page on a
+ * `http://127.0.0.1:<port>` origin, which is why the browser APIs the UI needs
+ * (WebCrypto, storage) are available without trusting a certificate.
+ *
+ * On first run — an unpaired phone — a QR scanner opens on top of the connect
+ * screen so the user can scan the code the desktop prints. Closing the scanner
+ * leaves the connect screen usable: mDNS-discovered computers, or a typed
+ * address.
  */
 class MainActivity : Activity() {
 
     private lateinit var prefs: Prefs
-    private lateinit var status: TextView
-    private lateinit var serverInput: EditText
-    private lateinit var pairInput: EditText
-    private lateinit var peerList: ListView
-    private lateinit var transferList: ListView
-    private lateinit var discovery: ServerDiscovery
+    private lateinit var root: FrameLayout
+    private lateinit var webView: WebView
+    private var relay: LoopbackRelay? = null
+    private var discovery: ServerDiscovery? = null
+    private var scanner: QrScannerView? = null
+    private var pendingChooser: ValueCallback<Array<Uri>>? = null
+    private var pendingScanAfterPermission = false
+    private var connectedLink: PairingLink? = null
 
-    private val peerNames = mutableListOf<String>()
-    private val peerIds = mutableListOf<String>()
-    private val transferLines = mutableListOf<String>()
-    private lateinit var peerAdapter: ArrayAdapter<String>
-    private lateinit var transferAdapter: ArrayAdapter<String>
-    private var selectedPeerId: String? = null
-    private var engine: AirBridgeEngine? = null
-    private var pendingOffer: TransferView? = null
-
-    private val uiListener = object : EngineListener {
-        override fun onConnectionState(state: com.airbridge.engine.ConnectionState) {
-            runOnUiThread { status.text = "Status: $state" }
-        }
-        override fun onWelcome(info: com.airbridge.engine.WelcomeInfo) {
-            runOnUiThread {
-                status.text = "Connected as ${info.peerId} · pair ${info.pairCode}"
-                if (pairInput.text.isEmpty()) pairInput.setText(info.pairCode)
-            }
-        }
-        override fun onPeersChanged(peers: List<Peer>) {
-            runOnUiThread {
-                peerNames.clear()
-                peerIds.clear()
-                for (p in peers) {
-                    peerIds.add(p.peerId)
-                    peerNames.add("${p.device.name} · ${p.device.platform} · ${p.peerId}")
-                }
-                if (selectedPeerId !in peerIds) selectedPeerId = peerIds.firstOrNull()
-                peerAdapter.notifyDataSetChanged()
-            }
-        }
-        override fun onPairCodeChanged(pairCode: String) {
-            runOnUiThread { pairInput.setText(pairCode) }
-        }
-        override fun onIncomingOffer(transfer: TransferView) {
-            runOnUiThread { showOfferDialog(transfer) }
-        }
-        override fun onTransferChanged(transfer: TransferView) {
-            runOnUiThread {
-                transferLines.clear()
-                for (t in serviceEngine()?.transfersSnapshot() ?: listOf(transfer)) {
-                    transferLines.add(
-                        "${if (t.direction.name == "OUTGOING") "↑" else "↓"} " +
-                            "${t.peerName}: ${t.status} " +
-                            "${t.transferredBytes}/${t.totalBytes} " +
-                            "(${t.files.firstOrNull()?.name ?: ""})",
-                    )
-                }
-                transferAdapter.notifyDataSetChanged()
-            }
-        }
-        override fun onClipboard(item: com.airbridge.engine.ClipboardItem) {
-            runOnUiThread {
-                if (item.contentType == "text" && item.text.isNotEmpty()) {
-                    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    cm.setPrimaryClip(ClipData.newPlainText("AirBridge", item.text))
-                    Toast.makeText(this@MainActivity, "Clipboard received from ${item.peerName}", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-        override fun onError(code: String, message: String) {
-            runOnUiThread {
-                Toast.makeText(this@MainActivity, "$code: $message", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
+    /** Computers announced over mDNS, keyed by base address. */
+    private val nearby = LinkedHashMap<String, NearbyHost>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = Prefs(this)
-        requestRuntimePermissions()
-        buildUi()
-        startEngineServiceIfConfigured()
-        discovery = ServerDiscovery(
-            this,
-            onFound = { url, name ->
-                runOnUiThread {
-                    serverInput.setText(url)
-                    Toast.makeText(this, "Found AirBridge at $name", Toast.LENGTH_SHORT).show()
-                }
-            },
-            onLost = { },
-        )
-        discovery.start()
-    }
+        buildContentView()
+        startDiscovery()
 
-    override fun onStart() {
-        super.onStart()
-        serviceEngine()?.let { e ->
-            engine = e
-            e.addListener(uiListener)
-            refreshFromEngine()
+        val fromIntent = pairingLinkFromIntent(intent)
+        if (fromIntent != null) {
+            applyPairing(fromIntent)
+        } else {
+            val paired = prefs.pairingLink()
+            if (paired == null) {
+                showConnectScreen()
+                openScanner()
+            } else {
+                openApp(paired)
+            }
         }
     }
 
-    override fun onStop() {
-        engine?.removeListener(uiListener)
-        engine = null
-        super.onStop()
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pairingLinkFromIntent(intent)?.let { applyPairing(it) }
     }
 
     override fun onDestroy() {
-        discovery.stop()
+        closeScanner()
+        relay?.stop()
+        relay = null
+        discovery?.stop()
+        discovery = null
+        if (::webView.isInitialized) {
+            (webView.parent as? ViewGroup)?.removeView(webView)
+            webView.destroy()
+        }
         super.onDestroy()
     }
 
-    private fun serviceEngine(): AirBridgeEngine? = EngineService.current()?.engineOrNull()
-
-    private fun startEngineServiceIfConfigured() {
-        val url = prefs.serverUrl
-        if (url.isBlank()) return
-        val i = Intent(this, EngineService::class.java)
-            .setAction(EngineService.ACTION_CONNECT)
-            .putExtra(EngineService.EXTRA_URL, url)
-        startService(i)
-        serverInput.setText(url)
-    }
-
-    private fun buildUi() {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-        }
-
-        status = TextView(this).apply { text = "Status: idle" }
-        root.addView(status)
-
-        // Server row
-        val serverRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        serverInput = EditText(this).apply {
-            hint = "ws://host:3411/ws"
-            setText(prefs.serverUrl)
-            setSingleLine(true)
-        }
-        val connectBtn = Button(this).apply {
-            text = "Connect"
-            setOnClickListener { connect(serverInput.text.toString().trim()) }
-        }
-        serverRow.addView(serverInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        serverRow.addView(connectBtn)
-        root.addView(serverRow)
-
-        // Pair-code row
-        val pairRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        pairInput = EditText(this).apply {
-            hint = "Pair code"
-            setSingleLine(true)
-        }
-        val joinBtn = Button(this).apply {
-            text = "Join"
-            setOnClickListener {
-                val ok = serviceEngine()?.joinPairCode(pairInput.text.toString()) ?: false
-                Toast.makeText(this@MainActivity, if (ok) "Pair code joined" else "Invalid pair code", Toast.LENGTH_SHORT).show()
-            }
-        }
-        pairRow.addView(pairInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        pairRow.addView(joinBtn)
-        root.addView(pairRow)
-
-        // Peers
-        root.addView(sectionLabel("Devices"))
-        peerAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, peerNames)
-        peerList = ListView(this).apply {
-            adapter = peerAdapter
-            choiceMode = ListView.CHOICE_MODE_SINGLE
-            onItemClickListener = android.widget.AdapterView.OnItemClickListener { _, _, pos, _ ->
-                selectedPeerId = peerIds.getOrNull(pos)
-                Toast.makeText(this@MainActivity, "Selected ${peerNames[pos]}", Toast.LENGTH_SHORT).show()
-            }
-        }
-        root.addView(peerList, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(140)))
-
-        // Action buttons
-        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        actions.addView(Button(this).apply {
-            text = "Send files"
-            setOnClickListener { pickFiles() }
-        })
-        actions.addView(Button(this).apply {
-            text = "Send clipboard"
-            setOnClickListener { sendClipboard() }
-        })
-        actions.addView(Button(this).apply {
-            text = "Hide"
-            setOnClickListener { toggleVisibility() }
-        })
-        root.addView(actions)
-
-        // Transfers
-        root.addView(sectionLabel("Transfers"))
-        transferAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, transferLines)
-        transferList = ListView(this).apply { adapter = transferAdapter }
-        root.addView(transferList, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-
-        setContentView(ScrollView(this).apply { addView(root) })
-    }
-
-    private fun sectionLabel(text: String): TextView =
-        TextView(this).apply {
-            this.text = text
-            textSize = 16f
-            setPadding(0, dp(8), 0, dp(4))
-        }
-
-    private fun connect(url: String) {
-        if (url.isBlank() || !(url.startsWith("ws://") || url.startsWith("wss://"))) {
-            Toast.makeText(this, "Enter ws:// or wss:// URL", Toast.LENGTH_SHORT).show()
+    // Framework-only activity: no AndroidX back dispatcher is available.
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun onBackPressed() {
+        if (scanner != null) {
+            closeScanner()
             return
         }
-        prefs.serverUrl = url
-        val i = Intent(this, EngineService::class.java)
-            .setAction(EngineService.ACTION_CONNECT)
-            .putExtra(EngineService.EXTRA_URL, url)
-        startService(i)
-        // Service creates the engine asynchronously-ish; retry attach shortly.
-        status.text = "Status: connecting to $url"
-        peerList.postDelayed({ onStart() }, 300)
+        super.onBackPressed()
     }
 
-    private fun pickFiles() {
-        val peer = selectedPeerId ?: run {
-            Toast.makeText(this, "Select a device first", Toast.LENGTH_SHORT).show()
-            return
+    // ------------------------------------------------------------------ webview
+
+    private fun buildContentView() {
+        root = FrameLayout(this)
+        webView = WebView(this).apply {
+            setBackgroundColor(0xFFFFFFFF.toInt())
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.useWideViewPort = true
+            settings.loadWithOverviewMode = true
+            settings.setSupportZoom(false)
+            settings.builtInZoomControls = false
+            settings.displayZoomControls = false
+            settings.allowFileAccess = false
+            settings.allowContentAccess = true
+            settings.javaScriptCanOpenWindowsAutomatically = false
+            settings.setSupportMultipleWindows(false)
+            settings.mediaPlaybackRequiresUserGesture = true
+            settings.cacheMode = WebSettings.LOAD_DEFAULT
+            webViewClient = ShellWebViewClient()
+            webChromeClient = ShellChromeClient()
+            addJavascriptInterface(ShellBridge(this@MainActivity), BRIDGE_NAME)
+            setDownloadListener { url, _, _, _, _ ->
+                if (url.startsWith("blob:") || url.startsWith("data:")) return@setDownloadListener
+                openExternally(Uri.parse(url))
+            }
         }
-        val target = peer
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-        }
-        startActivityForResult(Intent.createChooser(intent, "Send files"), REQ_PICK)
-        pickedPeer = target
+        root.addView(
+            webView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        setContentView(root)
     }
 
-    private var pickedPeer: String? = null
+    private inner class ShellWebViewClient : WebViewClient() {
+        /** A crashed renderer leaves the WebView blank and unusable; rebuild it. */
+        override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+            Log.w(TAG, "web renderer gone (crashed=${detail.didCrash()})")
+            recreate()
+            return true
+        }
+
+        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+            val uri = request.url
+            if (isShellPage(uri)) return false
+            openExternally(uri)
+            return true
+        }
+    }
+
+    private inner class ShellChromeClient : WebChromeClient() {
+        override fun onShowFileChooser(
+            view: WebView?,
+            callback: ValueCallback<Array<Uri>>?,
+            params: FileChooserParams?,
+        ): Boolean {
+            pendingChooser?.onReceiveValue(null)
+            pendingChooser = callback
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = params?.acceptTypes?.firstOrNull { it.isNotBlank() && !it.startsWith(".") } ?: "*/*"
+                putExtra(
+                    Intent.EXTRA_ALLOW_MULTIPLE,
+                    params?.mode == FileChooserParams.MODE_OPEN_MULTIPLE,
+                )
+            }
+            return try {
+                startActivityForResult(intent, REQ_PICK)
+                true
+            } catch (_: ActivityNotFoundException) {
+                pendingChooser = null
+                false
+            }
+        }
+    }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQ_PICK || resultCode != RESULT_OK || data == null) return
-        val peer = pickedPeer ?: return
-        val e = serviceEngine() ?: run {
-            Toast.makeText(this, "Not connected", Toast.LENGTH_SHORT).show()
+        if (requestCode != REQ_PICK) return
+        val callback = pendingChooser ?: return
+        pendingChooser = null
+        if (resultCode != RESULT_OK || data == null) {
+            callback.onReceiveValue(null)
             return
         }
         val uris = mutableListOf<Uri>()
         data.clipData?.let { clip ->
-            for (i in 0 until clip.itemCount) uris.add(clip.getItemAt(i).uri)
+            for (index in 0 until clip.itemCount) uris.add(clip.getItemAt(index).uri)
         } ?: data.data?.let { uris.add(it) }
-        val sources = uris.mapNotNull { ContentUriFileSource.resolve(this, it) }
-        if (sources.isEmpty()) {
-            Toast.makeText(this, "No readable files", Toast.LENGTH_SHORT).show()
-            return
+        callback.onReceiveValue(if (uris.isEmpty()) null else uris.toTypedArray())
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_CAMERA) return
+        val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+        val scanNow = pendingScanAfterPermission
+        pendingScanAfterPermission = false
+        if (granted && scanNow) {
+            openScanner()
+        } else if (!granted) {
+            toast("Camera permission denied — type your computer's address instead")
         }
+    }
+
+    /** True for the relay origin and the bundled connect page — everything else
+     *  (GitHub release links, the CA download, mailto:) belongs in a real app. */
+    private fun isShellPage(uri: Uri): Boolean {
+        val scheme = uri.scheme?.lowercase() ?: return false
+        if (scheme == "about" || scheme == "data" || scheme == "blob") return true
+        if (scheme != "http" && scheme != "https") return false
+        val host = uri.host?.lowercase() ?: return false
+        return host == "127.0.0.1" || host == "localhost" || host == CONNECT_HOST
+    }
+
+    private fun openExternally(uri: Uri) {
         try {
-            val id = e.sendFiles(peer, sources)
-            Toast.makeText(this, "Sending ${sources.size} file(s)", Toast.LENGTH_SHORT).show()
-            android.util.Log.i("AirBridge", "transfer $id started")
-        } catch (ex: Exception) {
-            Toast.makeText(this, "Send failed: ${ex.message}", Toast.LENGTH_LONG).show()
+            startActivity(Intent(Intent.ACTION_VIEW, uri))
+        } catch (_: ActivityNotFoundException) {
+            toast("No app can open that link")
         }
     }
 
-    private fun sendClipboard() {
-        val peer = selectedPeerId ?: run {
-            Toast.makeText(this, "Select a device first", Toast.LENGTH_SHORT).show()
+    // -------------------------------------------------------------- navigation
+
+    /** Shows the unpaired connect screen (also used after "forget computer"). */
+    private fun showConnectScreen() {
+        val html = try {
+            assets.open(CONNECT_ASSET).bufferedReader().use { it.readText() }
+        } catch (e: Exception) {
+            Log.w(TAG, "connect screen asset missing: ${e.message}")
+            FALLBACK_HTML
+        }
+        webView.loadDataWithBaseURL(CONNECT_ORIGIN, html, "text/html", "utf-8", null)
+    }
+
+    /**
+     * Points the WebView at the paired computer. The relay hop is what makes the
+     * page a secure context; the pair code is replayed so the phone rejoins the
+     * desktop's pairing group on the first load.
+     */
+    private fun openApp(link: PairingLink) {
+        val port = startRelay(link)
+        if (port == 0) {
+            showConnectScreen()
             return
         }
-        val e = serviceEngine() ?: run {
-            Toast.makeText(this, "Not connected", Toast.LENGTH_SHORT).show()
+        connectedLink = link
+        // Only a code that was just scanned is replayed; afterwards the web app
+        // remembers its own pairing in localStorage.
+        val code = prefs.consumePendingPairCode()
+        val url = "http://127.0.0.1:$port/" + if (code != null) "?pair=$code" else ""
+        webView.loadUrl(url)
+    }
+
+    private fun startRelay(link: PairingLink): Int {
+        relay?.stop()
+        relay = null
+        return try {
+            val created = LoopbackRelay(link.host, link.port)
+            val port = created.start(prefs.relayPort)
+            prefs.relayPort = port
+            relay = created
+            port
+        } catch (e: Exception) {
+            Log.w(TAG, "relay start failed: ${e.message}")
+            toast("Could not reach ${link.host}")
+            0
+        }
+    }
+
+    private fun applyPairing(link: PairingLink) {
+        prefs.target = link.baseUrl
+        prefs.pairCode = link.pairCode.orEmpty()
+        prefs.pendingPairCode = link.pairCode.orEmpty()
+        closeScanner()
+        openApp(link)
+        toast("Connecting to ${link.host}")
+    }
+
+    // ------------------------------------------------------------------ scanner
+
+    fun hasCamera(): Boolean = packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
+
+    fun openScanner() {
+        if (!hasCamera()) {
+            toast("This device has no camera — type your computer's address instead")
             return
         }
-        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val text = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()
-        if (text.isNullOrEmpty()) {
-            Toast.makeText(this, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            pendingScanAfterPermission = true
+            requestPermissions(arrayOf(Manifest.permission.CAMERA), REQ_CAMERA)
             return
         }
-        e.sendClipboardText(peer, text.take(256_000))
-        Toast.makeText(this, "Clipboard sent", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun toggleVisibility() {
-        val next = when (prefs.visibility) {
-            "nearby" -> "paired-only"
-            "paired-only" -> "hidden"
-            else -> "nearby"
+        if (scanner != null) return
+        val view = QrScannerView(this)
+        view.onCode = { payload ->
+            closeScanner()
+            handleScanned(payload)
         }
-        prefs.visibility = next
-        serviceEngine()?.setVisibility(next)
-        Toast.makeText(this, "Visibility: $next", Toast.LENGTH_SHORT).show()
+        view.onClose = { closeScanner() }
+        scanner = view
+        root.addView(
+            view,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        view.start()
     }
 
-    private fun showOfferDialog(transfer: TransferView) {
-        pendingOffer = transfer
-        AlertDialog.Builder(this)
-            .setTitle("Incoming transfer")
-            .setMessage(
-                "From ${transfer.peerName}\n" +
-                    "${transfer.files.size} file(s) · ${formatBytes(transfer.totalBytes)}",
-            )
-            .setPositiveButton("Accept") { _, _ ->
-                serviceEngine()?.acceptIncomingTransfer(transfer.transferId)
-                pendingOffer = null
-            }
-            .setNegativeButton("Decline") { _, _ ->
-                serviceEngine()?.declineIncomingTransfer(transfer.transferId)
-                pendingOffer = null
-            }
-            .setOnCancelListener { pendingOffer = null }
-            .show()
+    private fun closeScanner() {
+        val view = scanner ?: return
+        scanner = null
+        view.release()
+        root.removeView(view)
     }
 
-    private fun refreshFromEngine() {
-        val e = engine ?: return
-        onPeersRefresh(e)
-        transferLines.clear()
-        for (t in e.transfersSnapshot()) {
-            transferLines.add("${t.status} ${t.peerName} ${t.transferredBytes}/${t.totalBytes}")
+    private fun handleScanned(payload: String) {
+        val trimmed = payload.trim()
+        if (trimmed.contains("/api/beam/")) {
+            toast("That is a one-off file link, not a pairing code")
+            openScanner()
+            return
         }
-        transferAdapter.notifyDataSetChanged()
-        status.text = "Status: ${e.currentState}"
+        val link = PairingLink.parse(trimmed)
+        if (link == null) {
+            toast("That QR code is not an AirBridge pairing code")
+            openScanner()
+            return
+        }
+        applyPairing(link)
     }
 
-    private fun onPeersRefresh(e: AirBridgeEngine) {
-        val peers = e.peersSnapshot()
-        peerNames.clear()
-        peerIds.clear()
-        for (p in peers) {
-            peerIds.add(p.peerId)
-            peerNames.add("${p.device.name} · ${p.device.platform} · ${p.peerId}")
-        }
-        peerAdapter.notifyDataSetChanged()
+    private fun pairingLinkFromIntent(intent: Intent?): PairingLink? {
+        if (intent?.action != Intent.ACTION_VIEW) return null
+        val data = intent.data ?: return null
+        return PairingLink.parse(data.toString())
     }
 
-    private fun requestRuntimePermissions() {
-        val wanted = mutableListOf<String>()
-        if (Build.VERSION.SDK_INT >= 33) wanted.add(Manifest.permission.POST_NOTIFICATIONS)
-        if (Build.VERSION.SDK_INT < 29) wanted.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-        val missing = wanted.filter {
-            checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (missing.isNotEmpty()) {
-            requestPermissions(missing.toTypedArray(), REQ_PERMS)
-        }
+    // ------------------------------------------------------------ bridge support
+
+    fun currentLink(): PairingLink? = connectedLink ?: prefs.pairingLink()
+
+    fun preferredAddress(): String = prefs.target
+
+    fun currentPairCode(): String = prefs.pairCode
+
+    fun nearbyHosts(): List<NearbyHost> = synchronized(nearby) { nearby.values.toList() }
+
+    /** Validates a typed/scanned address; returns an error message or null. */
+    fun connectToAddress(address: String): String? {
+        val link = PairingLink.parse(address)
+            ?: return "Enter your computer's address, e.g. 192.168.1.5:3411"
+        runOnUiThread { applyPairing(link) }
+        return null
     }
 
-    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+    fun forgetComputer() {
+        prefs.forget()
+        relay?.stop()
+        relay = null
+        connectedLink = null
+        webView.stopLoading()
+        webView.clearHistory()
+        showConnectScreen()
+    }
+
+    fun onFileSaved(name: String, location: String) {
+        toast(if (location.isEmpty()) "Saved $name" else "Saved $name to $location")
+    }
+
+    // ----------------------------------------------------------------- discovery
+
+    private fun startDiscovery() {
+        val found = ServerDiscovery(
+            this,
+            onFound = { url, name ->
+                val link = PairingLink.parse(url)
+                if (link != null) {
+                    // mDNS does not say whether the desktop serves TLS; the relay
+                    // tries TLS first and falls back, so advertise the https form.
+                    val address = link.copy(scheme = "https").baseUrl
+                    synchronized(nearby) { nearby[address] = NearbyHost(name, address) }
+                }
+            },
+            onLost = { name ->
+                synchronized(nearby) { nearby.entries.removeAll { it.value.name == name } }
+            },
+        )
+        discovery = found
+        found.start()
+    }
+
+    private fun toast(message: String) {
+        runOnUiThread { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }
+    }
 
     companion object {
-        private const val REQ_PICK = 11
-        private const val REQ_PERMS = 12
+        private const val TAG = "AirBridgeMain"
+        private const val BRIDGE_NAME = "AirBridgeAndroid"
+        private const val CONNECT_ASSET = "shell/connect.html"
+        private const val CONNECT_HOST = "shell.airbridge.local"
+        private const val CONNECT_ORIGIN = "https://$CONNECT_HOST/"
+        private const val REQ_PICK = 41
+        private const val REQ_CAMERA = 42
+
+        private val FALLBACK_HTML = """
+            <!doctype html><html><body style="font:14px/1.5 sans-serif;padding:24px">
+            <h1 style="font-size:22px">Connect to your computer</h1>
+            <p>Start AirBridge on your computer, then reopen this app to scan its QR code.</p>
+            </body></html>
+        """.trimIndent()
     }
 }

@@ -4,6 +4,7 @@ import {
   type SendableFileInput,
   wrapBrowserFile,
 } from '../engine/warpClient.js';
+import { isNativeShell, saveBlobToDevice } from './nativeShell.js';
 
 interface WebkitEntry {
   isFile: boolean;
@@ -84,12 +85,24 @@ export async function extractDroppedFiles(dataTransfer: DataTransfer): Promise<S
 }
 
 export function triggerSingleFileDownload(record: ReceivedFileRecord): void {
-  const url =
-    record.blobUrl ||
-    URL.createObjectURL(new Blob(record.chunks as BlobPart[], { type: record.mimeType }));
+  const blob = new Blob(record.chunks as BlobPart[], { type: record.mimeType });
+  // Android shell: `<a download>` cannot save a blob: URL inside a WebView, so
+  // the bytes stream to Downloads through the native bridge instead.
+  if (isNativeShell()) {
+    void saveBlobToDevice(blob, record.name).then((saved) => {
+      if (!saved) triggerAnchorDownload(record.blobUrl || URL.createObjectURL(blob), record.name);
+    });
+    return;
+  }
+  const url = record.blobUrl || URL.createObjectURL(blob);
+  triggerAnchorDownload(url, record.name);
+}
+
+/** The browser download the app has always used. */
+function triggerAnchorDownload(url: string, fileName: string): void {
   const a = document.createElement('a');
   a.href = url;
-  a.download = record.name;
+  a.download = fileName;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -106,13 +119,15 @@ export function triggerBatchZipDownload(
     }))
   );
   const blob = new Blob(zipParts as BlobPart[], { type: 'application/zip' });
+  const fileName = `${archiveBaseName}.zip`;
+  if (isNativeShell()) {
+    void saveBlobToDevice(blob, fileName).then((saved) => {
+      if (!saved) triggerAnchorDownload(URL.createObjectURL(blob), fileName);
+    });
+    return;
+  }
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${archiveBaseName}.zip`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  triggerAnchorDownload(url, fileName);
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 

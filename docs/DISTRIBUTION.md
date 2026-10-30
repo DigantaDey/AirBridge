@@ -106,7 +106,7 @@ single-file binaries print the same thing from a terminal:
 | macOS | `install.sh` → `~/.local/bin/AirBridge` | `--autostart` → `~/Library/LaunchAgents/com.airbridge.daemon.plist` + `launchctl bootstrap` |
 | Linux | `install.sh` → `~/.local/bin/AirBridge` | `--autostart` → `~/.config/autostart/airbridge.desktop` |
 | Windows | `install.ps1` → `%LOCALAPPDATA%\AirBridge` | `-Autostart` → `HKCU\…\Run` |
-| Android | sideload APK | foreground service keeps transfers alive; enable auto-start in OEM settings if desired |
+| Android | sideload APK | none (transfers run while the app is in the foreground, like a browser tab) |
 
 Nothing writes outside the user's home/profile; no `sudo`, no UAC, no admin.
 
