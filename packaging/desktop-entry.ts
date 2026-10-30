@@ -346,6 +346,7 @@ async function main(): Promise<void> {
   const server = await createAirBridgeServer({
     port: opts.port,
     mode: 'production',
+    version: VERSION,
     clientAssets: clientAssets as Record<string, string>,
     ...tlsOptions,
     daemonConfig: {
@@ -359,7 +360,13 @@ async function main(): Promise<void> {
 
   const targetUrl = server.lanUrls[0] || `http://localhost:${server.port}`;
   const localUrl = `http://localhost:${server.port}`;
-  const qr = await QRCode.toString(targetUrl, { type: 'terminal', small: true });
+  // The QR embeds this session's default pair code so the phone lands inside
+  // the host's pairing group on first open (?pair= handled by the client).
+  const pairCode = server.hub?.getDefaultPairCode?.() || '';
+  const connectUrl = pairCode
+    ? `${targetUrl}${targetUrl.includes('?') ? '&' : '?'}pair=${pairCode}`
+    : targetUrl;
+  const qr = await QRCode.toString(connectUrl, { type: 'terminal', small: true });
 
   console.log(`\n  ⚡ AirBridge ${VERSION} active on port ${server.port}`);
   if (opts.downloadDir || process.env.AIRBRIDGE_DOWNLOAD_DIR) {
@@ -371,9 +378,15 @@ async function main(): Promise<void> {
   console.log(
     `  🤖 Native Android app: connect to ${targetUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:')}/ws — no CA certificate install needed.`
   );
-  console.log(`  🌐 Local UI: ${localUrl}\n`);
-  console.log(`  📱 Scan on Android (${targetUrl}):\n`);
+  console.log(`  🌐 Local UI: ${localUrl}`);
+  console.log(`  📦 More builds + this machine's files: ${localUrl.replace(/^http:/, targetUrl.startsWith('https') ? 'https:' : 'http:')}`);
+  console.log(`  🖥  No build for your OS? The CLI runs anywhere Node 20+ exists: npx airbridge\n`);
+  console.log(`  📱 Scan on Android — the QR auto-pairs (${connectUrl}):\n`);
   console.log(qr);
+  const httpBase = targetUrl.replace(/^https:/, 'http:');
+  console.log(`  🔗 Open: ${connectUrl}`);
+  console.log(`  🔐 Phone browser warning? Install the CA once: ${httpBase}/airbridge-ca.crt`);
+  console.log('     (check the fingerprint above first), then rescan.');
   console.log('  (Ctrl+C to stop)\n');
 
   if (!opts.noBrowser) {

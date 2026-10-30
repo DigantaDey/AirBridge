@@ -453,3 +453,17 @@ and curl-installed files carry no quarantine/Gatekeeper flag; Windows uses a
 portable EXE fetched without Mark-of-the-Web (SignPath free OSS signing is the
 optional upgrade path). Full story, matrix, and CI flow:
 [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
+
+### Download center inside the app + universal CLI
+
+Once AirBridge is running anywhere, open its web UI and click **Downloads**:
+every platform build is listed there (the visitor's device is highlighted).
+Artifacts dropped next to the running binary are served straight from that
+machine over the LAN — a phone can install the APK without internet access;
+everything else links to GitHub Releases with `SHA256SUMS.txt` verification.
+
+**No build for your platform?** AirBridge is truly cross-platform via the CLI:
+`npx airbridge` (Node 20+) — or the single-file binary itself — starts the
+server on any OS and **prints a pairing QR in the terminal**; scanning it with
+a phone opens the page already inside the host's pairing group
+(`?pair=<code>`, first-claim scoped, rotate anytime).

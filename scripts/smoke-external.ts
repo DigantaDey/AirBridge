@@ -223,6 +223,40 @@ async function main(): Promise<void> {
   }
   results.push('clipboard android → mac verified');
 
+  // 7. Download center + security headers on the packaged server
+  const origin = wsUrl.replace(/^ws/, 'http').replace(/\/ws$/, '');
+  const dlRes = await fetch(`${origin}/api/downloads`);
+  if (!dlRes.ok) throw new Error(`/api/downloads -> ${dlRes.status}`);
+  const dl = (await dlRes.json()) as {
+    version: string;
+    githubRelease: string;
+    files: Array<{ name: string; url: string }>;
+  };
+  if (!dl.githubRelease.includes('github.com')) throw new Error('bad githubRelease in manifest');
+  if (!Array.isArray(dl.files)) throw new Error('files missing from download manifest');
+  results.push(`download manifest ok (v${dl.version}, ${dl.files.length} local file(s))`);
+
+  const indexRes = await fetch(`${origin}/`);
+  const csp = indexRes.headers.get('content-security-policy') || '';
+  if (!csp.includes("default-src 'none'") || !csp.includes("script-src 'self'")) {
+    throw new Error(`missing CSP hardening headers: "${csp}"`);
+  }
+  if (!indexRes.headers.get('permissions-policy')) {
+    throw new Error('missing Permissions-Policy header');
+  }
+  results.push('CSP + Permissions-Policy headers present');
+
+  const traversal = await fetch(
+    `${origin}/downloads/${encodeURIComponent('..%2f..%2fetc%2fpasswd')}`
+  );
+  const notWhitelisted = await fetch(`${origin}/downloads/not-an-artifact.txt`);
+  if (traversal.status !== 404 || notWhitelisted.status !== 404) {
+    throw new Error(
+      `download endpoint must 404 non-whitelisted names (got ${traversal.status}/${notWhitelisted.status})`
+    );
+  }
+  results.push('download endpoint rejects non-whitelisted names');
+
   mac.stop();
   android.stop();
   console.log('\n✅ PACKAGED-BINARY SMOKE PASSED:');

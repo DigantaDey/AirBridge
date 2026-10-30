@@ -150,15 +150,26 @@ async function main() {
   });
 
   const targetUrl = server.lanUrls[0] || `http://localhost:${server.port}`;
-  const qrAscii = await QRCode.toString(targetUrl, { type: 'terminal', small: true });
+  // The QR embeds this session's default pair code: the phone opens the page
+  // already inside the host's pairing group (?pair= is handled by the client).
+  const pairCode = server.hub?.getDefaultPairCode?.() || '';
+  const connectUrl = pairCode
+    ? `${targetUrl}${targetUrl.includes('?') ? '&' : '?'}pair=${pairCode}`
+    : targetUrl;
+  const qrAscii = await QRCode.toString(connectUrl, { type: 'terminal', small: true });
 
   console.log(`\n  ⚡ AirBridge Daemon Active on Port ${server.port}`);
   console.log(`  📂 Auto-Save Folder: ${downloadDir}`);
   for (const line of describeTlsSetup(server)) {
     console.log(`  ${line}`);
   }
-  console.log(`  📱 Scan on Android (${targetUrl}):\n`);
+  console.log(`  🌐 Any other OS? This CLI also runs anywhere Node 20+ exists: npx airbridge`);
+  console.log(`  📱 Scan on Android — the QR auto-pairs (${connectUrl}):\n`);
   console.log(qrAscii);
+  const httpBase = targetUrl.replace(/^https:/, 'http:');
+  console.log(`  🔗 Open: ${connectUrl}`);
+  console.log(`  🔐 Phone browser warning? Install the CA once: ${httpBase}/airbridge-ca.crt`);
+  console.log('     (verify the fingerprint above before installing), then rescan.\n');
 }
 
 main().catch((err) => {

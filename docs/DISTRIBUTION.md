@@ -61,6 +61,44 @@ lieu of paid code-signing certificates.
   the same APK as an AAB later; nothing in the app conflicts with Play policy
   (LAN-only transfers, no sensitive permissions).
 
+## In-app Download center
+
+The web UI served by every build has a **Downloads** panel (`GET /api/downloads`):
+
+* lists all platform artifacts — the visitor's own platform is highlighted via
+  user-agent;
+* files that sit **next to the running binary** (or in `$AIRBRIDGE_ARTIFACTS_DIR`)
+  are served from that machine over the LAN at `/downloads/<name>` — a phone
+  installs the APK with zero internet access;
+* everything else deep-links to `releases/latest/download/<asset>` plus
+  `SHA256SUMS.txt`.
+
+Security properties of the endpoint: exact-name whitelist only
+(`AirBridge-<os>-<arch>[-musl][.exe]`, `AirBridge.apk`, `SHA256SUMS.txt`),
+basename-only resolution inside fixed search dirs (no traversal, no listing),
+`Content-Disposition: attachment`, `Cache-Control: no-store`, and its own
+`default-src 'none'` CSP. The app itself ships a strict global CSP +
+`Permissions-Policy` + `Cross-Origin-Resource-Policy` in production builds
+(dev mode is exempt so Vite keeps working).
+
+## Truly cross-platform CLI (design decision)
+
+Prebuilt binaries cover the mainstream matrix — but **any other device must
+still work**. Wherever a Node 20+ runtime exists (FreeBSD, NAS boxes, exotic
+arches, CI containers), `npx airbridge` starts the full server, and the
+single-file binaries print the same thing from a terminal:
+
+* the startup banner shows a **pairing QR** encoding
+  `https://<lan>:<port>/?pair=<session-code>`;
+* the **first** client to connect claims the session code; later hello-less
+  clients get distinct codes (paired-only isolation is unchanged — an
+  explicit `?pair=`/join is always honored, reconnects rejoin their previous
+  group);
+* scanning the QR requires the same physical access as reading the code on
+  screen, so the trust model is unchanged;
+* the CA-install hint is printed next to the QR for first-time HTTPS on a
+  phone (fingerprint printed out-of-band for verification).
+
 ## Installer behavior (all no-admin)
 
 | OS | Install | Autostart |
