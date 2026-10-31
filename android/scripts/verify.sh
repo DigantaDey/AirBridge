@@ -3,7 +3,9 @@
 #
 #   1. engine sources compile (kotlinc, pure JVM, zero dependencies)
 #   2. TypeScript-reference vectors pass (62 cross-implementation checks)
-#   3. app sources typecheck against android.jar (framework Views only)
+#      plus the pairing-link parser checks
+#   3. app sources typecheck against android.jar + compile-time stubs for the
+#      one Gradle dependency (scripts/stubs/com/google/zxing)
 #
 # Environment overrides:
 #   KOTLINC       path to kotlinc           (default: kotlinc on PATH)
@@ -74,8 +76,15 @@ CP="$OUT/engine"
 "$JAVA" -cp "$CP" com.airbridge.engine.VectorsTestKt \
   "$REPO/android/engine/src/test/resources/vectors.json"
 
+echo "==> running pairing-link checks"
+"$JAVA" -cp "$CP" com.airbridge.engine.PairingLinkTestKt
+
 echo "==> typechecking app against android.jar"
 mapfile -t APP_SRC < <(find "$REPO/android/app/src/main/kotlin" -name '*.kt' | sort)
-"$KOTLINC" -nowarn -classpath "$ANDROID_JAR_PATH:$OUT/engine" -d "$OUT/app" "${APP_SRC[@]}"
+# Gradle fetches the real com.google.zxing:core jar; this script has no network,
+# so it compiles against the declaration stubs instead.
+mapfile -t APP_STUBS < <(find "$REPO/android/scripts/stubs" -name '*.kt' | sort)
+"$KOTLINC" -nowarn -classpath "$ANDROID_JAR_PATH:$OUT/engine" -d "$OUT/app" \
+  "${APP_SRC[@]}" "${APP_STUBS[@]}"
 
 echo "VERIFY OK: engine + vectors + app typecheck"

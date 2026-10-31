@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>AirBridge</title>
+    <!--
+      Unpaired connect screen for the Android shell.
+
+      Once a computer is paired this page is never shown again: the WebView loads
+      the desktop's own web UI (the same one a browser gets). It exists so a phone
+      that has never paired — or that just closed the QR scanner — has something
+      to do, styled with the same tokens as src/client/index.css.
+
+      Everything routes through window.AirBridgeAndroid, injected by
+      ShellBridge.kt. See tests/connect-screen.test.ts.
+    -->
+    <style>
+      :root {
+        color-scheme: light;
+        --ab-bg: #fff;
+        --ab-text: #111;
+        --ab-secondary: #454545;
+        --ab-muted: #777;
+        --ab-border: #e5e5e5;
+        --ab-border-strong: #cfcfcf;
+        --ab-subtle: #f7f7f7;
+        --ab-danger: #b91c1c;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          color-scheme: dark;
+          --ab-bg: #111;
+          --ab-text: #f5f5f5;
+          --ab-secondary: #d0d0d0;
+          --ab-muted: #aaa;
+          --ab-border: #333;
+          --ab-border-strong: #555;
+          --ab-subtle: #202020;
+          --ab-danger: #f87171;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--ab-bg);
+        color: var(--ab-text);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        letter-spacing: 0;
+        -webkit-font-smoothing: antialiased;
+      }
+      button, input { font: inherit; }
+      button { cursor: pointer; }
+      button:focus-visible, input:focus-visible { outline: 2px solid var(--ab-text); outline-offset: 3px; }
+      .utility-shell { min-height: 100vh; }
+      .utility-header {
+        height: 62px;
+        border-bottom: 1px solid var(--ab-border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 18px;
+      }
+      .brand { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 650; letter-spacing: -0.02em; }
+      .brand-mark {
+        width: 23px;
+        height: 23px;
+        border: 1px solid var(--ab-text);
+        border-radius: 6px;
+        display: grid;
+        place-items: center;
+        font-size: 12px;
+      }
+      .utility-main { width: min(100% - 36px, 680px); margin: 0 auto; padding: 30px 0 28px; }
+      .device-heading { display: flex; flex-direction: column; gap: 10px; margin-bottom: 27px; }
+      .section-kicker { color: var(--ab-muted); font-size: 10px; font-weight: 600; letter-spacing: 0.11em; margin: 0 0 5px; }
+      h1 { font-size: 23px; line-height: 1.2; letter-spacing: -0.045em; font-weight: 550; margin: 0; }
+      .service-state { display: flex; align-items: center; gap: 8px; color: var(--ab-secondary); font-size: 12px; }
+      .state-symbol { font-size: 10px; color: var(--ab-text); }
+      .recovery-note {
+        border: 1px solid var(--ab-border);
+        background: var(--ab-subtle);
+        padding: 13px 15px;
+        margin: 0 0 26px;
+        display: flex;
+        flex-direction: column;
+        gap: 13px;
+      }
+      .recovery-note strong { font-weight: 600; font-size: 13px; }
+      .recovery-note p { color: var(--ab-muted); margin: 3px 0 0; font-size: 12px; }
+      .section-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 11px; margin-top: 26px; }
+      .section-title h2 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.02em; }
+      .device-list { list-style: none; padding: 0; margin: 0; border-top: 1px solid var(--ab-border); }
+      .device-row {
+        border-bottom: 1px solid var(--ab-border);
+        min-height: 65px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .device-glyph {
+        width: 32px;
+        height: 32px;
+        flex-shrink: 0;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--ab-border);
+        border-radius: 8px;
+        color: var(--ab-secondary);
+        font-size: 17px;
+      }
+      .device-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; }
+      .device-copy strong { font-weight: 550; font-size: 13px; }
+      .device-copy small { color: var(--ab-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .send-device-button, .secondary-button {
+        border: 1px solid var(--ab-text);
+        border-radius: 6px;
+        background: var(--ab-text);
+        color: var(--ab-bg);
+        padding: 7px 15px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .secondary-button { background: transparent; color: var(--ab-text); }
+      .empty-devices { border: 1px solid var(--ab-border); padding: 18px; }
+      .empty-devices p { margin: 0 0 3px; font-weight: 550; }
+      .empty-devices span { display: block; color: var(--ab-muted); font-size: 12px; margin-bottom: 14px; }
+      .address-form { display: flex; gap: 8px; margin-top: 11px; }
+      .address-form input {
+        flex: 1;
+        min-width: 0;
+        border: 1px solid var(--ab-border-strong);
+        border-radius: 6px;
+        padding: 9px 10px;
+        color: var(--ab-text);
+        background: var(--ab-bg);
+      }
+      .error { color: var(--ab-danger); font-size: 12px; margin: 10px 0 0; }
+      .utility-footer {
+        margin-top: 38px;
+        padding-top: 13px;
+        border-top: 1px solid var(--ab-border);
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        color: var(--ab-muted);
+        font-size: 11px;
+      }
+      .quiet-button, .text-button {
+        border: 0;
+        padding: 6px 0;
+        background: transparent;
+        color: var(--ab-secondary);
+        font-size: 13px;
+      }
+      .quiet-button:hover, .text-button:hover { color: var(--ab-text); text-decoration: underline; }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div class="utility-shell">
+      <header class="utility-header">
+        <div class="brand"><span class="brand-mark">A</span><span>AirBridge</span></div>
+        <button class="quiet-button" id="scan-header" type="button">Scan QR code</button>
+      </header>
+      <main class="utility-main">
+        <section class="device-heading">
+          <div>
+            <p class="section-kicker">YOUR DEVICE</p>
+            <h1>Connect to your computer</h1>
+          </div>
+          <div class="service-state" role="status">
+            <span class="state-symbol" aria-hidden="true">○</span><span id="state-label">Not connected</span>
+          </div>
+        </section>
+
+        <div class="recovery-note">
+          <div>
+            <strong>Scan the QR code AirBridge shows on your computer</strong>
+            <p>
+              AirBridge runs on the computer; this phone is a window into it. Scanning pairs the two
+              devices and opens the same interface you would get in a browser.
+            </p>
+          </div>
+          <div><button class="send-device-button" id="scan" type="button">Scan QR code</button></div>
+        </div>
+
+        <section>
+          <div class="section-title"><h2>Computers on this network</h2></div>
+          <ul class="device-list" id="hosts" hidden></ul>
+          <div class="empty-devices" id="empty">
+            <p>No computers found yet</p>
+            <span>Start AirBridge on your computer on the same Wi-Fi network, or scan the QR code it prints.</span>
+          </div>
+        </section>
+
+        <section>
+          <div class="section-title"><h2>Or type the address</h2></div>
+          <form class="address-form" id="form">
+            <input
+              id="address"
+              placeholder="192.168.1.5:3411"
+              inputmode="url"
+              autocomplete="off"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              aria-label="Computer address"
+            />
+            <button class="send-device-button" type="submit">Connect</button>
+          </form>
+          <p class="error" id="error" role="alert" hidden></p>
+        </section>
+
+        <footer class="utility-footer">
+          <span>Encrypted transfers. No account or cloud storage.</span>
+          <span id="shell-note">AirBridge for Android</span>
+        </footer>
+      </main>
+    </div>
+
+    <script>
+      (function () {
+        var bridge = window.AirBridgeAndroid;
+        var hostsEl = document.getElementById("hosts");
+        var emptyEl = document.getElementById("empty");
+        var errorEl = document.getElementById("error");
+        var inputEl = document.getElementById("address");
+        var stateEl = document.getElementById("state-label");
+        var noteEl = document.getElementById("shell-note");
+        var lastHosts = "";
+
+        function showError(message) {
+          if (!message) {
+            errorEl.hidden = true;
+            errorEl.textContent = "";
+            return;
+          }
+          errorEl.textContent = message;
+          errorEl.hidden = false;
+        }
+
+        function scan() {
+          if (!bridge) {
+            showError("Scanning needs the AirBridge app.");
+            return;
+          }
+          if (!bridge.scanQr()) showError("This device has no camera — type the address instead.");
+        }
+
+        function connect(address) {
+          var trimmed = String(address || "").trim();
+          if (!trimmed) {
+            showError("Enter your computer's address, e.g. 192.168.1.5:3411");
+            return;
+          }
+          if (!bridge) {
+            showError("Open this screen inside the AirBridge app.");
+            return;
+          }
+          var error = bridge.connect(trimmed);
+          showError(error || "");
+        }
+
+        function parse(json, fallback) {
+          try {
+            return JSON.parse(json);
+          } catch (e) {
+            return fallback;
+          }
+        }
+
+        function renderHosts(hosts) {
+          var signature = JSON.stringify(hosts);
+          if (signature === lastHosts) return;
+          lastHosts = signature;
+          hostsEl.textContent = "";
+          if (!hosts.length) {
+            hostsEl.hidden = true;
+            emptyEl.hidden = false;
+            return;
+          }
+          hosts.forEach(function (host) {
+            var row = document.createElement("li");
+            row.className = "device-row";
+            var glyph = document.createElement("span");
+            glyph.className = "device-glyph";
+            glyph.setAttribute("aria-hidden", "true");
+            glyph.textContent = "▱";
+            var copy = document.createElement("span");
+            copy.className = "device-copy";
+            var name = document.createElement("strong");
+            name.textContent = host.name || "AirBridge computer";
+            var address = document.createElement("small");
+            address.textContent = host.address;
+            copy.appendChild(name);
+            copy.appendChild(address);
+            var button = document.createElement("button");
+            button.type = "button";
+            button.className = "send-device-button";
+            button.textContent = "Connect";
+            button.addEventListener("click", function () {
+              connect(host.address);
+            });
+            row.appendChild(glyph);
+            row.appendChild(copy);
+            row.appendChild(button);
+            hostsEl.appendChild(row);
+          });
+          hostsEl.hidden = false;
+          emptyEl.hidden = true;
+        }
+
+        function refresh() {
+          if (!bridge) {
+            noteEl.textContent = "AirBridge for Android";
+            stateEl.textContent = "Not connected";
+            return;
+          }
+          var state = parse(bridge.state(), {});
+          stateEl.textContent = state.paired ? "Paired with " + state.address : "Not connected";
+          // Pre-fill the last computer so "retry" is one tap after it was unreachable.
+          if (state.address && !inputEl.value) {
+            inputEl.value = state.address;
+          }
+          noteEl.textContent = state.camera ? "AirBridge for Android" : "AirBridge for Android · no camera";
+          renderHosts(parse(bridge.nearbyHosts(), []));
+        }
+
+        document.getElementById("scan").addEventListener("click", scan);
+        document.getElementById("scan-header").addEventListener("click", scan);
+        document.getElementById("form").addEventListener("submit", function (event) {
+          event.preventDefault();
+          connect(inputEl.value);
+        });
+        inputEl.addEventListener("input", function () {
+          showError("");
+        });
+
+        refresh();
+        if (bridge) setInterval(refresh, 1500);
+
+        // Exposed for tests/connect-screen.test.ts; harmless in the app.
+        window.AirBridgeConnect = { refresh: refresh, connect: connect, scan: scan };
+      })();
+    </script>
+  </body>
+</html>

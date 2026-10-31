@@ -5,10 +5,12 @@ local network. The two devices derive their own keys with ECDH P-256 and encrypt
 data and control messages with AES-256-GCM before anything leaves the browser. Between
 the two devices, the Node service only forwards ciphertext.
 
-It is not a native app. You start the service on the Mac, open it at
-`http://localhost:3000`, and open the same address from the phone. There is no `.dmg`,
-no `.apk`, and nothing here speaks Apple's AirDrop protocol, despite the name and the
-look of the UI.
+There is one UI, and the Android app *is* it. You start the service on the computer and
+open it at `http://localhost:3000`; the phone either opens the same page in a browser or
+scans the QR code with the APK, which loads that very page in a WebView (see
+[The Android app](#the-android-app)). Nothing is re-implemented per platform, so a
+screen or fix looks the same everywhere. Nothing here speaks Apple's AirDrop protocol,
+despite the name and the look of the UI.
 
 It exists because getting a file from an Android phone to a Mac usually means a cloud
 account, a cable, or a chat app that recompresses your photos. AirBridge keeps both
@@ -199,6 +201,9 @@ Details worth knowing:
 HTTPS gives the page a secure context. It is separate from the end-to-end encryption
 between the two devices, which happens on top of it.
 
+The Android app skips this whole dance: it loads the same page over loopback, which is
+already a secure context, and lets its own relay do the TLS. No CA to install.
+
 ## Using it
 
 Open AirBridge on both devices. If they're on the same network and both set to
@@ -365,13 +370,14 @@ unvalidated profiles, and so on), and the residual risks.
 
 These are real gaps, not TODO padding:
 
-- **No installable packages.** No `.dmg`, `.app`, `.apk`, or signed release. Building
-  those needs native app targets, signing identities and an update path that don't
-  exist in this repository yet.
+- **Desktop packaging is not a signed install.** No `.dmg`, `.app` or MSI: releases are
+  single-file binaries, ad-hoc signed on macOS. Turning them into notarised installers
+  needs signing identities and an update path this repository does not have. (The Android
+  APK is signed with a committed sideload key, so updates install over the previous one.)
 - **The service is a separate process.** Pairing goes through it; it is not native
   local discovery. The mDNS packet the server sends (`_airbridge._tcp.local`) is a
-  Bonjour announcement only — browsers can't browse mDNS, so the app doesn't use it for
-  discovery.
+  Bonjour announcement that only the Android app browses (to list computers on the
+  connect screen) — a browser can't, so the web UI relies on pair codes and QR links.
 - **Both devices must reach the same server.** The relay can carry a transfer when a
   direct WebRTC path fails, but AirBridge doesn't ship a hosted relay or tunnel, so
   "across networks" means you've made the server reachable somehow.
@@ -466,6 +472,41 @@ and curl-installed files carry no quarantine/Gatekeeper flag; Windows uses a
 portable EXE fetched without Mark-of-the-Web (SignPath free OSS signing is the
 optional upgrade path). Full story, matrix, and CI flow:
 [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
+
+### The Android app
+
+`AirBridge.apk` is a shell, not a second app. It renders the page the desktop serves —
+same screens, same features, same fixes — so the phone can never drift away from the
+browser UI. Three things make that possible:
+
+- **A loopback relay.** WebView cannot be taught to trust the desktop's self-signed
+  certificate beyond the main frame (subresources, `fetch` and `wss` keep failing), so
+  the app serves the UI to itself on `http://127.0.0.1:<fixed port>` and copies the raw
+  bytes to the computer, wrapped in TLS. Loopback is a secure context in every Chromium
+  build, so WebCrypto, storage and the service worker all behave exactly as they do in
+  a desktop browser. The fixed port keeps the origin — and with it the phone's device
+  identity, theme and pair code — stable across launches.
+- **A QR scanner on first run.** An unpaired phone opens a full-screen camera scanner for
+  the pairing QR the computer prints (`https://<host>/?pair=ABC-DEF`). Closing it (×)
+  leaves a connect screen styled like the rest of the app: computers found over mDNS,
+  or a typed address, plus the same scanner again.
+- **A small bridge** (`window.AirBridgeAndroid`) for the four things a WebView cannot do:
+  clipboard read/write, saving received files to Downloads (a `blob:` download link is
+  a no-op inside a WebView), starting the scanner, and switching computers from
+  *Settings → Change computer*. Everything else in the page is untouched, so a browser
+  sees no difference.
+
+Practical notes:
+
+- The app needs the computer to be running AirBridge; it is a window into that computer's
+  service, not a peer by itself.
+- Re-pair with a different computer from the phone's *Settings → Change computer*, or by
+  scanning again from the pairing dialog. `airbridge://<host>:<port>?pair=<code>` links
+  do the same thing, which is handy with `adb shell am start -a android.intent.action.VIEW`.
+- Transfers run while the app is in the foreground; unlike a browser tab, the page keeps
+  running when the screen is off only as long as Android keeps the WebView alive.
+- Build it with `gradle -p android :app:assembleDebug` (or `:app:assembleRelease`), and
+  run `npm run verify:android` for a no-Gradle preflight of the engine and app sources.
 
 ### Cutting a release
 

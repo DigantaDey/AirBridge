@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The WebView talks to LoopbackRelay on http://127.0.0.1:<port>, and the relay
+  itself does the TLS to the desktop, so cleartext stays confined to loopback.
+  A desktop CA installed through Android's settings is honoured as well, which
+  keeps `https://<lan-ip>` working for anyone who prefers that route.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

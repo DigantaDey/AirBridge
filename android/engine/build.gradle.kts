@@ -21,6 +21,16 @@ val vectorTest by tasks.registering(JavaExec::class) {
     outputs.upToDateWhen { false }
 }
 
+// Pairing-link parsing (QR payloads and hand-typed desktop addresses) is plain
+// JVM logic with no vectors to import, so it ships its own tiny main() runner.
+val pairingLinkTest by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Runs the QR / pairing-address parser checks"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "com.airbridge.engine.PairingLinkTestKt"
+    outputs.upToDateWhen { false }
+}
+
 tasks.named("check") {
-    dependsOn(vectorTest)
+    dependsOn(vectorTest, pairingLinkTest)
 }

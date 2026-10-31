@@ -376,7 +376,7 @@ async function main(): Promise<void> {
     console.log(`  ${line}`);
   }
   console.log(
-    `  🤖 Native Android app: connect to ${targetUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:')}/ws — no CA certificate install needed.`
+    `  🤖 Android app: scan the QR below, or enter ${targetUrl} in the app — no CA certificate install needed.`
   );
   console.log(`  🌐 Local UI: ${localUrl}`);
   console.log(`  📦 More builds + this machine's files: ${localUrl.replace(/^http:/, targetUrl.startsWith('https') ? 'https:' : 'http:')}`);
