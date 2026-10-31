@@ -14,7 +14,7 @@ android {
         // Releases re-stamp this from the CI run number so every build is an
         // upgrade over the previous sideloaded APK.
         versionCode = System.getenv("AIRBRIDGE_VERSION_CODE")?.toIntOrNull() ?: 1
-        versionName = "1.0.0"
+        versionName = "1.1.0"
     }
 
     signingConfigs {
