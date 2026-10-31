@@ -103,8 +103,8 @@ single-file binaries print the same thing from a terminal:
 
 | OS | Install | Autostart |
 |---|---|---|
-| macOS | `install.sh` → `~/.local/bin/AirBridge` | `--autostart` → `~/Library/LaunchAgents/com.airbridge.daemon.plist` + `launchctl bootstrap` |
-| Linux | `install.sh` → `~/.local/bin/AirBridge` | `--autostart` → `~/.config/autostart/airbridge.desktop` |
+| macOS | `install.sh` → `~/.local/bin/AirBridge` + `~/Applications/AirBridge.app` (browser launcher) | `--autostart` → `~/Library/LaunchAgents/com.airbridge.daemon.plist` + `launchctl bootstrap` |
+| Linux | `install.sh` → `~/.local/bin/AirBridge` + `~/Applications/AirBridge.app` (browser launcher) | `--autostart` → `~/.config/autostart/airbridge.desktop` |
 | Windows | `install.ps1` → `%LOCALAPPDATA%\AirBridge` | `-Autostart` → `HKCU\…\Run` |
 | Android | sideload APK | none (transfers run while the app is in the foreground, like a browser tab) |
 
