@@ -39,6 +39,8 @@ export interface AirBridgeNativeBridge {
   scanQr?(): boolean;
   /** Unpairs and returns to the connect screen. */
   forgetComputer?(): boolean;
+  connectionContinuityEnabled?(): boolean;
+  setConnectionContinuityEnabled?(enabled: boolean): boolean;
 }
 
 declare global {
@@ -88,6 +90,14 @@ export function forgetNativeComputer(): boolean {
   } catch {
     return false;
   }
+}
+
+export function getNativeConnectionContinuity(): boolean {
+  try { return nativeBridge()?.connectionContinuityEnabled?.() === true; } catch { return false; }
+}
+
+export function setNativeConnectionContinuity(enabled: boolean): boolean {
+  try { return nativeBridge()?.setConnectionContinuityEnabled?.(enabled) === true; } catch { return false; }
 }
 
 /** base64 for a byte array without blowing the argument stack on large chunks. */
