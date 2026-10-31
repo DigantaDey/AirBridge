@@ -18,6 +18,9 @@ set -euo pipefail
 REPO="${AIRBRIDGE_REPO:-DigantaDey/AirBridge}"
 INSTALL_DIR="${AIRBRIDGE_INSTALL_DIR:-$HOME/.local/bin}"
 PORT="${PORT:-3000}"
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+  echo "install: PORT must be between 1 and 65535" >&2; exit 1
+fi
 AUTOSTART=0
 LAUNCH=1
 FROM_SOURCE=0
@@ -44,6 +47,7 @@ case "$arch" in
 esac
 
 mkdir -p "$INSTALL_DIR"
+INSTALL_DIR="$(cd "$INSTALL_DIR" && pwd -P)"
 bin="$INSTALL_DIR/AirBridge"
 tmp="$(mktemp "${TMPDIR:-/tmp}/airbridge.XXXXXX")"
 sums="$(mktemp "${TMPDIR:-/tmp}/airbridge-sums.XXXXXX")"
@@ -200,13 +204,90 @@ install_from_source() {
     return 1
   }
   # Thin launcher so `AirBridge` keeps working like the single-file binary.
-  cat > "$bin.tmp" <<LAUNCHER
-#!/usr/bin/env bash
-cd "$src" || exit 1
-exec env NODE_ENV=production node "$src/dist/server/server/index.js" "\$@"
-LAUNCHER
+  # Finder/Launchpad does not inherit an interactive shell's PATH (nvm, etc.).
+  # Resolve Node now and shell-escape paths so spaces and quotes remain safe.
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'cd %q || exit 1\n' "$src"
+    printf 'exec env NODE_ENV=production %q %q "$@"\n' "$(command -v node)" "$src/dist/server/server/index.js"
+  } > "$bin.tmp"
   chmod +x "$bin.tmp"
   return 0
+}
+
+# Install a tiny Launch Services app that starts the same server as the CLI.
+# The installer is often piped to bash, so everything needed to create the
+# launcher is included here; the artwork is fetched separately and is optional.
+install_macos_app() {
+  local app="$HOME/Applications/AirBridge.app" contents icon_url
+  contents="$app/Contents"
+  if [ -e "$app" ] && { [ ! -f "$contents/Info.plist" ] || ! grep -q 'com.airbridge.launcher' "$contents/Info.plist"; }; then
+    echo "✖ $app already exists and is not an AirBridge launcher; not replacing it." >&2
+    return 1
+  fi
+  mkdir -p "$contents/MacOS" "$contents/Resources"
+  cat > "$contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.airbridge.launcher</string>
+  <key>CFBundleName</key><string>AirBridge</string>
+  <key>CFBundleDisplayName</key><string>AirBridge</string>
+  <key>CFBundleExecutable</key><string>AirBridge</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>AirBridge.icns</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSUIElement</key><true/>
+</dict></plist>
+PLIST
+  printf '%s\n' "$bin" > "$contents/Resources/binary-path"
+  printf '%s\n' "$PORT" > "$contents/Resources/port"
+  cat > "$contents/MacOS/AirBridge" <<'APP'
+#!/bin/bash
+# Launch Services has a minimal environment. Do not rely on shell aliases,
+# PATH customizations, or the directory from which the app was opened.
+resources="$(cd "$(dirname "$0")/../Resources" && pwd)"
+IFS= read -r bin < "$resources/binary-path"
+IFS= read -r port < "$resources/port"
+url="http://localhost:$port"
+log="$HOME/.airbridge/launcher.log"
+mkdir -p "$HOME/.airbridge"
+ready() {
+  curl --noproxy '*' -fsS --max-time 1 "$url/api/health" 2>/dev/null | grep -q '"service":"AirBridge Warp Server"'
+}
+fail() {
+  osascript - "$1" <<'APPLESCRIPT' >/dev/null 2>&1
+on run argv
+  display dialog (item 1 of argv) with title "AirBridge" buttons {"OK"} default button "OK" with icon caution
+end run
+APPLESCRIPT
+  exit 1
+}
+if ! ready; then
+  [ -x "$bin" ] || fail "AirBridge could not be found at $bin. Reinstall AirBridge to restore it."
+  PORT="$port" nohup "$bin" --no-browser >> "$log" 2>&1 < /dev/null &
+  # TLS certificate generation can take a few seconds on the first launch.
+  for ((i=0; i<60; i++)); do
+    ready && break
+    sleep 1
+  done
+  ready || fail "AirBridge could not start on port $port. Check that the port is free and see $log for details."
+fi
+open "$url" || fail "AirBridge is running, but the browser could not be opened."
+APP
+  chmod +x "$contents/MacOS/AirBridge"
+  icon_url="https://raw.githubusercontent.com/${REPO}/main/macos/AirBridge.icns"
+  if fetch "$icon_url" "$tmp" && [ -s "$tmp" ]; then
+    cp "$tmp" "$contents/Resources/AirBridge.icns"
+  else
+    echo "⚠ could not download the AirBridge icon; the app will use a generic icon." >&2
+  fi
+  # Launch Services normally notices apps in ~/Applications automatically;
+  # request registration too so it appears promptly on existing desktops.
+  if [ -x /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister ]; then
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app" || true
+  fi
+  echo "▸ app installed: $app (open from Launchpad or Applications)"
 }
 
 # --- install ----------------------------------------------------------------
@@ -246,6 +327,9 @@ if [ "$os" = "Darwin" ] && [ "$mode" = "binary" ]; then
 fi
 
 echo "▸ installed: $bin ($mode install)"
+if [ "$os" = "Darwin" ]; then
+  install_macos_app
+fi
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) echo "  add to PATH:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
@@ -265,6 +349,7 @@ DESKTOP
   else
     plist="$HOME/Library/LaunchAgents/com.airbridge.daemon.plist"
     mkdir -p "$(dirname "$plist")" "$HOME/.airbridge"
+    xml_escape() { sed -e 's/\&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
     cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -272,11 +357,12 @@ DESKTOP
 <dict>
   <key>Label</key><string>com.airbridge.daemon</string>
   <key>ProgramArguments</key>
-  <array><string>$bin</string><string>--no-browser</string></array>
+  <array><string>$(printf %s "$bin" | xml_escape)</string><string>--no-browser</string><string>--port</string><string>$PORT</string></array>
+  <key>EnvironmentVariables</key><dict><key>PORT</key><string>$PORT</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><false/>
-  <key>StandardOutPath</key><string>$HOME/.airbridge/daemon.log</string>
-  <key>StandardErrorPath</key><string>$HOME/.airbridge/daemon.log</string>
+  <key>StandardOutPath</key><string>$(printf %s "$HOME/.airbridge/daemon.log" | xml_escape)</string>
+  <key>StandardErrorPath</key><string>$(printf %s "$HOME/.airbridge/daemon.log" | xml_escape)</string>
 </dict>
 </plist>
 PLIST
@@ -289,7 +375,11 @@ fi
 
 if [ "$LAUNCH" = "1" ]; then
   echo "▸ starting AirBridge (UI on http://localhost:${PORT})"
-  nohup "$bin" --no-browser >/dev/null 2>&1 &
+  if [ "$os" = "Darwin" ]; then
+    open "$HOME/Applications/AirBridge.app" || echo "⚠ could not open the app; launch AirBridge from Applications." >&2
+  else
+    nohup "$bin" --no-browser >/dev/null 2>&1 &
+  fi
 fi
 
 cat <<DONE
@@ -300,3 +390,8 @@ AirBridge is ready.
   • Verify:    sha256sum -c SHA256SUMS.txt  (downloaded alongside releases)
   • Uninstall: rm "$bin"
 DONE
+if [ "$os" = "Darwin" ]; then
+  echo '  • Mac app:   ~/Applications/AirBridge.app (Launchpad or Finder)'
+  echo '  • Remove:    delete AirBridge.app from Applications; remove the binary above'
+  echo '               (if enabled, also remove the com.airbridge.daemon LaunchAgent)'
+fi

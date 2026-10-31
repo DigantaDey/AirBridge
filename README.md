@@ -445,6 +445,27 @@ Windows x64/ARM64, and Linux (x64/ARM64, glibc + static)** plus an Android APK:
 curl -fsSL https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.sh | bash
 ```
 
+On macOS the installer also creates **AirBridge.app** in `~/Applications`.
+Open **AirBridge** from Launchpad, Spotlight, or Finder whenever you need it;
+it starts the local service if needed and opens the existing web interface in
+your default browser. The server keeps running in the background after the
+browser closes. Re-run the installer to update both the binary and launcher.
+
+The installer opens the app on completion. Use `--no-start` to install without
+opening it, or `--autostart` to start the service at login without opening a
+browser. If you set `PORT` during installation, the launcher remembers it.
+If the app cannot start, check `~/.airbridge/launcher.log` and make sure that
+port is free. The source fallback also needs its installed Node.js to remain
+available at the same path.
+
+To uninstall, delete `~/Applications/AirBridge.app` and the installed binary
+(default `~/.local/bin/AirBridge`). If you enabled `--autostart`, also run
+`launchctl bootout gui/$(id -u)/com.airbridge.daemon` and remove
+`~/Library/LaunchAgents/com.airbridge.daemon.plist`. The source fallback is in
+`~/.local/share/airbridge/src`; settings, logs, and certificates are in
+`~/.airbridge` and received files are in `~/Downloads/AirBridge` (delete these
+separately only if you no longer need them).
+
 ```powershell
 # Windows — %LOCALAPPDATA%\AirBridge via inbox curl (no SmartScreen sheet)
 powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.ps1 -UseBasicParsing | iex"
