@@ -51,6 +51,10 @@ class Prefs(context: Context) {
         return code
     }
 
+    var connectionContinuity: Boolean
+        get() = sp.getBoolean("connectionContinuity", false)
+        set(value) = sp.edit().putBoolean("connectionContinuity", value).apply()
+
     /** Last working loopback port; 0 until the relay has run once. */
     var relayPort: Int
         get() = sp.getInt("relayPort", 0)

@@ -6,6 +6,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.ViewGroup
@@ -59,6 +60,7 @@ class MainActivity : Activity() {
         prefs = Prefs(this)
         buildContentView()
         startDiscovery()
+        if (prefs.connectionContinuity && prefs.pairingLink() != null) startConnectionService()
 
         val fromIntent = pairingLinkFromIntent(intent)
         if (fromIntent != null) {
@@ -398,6 +400,32 @@ class MainActivity : Activity() {
 
     fun nearbyHosts(): List<NearbyHost> = synchronized(nearby) { nearby.values.toList() }
 
+    fun setConnectionContinuity(enabled: Boolean): Boolean {
+        prefs.connectionContinuity = enabled
+        if (enabled) {
+            if (prefs.pairingLink() == null) {
+                prefs.connectionContinuity = false
+                toast("Pair with a computer before enabling connection continuity")
+                return false
+            }
+            startConnectionService()
+        } else {
+            stopService(Intent(this, ConnectionService::class.java).setAction(ConnectionService.ACTION_STOP))
+        }
+        return true
+    }
+
+    private fun startConnectionService() {
+        val intent = Intent(this, ConnectionService::class.java).setAction(ConnectionService.ACTION_START)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+        } catch (e: Exception) {
+            prefs.connectionContinuity = false
+            Log.w(TAG, "could not start connection continuity: ${e.message}")
+            toast("Could not enable background connection")
+        }
+    }
+
     /** Validates a typed/scanned address; returns an error message or null. */
     fun connectToAddress(address: String): String? {
         val link = PairingLink.parse(address)
@@ -407,6 +435,8 @@ class MainActivity : Activity() {
     }
 
     fun forgetComputer() {
+        prefs.connectionContinuity = false
+        stopService(Intent(this, ConnectionService::class.java).setAction(ConnectionService.ACTION_STOP))
         prefs.forget()
         relay?.stop()
         relay = null

@@ -253,6 +253,15 @@ class ShellBridge(private val activity: MainActivity) {
         return true
     }
 
+    @JavascriptInterface
+    fun connectionContinuityEnabled(): Boolean =
+        activity.getSharedPreferences("airbridge", Context.MODE_PRIVATE)
+            .getBoolean("connectionContinuity", false)
+
+    @JavascriptInterface
+    fun setConnectionContinuityEnabled(enabled: Boolean): Boolean =
+        activity.setConnectionContinuity(enabled)
+
     // ------------------------------------------------------------------ helpers
 
     private fun openMediaStore(name: String, mimeType: String): SaveSession {
