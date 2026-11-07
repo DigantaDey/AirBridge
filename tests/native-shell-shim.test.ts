@@ -51,8 +51,12 @@ describe("Android native-shell shim", () => {
       win.document.querySelectorAll("#__airbridgeNativeShellInsets"),
     ).toHaveLength(1);
     const style = win.document.getElementById("__airbridgeNativeShellInsets");
-    expect(style?.textContent).toContain("--ab-safe-top:0px!important");
-    expect(style?.textContent).toContain("--ab-safe-bottom:0px!important");
+    expect(style?.textContent).toContain("--ab-safe-top:0px;");
+    expect(style?.textContent).toContain("--ab-safe-bottom:0px;");
+    expect(style?.textContent).toContain("--ab-gutter:clamp(12px,4vw,24px)");
+    expect(style?.textContent).toContain(".header-actions");
+    expect(style?.textContent).toContain("@media(max-width:920px)");
+    expect(style?.textContent).toContain("@media(max-width:480px)");
   });
 
   it("closes a visible layer with Escape when the page has no Back hook", () => {

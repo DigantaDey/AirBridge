@@ -52,8 +52,10 @@ describe("Android system navigation", () => {
     expect(shim).toContain("window.__airbridgeSystemBack = function ()");
     expect(shim).toContain(".modal-backdrop");
     expect(shim).toContain("KeyboardEvent");
-    expect(shim).toContain("--ab-safe-top:0px!important");
+    expect(shim).toContain("--ab-safe-top:0px;");
     expect(shim).toContain("var existing = window.__airbridgeSystemBack");
+    expect(shim).toContain(".header-actions");
+    expect(shim).toContain("@media(max-width:920px)");
   });
 
   it("lets the web UI close its topmost layer on Back or Escape", () => {
