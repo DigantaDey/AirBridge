@@ -3,7 +3,7 @@ plugins {
 }
 
 kotlin {
-    jvmToolchain(17)
+    jvmToolchain(21)
 }
 
 // Cross-implementation vector check: expectations are produced by the real
