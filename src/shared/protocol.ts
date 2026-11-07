@@ -79,6 +79,8 @@ export type ControlPayload =
        * chunks below it. Forward-compatible: older senders ignore it.
        */
       resumeFromChunks?: Record<number, number>;
+      /** Durable bytes already present on the receiver, including non-contiguous chunks. */
+      resumeBytesTotal?: number;
     }
   | {
       kind: 'transfer-decline';
@@ -105,6 +107,13 @@ export type ControlPayload =
   | {
       kind: 'transfer-complete';
       transferId: string;
+    }
+  | {
+      /** Receiver confirmation after every file has been finalized and verified. */
+      kind: 'transfer-complete-ack';
+      transferId: string;
+      verified: boolean;
+      reason?: string;
     }
   | {
       kind: 'clipboard-beam';

@@ -41,6 +41,8 @@ export interface AirBridgeNativeBridge {
   forgetComputer?(): boolean;
   connectionContinuityEnabled?(): boolean;
   setConnectionContinuityEnabled?(enabled: boolean): boolean;
+  /** Holds a native foreground service / partial wake lock only while a transfer is active. */
+  setTransferActive?(active: boolean): boolean;
 }
 
 declare global {
@@ -98,6 +100,11 @@ export function getNativeConnectionContinuity(): boolean {
 
 export function setNativeConnectionContinuity(enabled: boolean): boolean {
   try { return nativeBridge()?.setConnectionContinuityEnabled?.(enabled) === true; } catch { return false; }
+}
+
+/** Keep the Android CPU awake while the WebView is actively sending or receiving a transfer. */
+export function setNativeTransferActive(active: boolean): boolean {
+  try { return nativeBridge()?.setTransferActive?.(active) === true; } catch { return false; }
 }
 
 /** base64 for a byte array without blowing the argument stack on large chunks. */

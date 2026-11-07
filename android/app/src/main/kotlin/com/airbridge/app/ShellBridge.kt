@@ -262,6 +262,10 @@ class ShellBridge(private val activity: MainActivity) {
     fun setConnectionContinuityEnabled(enabled: Boolean): Boolean =
         activity.setConnectionContinuity(enabled)
 
+    @JavascriptInterface
+    fun setTransferActive(active: Boolean): Boolean =
+        activity.setTransferActive(active)
+
     // ------------------------------------------------------------------ helpers
 
     private fun openMediaStore(name: String, mimeType: String): SaveSession {

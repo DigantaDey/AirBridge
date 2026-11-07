@@ -31,7 +31,7 @@ import {
   sha256Hex,
 } from './crypto.js';
 import { loadOrCreateDeviceId } from './deviceDetect.js';
-import { hashStream } from './sha256Stream.js';
+import { hashStream, Sha256Stream } from './sha256Stream.js';
 
 export const CHUNK_SIZE = 256 * 1024; // 256 KiB — 4× fewer read/encrypt/frame/ACK round-trips per byte than the old 64 KiB
 export const MIN_CHUNK_SIZE = 16 * 1024; // smallest per-file chunk size a peer may declare (legacy peers use 64 KiB)
@@ -61,8 +61,54 @@ export function isValidFileManifest(files: unknown, totalBytes: unknown): files 
   }
   return sum === totalBytes;
 }
+
+function normalizeResumeChunks(
+  raw: unknown,
+  files: FileManifestItem[],
+): Record<number, number> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const source = raw as Record<string, unknown>;
+  const result: Record<number, number> = {};
+  for (const file of files) {
+    const value = source[String(file.index)];
+    if (Number.isInteger(value) && (value as number) >= 0 && (value as number) <= file.totalChunks) {
+      if ((value as number) > 0) result[file.index] = value as number;
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function bytesForResumeChunks(
+  files: FileManifestItem[],
+  resume: Record<number, number> | undefined,
+): number {
+  let bytes = 0;
+  for (const file of files) {
+    const count = Math.min(file.totalChunks, Math.max(0, resume?.[file.index] ?? 0));
+    for (let chunk = 0; chunk < count; chunk++) {
+      bytes += file.size === 0 ? 0 : Math.min(file.chunkSize, file.size - chunk * file.chunkSize);
+    }
+  }
+  return bytes;
+}
+
+/** Count receiver-confirmed chunks independently per file; later-file ACKs do not imply earlier files are durable. */
+export function countNewlyAcknowledgedChunks(
+  acknowledgedPrefixes: readonly number[],
+  resumeFromChunks: Record<number, number> | undefined,
+): number {
+  return acknowledgedPrefixes.reduce(
+    (sum, acknowledged, index) =>
+      sum + Math.max(0, acknowledged - (resumeFromChunks?.[index] ?? 0)),
+    0,
+  );
+}
+
 const MAX_UNACKED_CHUNKS = 64; // 16 MiB of receiver-confirmed work: deep for LAN RTTs without hiding a slow disk
-const ACK_INTERVAL_CHUNKS = 32; // receiver ACKs every 32 contiguous stored chunks (8 MiB) + file completion
+const ACK_INTERVAL_CHUNKS = 8; // 2 MiB ACK cadence keeps both devices' progress closely aligned
+const ACK_STALL_TIMEOUT_MS = 15_000;
+const COMPLETE_ACK_TIMEOUT_MS = 60_000;
+const MAX_COMPLETE_ACK_RETRIES = 2;
 const ENCRYPT_PIPELINE_DEPTH = 8; // file reads + AES-GCM encrypts kept in flight ahead of the socket (2 MiB of frames)
 const MAX_BUFFER_HIGH_WATER = 4 * 1024 * 1024; // cap queued bytes so other apps are not stuck behind a huge Wi-Fi buffer
 const BUFFER_LOW_WATER = 1024 * 1024; // resume after the socket has drained below 1 MiB
@@ -213,13 +259,31 @@ interface InternalReceiveState {
 interface InternalSendState {
   session: TransferSessionView;
   inputs: SendableFileInput[];
+  /** Sent/ACKed counts for this attempt, tracked independently per file. */
+  sentGlobalChunks: number;
   ackedGlobalChunks: number;
+  sentChunksByFile: number[];
+  ackedChunksByFile: number[];
   ackWaiters: Array<() => void>;
+  lastAckAt: number;
+  lastAckedBytes: number;
   cancelled: boolean;
   acceptResolver?: (transport: TransportKind) => void;
   acceptRejecter?: (reason: Error) => void;
-  /** Highest contiguous chunk index the receiver already has on disk, per file. */
+  /** Highest contiguous chunk count the receiver already has, per file. */
   resumeFromChunks?: Record<number, number>;
+  /** All durable bytes, including any non-contiguous chunks, on the receiver. */
+  resumeBytesTotal?: number;
+  completionResult?: { verified: boolean; reason?: string };
+  completionAckWaiters: Array<(result: { verified: boolean; reason?: string }) => void>;
+  acceptingPeerId?: string;
+}
+
+class TransferConnectionInterruptedError extends Error {
+  constructor(message = 'Transfer connection interrupted; waiting to resume.') {
+    super(message);
+    this.name = 'TransferConnectionInterruptedError';
+  }
 }
 
 function isTerminalTransferStatus(
@@ -297,6 +361,25 @@ function getSafeLocalStorage(): Storage | null {
     // ignore (e.g. Node experimental localStorage getter without file or sandboxed frame)
   }
   return null;
+}
+
+function loadOrCreatePeerId(storagePrefix: string): string {
+  const key = `${storagePrefix}:peerId`;
+  const storage = getSafeLocalStorage();
+  try {
+    const existing = storage?.getItem(key);
+    if (existing && /^[0-9a-f]{16}$/.test(existing)) return existing;
+  } catch {
+    // Storage can be unavailable in private/sandboxed contexts; this peer
+    // simply won't have the same server id after a reload.
+  }
+  const peerId = randomHex16();
+  try {
+    storage?.setItem(key, peerId);
+  } catch {
+    // Not required for a successful connection.
+  }
+  return peerId;
 }
 
 // ---------------------------------------------------------------------------
@@ -668,6 +751,7 @@ export class WarpClient {
   constructor(opts: WarpClientOptions = {}) {
     this.opts = opts;
     this.storagePrefix = opts.storagePrefix ?? 'airbridge';
+    this.peerId = loadOrCreatePeerId(this.storagePrefix);
     if (opts.autoClipboardSync !== undefined) {
       this.autoClipboardSync = opts.autoClipboardSync;
     }
@@ -785,6 +869,14 @@ export class WarpClient {
 
   public stop(): void {
     this.destroyed = true;
+    for (const sendState of this.outgoingStates.values()) {
+      sendState.cancelled = true;
+      sendState.acceptRejecter?.(new Error('AirBridge stopped.'));
+      for (const wake of sendState.ackWaiters.splice(0)) wake();
+      for (const resolve of sendState.completionAckWaiters.splice(0)) {
+        resolve({ verified: false, reason: 'AirBridge stopped.' });
+      }
+    }
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.pingInterval) clearInterval(this.pingInterval);
     for (const recv of this.incomingStates.values()) {
@@ -1188,9 +1280,15 @@ export class WarpClient {
     const sendState: InternalSendState = {
       session,
       inputs,
+      sentGlobalChunks: 0,
       ackedGlobalChunks: 0,
+      sentChunksByFile: manifest.map(() => 0),
+      ackedChunksByFile: manifest.map(() => 0),
       ackWaiters: [],
+      lastAckAt: Date.now(),
+      lastAckedBytes: 0,
       cancelled: false,
+      completionAckWaiters: [],
     };
 
     this.outgoingStates.set(transferId, sendState);
@@ -1198,49 +1296,31 @@ export class WarpClient {
     this.sortTransfers();
     this.emit();
 
-    const acceptPromise = new Promise<TransportKind>((resolve, reject) => {
-      sendState.acceptResolver = resolve;
-      sendState.acceptRejecter = reject;
-    });
-
-    await this.sendControlMessage(
-      peerId,
-      {
-        kind: 'transfer-offer',
-        transferId,
-        files: manifest,
-        totalBytes,
-        createdAt: Date.now(),
-      },
-      true
-    );
-
-    let negotiatedTransport: TransportKind;
     try {
-      negotiatedTransport = await acceptPromise;
+      const accepted = await this.requestTransferAcceptWithRetry(sendState, peer, cryptoSession);
+      // Wait briefly (up to 1.2s) if recipient preferred WebRTC and ICE is mid-handshake
+      let activeTransport: TransportKind = 'ws-relay';
+      if (accepted.preferredTransport === 'webrtc' && this.canUseWebRtc()) {
+        const opened = await this.waitForRtcChannel(accepted.peer.peerId, 1_200);
+        activeTransport = opened ? 'webrtc' : 'ws-relay';
+      }
+
+      session.status = 'transferring';
+      session.transport = activeTransport;
+      session.startedAt = Date.now();
+      this.emit();
+      await this.streamOutgoingFiles(
+        accepted.peer,
+        accepted.cryptoSession,
+        sendState,
+        activeTransport,
+      );
     } catch (err) {
-      return session;
-    }
-
-    // Wait briefly (up to 1.2s) if recipient preferred WebRTC and ICE is mid-handshake
-    let activeTransport: TransportKind = 'ws-relay';
-    if (negotiatedTransport === 'webrtc' && this.canUseWebRtc()) {
-      const opened = await this.waitForRtcChannel(peerId, 1_200);
-      activeTransport = opened ? 'webrtc' : 'ws-relay';
-    }
-
-    session.status = 'transferring';
-    session.transport = activeTransport;
-    session.startedAt = Date.now();
-    this.emit();
-
-    try {
-      await this.streamOutgoingFiles(peer, cryptoSession, sendState, activeTransport);
-    } catch (err) {
-      if (!sendState.cancelled) {
+      if (!sendState.cancelled && !isTerminalTransferStatus(session.status)) {
         session.status = 'error';
         session.completedAt = Date.now();
         session.errorMessage = err instanceof Error ? err.message : 'Transfer interrupted';
+        this.outgoingStates.delete(transferId);
         this.sortTransfers();
         this.persistTransferHistory();
         this.emit();
@@ -1250,40 +1330,180 @@ export class WarpClient {
     return session;
   }
 
+  private async requestTransferAcceptWithRetry(
+    sendState: InternalSendState,
+    initialPeer: PeerSummary,
+    initialCryptoSession: PeerCryptoSession,
+  ): Promise<{ peer: PeerSummary; cryptoSession: PeerCryptoSession; preferredTransport: TransportKind }> {
+    let peer = initialPeer;
+    let cryptoSession = initialCryptoSession;
+    while (!sendState.cancelled && !this.destroyed) {
+      try {
+        const preferredTransport = await this.requestTransferAccept(sendState, peer);
+        return { peer, cryptoSession, preferredTransport };
+      } catch (error) {
+        if (!(error instanceof TransferConnectionInterruptedError)) throw error;
+        sendState.session.status = 'connecting';
+        sendState.session.speedBytesPerSec = 0;
+        sendState.session.etaSeconds = null;
+        this.emit();
+        peer = await this.waitForTransferPeer(sendState);
+        cryptoSession = await this.ensureCryptoSession(peer);
+      }
+    }
+    throw new Error(sendState.cancelled ? 'Transfer cancelled.' : 'AirBridge stopped.');
+  }
+
+  private async requestTransferAccept(
+    sendState: InternalSendState,
+    peer: PeerSummary,
+  ): Promise<TransportKind> {
+    const acceptPromise = new Promise<TransportKind>((resolve, reject) => {
+      sendState.acceptResolver = resolve;
+      sendState.acceptRejecter = reject;
+      sendState.acceptingPeerId = peer.peerId;
+    });
+    try {
+      await this.sendControlMessage(
+        peer.peerId,
+        {
+          kind: 'transfer-offer',
+          transferId: sendState.session.transferId,
+          files: sendState.session.files,
+          totalBytes: sendState.session.totalBytes,
+          createdAt: Date.now(),
+        },
+        true,
+      );
+      return await acceptPromise;
+    } catch (error) {
+      sendState.acceptRejecter?.(
+        error instanceof Error ? error : new Error('Could not send transfer offer.'),
+      );
+      // If sending the offer itself failed, consume the separately rejected
+      // acceptance promise too, avoiding an unhandled-rejection race.
+      await acceptPromise.catch(() => undefined);
+      throw error;
+    } finally {
+      sendState.acceptResolver = undefined;
+      sendState.acceptRejecter = undefined;
+      sendState.acceptingPeerId = undefined;
+    }
+  }
+
   private async streamOutgoingFiles(
     peer: PeerSummary,
     cryptoSession: PeerCryptoSession,
     sendState: InternalSendState,
-    initialTransport: TransportKind
+    initialTransport: TransportKind,
+  ): Promise<void> {
+    let currentPeer = peer;
+    let currentCryptoSession = cryptoSession;
+    let currentTransport = initialTransport;
+    while (!sendState.cancelled) {
+      try {
+        await this.streamOutgoingFilesOnce(
+          currentPeer,
+          currentCryptoSession,
+          sendState,
+          currentTransport,
+        );
+        return;
+      } catch (error) {
+        if (!(error instanceof TransferConnectionInterruptedError) || sendState.cancelled) {
+          throw error;
+        }
+        sendState.session.status = 'connecting';
+        sendState.session.speedBytesPerSec = 0;
+        sendState.session.etaSeconds = null;
+        this.emit();
+        currentPeer = await this.waitForTransferPeer(sendState);
+        currentCryptoSession = await this.ensureCryptoSession(currentPeer);
+        sendState.resumeFromChunks = undefined;
+        sendState.resumeBytesTotal = undefined;
+        sendState.completionResult = undefined;
+        const accepted = await this.requestTransferAcceptWithRetry(
+          sendState,
+          currentPeer,
+          currentCryptoSession,
+        );
+        currentPeer = accepted.peer;
+        currentCryptoSession = accepted.cryptoSession;
+        currentTransport = 'ws-relay';
+        if (accepted.preferredTransport === 'webrtc' && this.canUseWebRtc()) {
+          currentTransport = (await this.waitForRtcChannel(currentPeer.peerId, 1_200))
+            ? 'webrtc'
+            : 'ws-relay';
+        }
+        sendState.session.status = 'transferring';
+        sendState.session.transport = currentTransport;
+        this.emit();
+      }
+    }
+  }
+
+  private async waitForTransferPeer(sendState: InternalSendState): Promise<PeerSummary> {
+    while (!sendState.cancelled && !this.destroyed) {
+      if (this.connectionState === 'connected' && this.ws?.readyState === WebSocket.OPEN) {
+        const peer = this.peers.find((candidate) =>
+          sendState.session.peerDeviceId
+            ? candidate.device.deviceId === sendState.session.peerDeviceId
+            : candidate.peerId === sendState.session.peerId,
+        );
+        if (peer) {
+          sendState.session.peerId = peer.peerId;
+          sendState.session.peerName = peer.device.name;
+          sendState.session.peerPlatform = peer.device.platform;
+          return peer;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error(sendState.cancelled ? 'Transfer cancelled.' : 'AirBridge stopped.');
+  }
+
+  private async streamOutgoingFilesOnce(
+    peer: PeerSummary,
+    cryptoSession: PeerCryptoSession,
+    sendState: InternalSendState,
+    initialTransport: TransportKind,
   ): Promise<void> {
     const { session, inputs } = sendState;
     const resumeFromChunks = sendState.resumeFromChunks;
     let transport = initialTransport;
     let globalSentChunks = 0;
-    let bytesSent = 0;
-    let lastTickTs = Date.now();
-    let lastTickBytes = 0;
+    sendState.sentGlobalChunks = 0;
+    sendState.ackedGlobalChunks = 0;
+    sendState.sentChunksByFile = session.files.map(() => 0);
+    sendState.ackedChunksByFile = session.files.map(
+      (file) => Math.min(file.totalChunks, resumeFromChunks?.[file.index] ?? 0),
+    );
+    const resumedBytes = Math.min(
+      session.totalBytes,
+      sendState.resumeBytesTotal ?? bytesForResumeChunks(session.files, resumeFromChunks),
+    );
+    session.transferredBytes = resumedBytes;
+    session.speedBytesPerSec = 0;
+    session.etaSeconds = null;
+    sendState.lastAckAt = Date.now();
+    sendState.lastAckedBytes = resumedBytes;
+    this.emit();
 
     for (let fileIdx = 0; fileIdx < inputs.length; fileIdx++) {
       const input = inputs[fileIdx];
       const meta = session.files[fileIdx];
-      // Highest contiguous chunk the receiver already has on disk; chunks
-      // below it are skipped so an interrupted transfer resumes instead of
-      // starting over.
-      const resumeFrom = resumeFromChunks?.[fileIdx] ?? 0;
-      const filePlainChunksForHash: Uint8Array[] = [];
-      const canKeepFullHashInRam = input.size <= 128 * 1024 * 1024; // 128 MB
-
-      // The declared digest must cover the whole file, so hash the skipped
-      // prefix separately and prepend it to the chunks collected below.
-      if (canKeepFullHashInRam && resumeFrom > 0) {
-        for (let c = 0; c < resumeFrom; c++) {
-          const start = c * CHUNK_SIZE;
-          const end = Math.min(start + CHUNK_SIZE, input.size);
-          filePlainChunksForHash.push(
-            input.size === 0 ? new Uint8Array(0) : await input.sliceBytes(start, end)
-          );
+      // A receiver only skips the highest contiguous durable prefix, so every
+      // byte still contributes exactly once to the full-file digest.
+      const resumeFrom = Math.min(meta.totalChunks, resumeFromChunks?.[fileIdx] ?? 0);
+      const fileHasher = new Sha256Stream();
+      for (let c = 0; c < resumeFrom; c++) {
+        const start = c * meta.chunkSize;
+        const end = Math.min(start + meta.chunkSize, input.size);
+        const prefix = input.size === 0 ? new Uint8Array(0) : await input.sliceBytes(start, end);
+        if (prefix.byteLength !== end - start) {
+          throw new Error(`Could not reread the resumed portion of ${input.name}.`);
         }
+        fileHasher.update(prefix);
       }
 
       // Pipelined producer: up to ENCRYPT_PIPELINE_DEPTH chunks are being
@@ -1301,10 +1521,13 @@ export class WarpClient {
       const launchPrepare = (chunkIdx: number): void => {
         if (chunkIdx >= meta.totalChunks || preparedChunks.has(chunkIdx)) return;
         const task = (async (): Promise<PreparedChunk> => {
-          const start = chunkIdx * CHUNK_SIZE;
-          const end = Math.min(start + CHUNK_SIZE, input.size);
+          const start = chunkIdx * meta.chunkSize;
+          const end = Math.min(start + meta.chunkSize, input.size);
           const plainChunk =
             input.size === 0 ? new Uint8Array(0) : await input.sliceBytes(start, end);
+          if (plainChunk.byteLength !== end - start) {
+            throw new Error(`File changed or could not be read: ${input.name}.`);
+          }
           const { iv, ciphertext } = await encryptBinaryChunk(
             cryptoSession.aesKey,
             plainChunk,
@@ -1332,15 +1555,10 @@ export class WarpClient {
       for (let chunkIdx = resumeFrom; chunkIdx < meta.totalChunks; chunkIdx++) {
         if (sendState.cancelled) return;
 
-        // Respect socket buffer + receiver sliding-window backpressure
+        // Respect receiver-confirmed work. If ACKs stop, surface the stall as
+        // recoverable so the same transfer ID can renegotiate and resume.
         while (!sendState.cancelled && globalSentChunks - sendState.ackedGlobalChunks >= MAX_UNACKED_CHUNKS) {
-          await new Promise<void>((resolve) => {
-            const timeout = setTimeout(resolve, 250);
-            sendState.ackWaiters.push(() => {
-              clearTimeout(timeout);
-              resolve();
-            });
-          });
+          await this.waitForChunkAckProgress(sendState, peer.peerId);
         }
         if (sendState.cancelled) return;
 
@@ -1348,9 +1566,7 @@ export class WarpClient {
         preparedChunks.delete(chunkIdx);
         launchPrepare(chunkIdx + ENCRYPT_PIPELINE_DEPTH);
 
-        if (canKeepFullHashInRam) {
-          filePlainChunksForHash.push(plainChunk);
-        }
+        fileHasher.update(plainChunk);
 
         // Send over WebRTC DataChannel if open; seamlessly fall back to WS Binary Relay if closed!
         if (transport === 'webrtc' && this.isRtcOpen(peer.peerId)) {
@@ -1372,27 +1588,11 @@ export class WarpClient {
         }
 
         globalSentChunks++;
-        bytesSent += plainChunk.byteLength;
-
-        const now = Date.now();
-        const elapsed = (now - lastTickTs) / 1000;
-        if (elapsed >= 0.15 || chunkIdx === meta.totalChunks - 1) {
-          const instantSpeed = elapsed > 0 ? (bytesSent - lastTickBytes) / elapsed : 0;
-          session.speedBytesPerSec =
-            session.speedBytesPerSec === 0
-              ? instantSpeed
-              : session.speedBytesPerSec * 0.65 + instantSpeed * 0.35;
-          session.transferredBytes = Math.max(session.transferredBytes, bytesSent);
-          const remaining = Math.max(0, session.totalBytes - session.transferredBytes);
-          session.etaSeconds =
-            session.speedBytesPerSec > 1024 ? Math.ceil(remaining / session.speedBytesPerSec) : null;
-          lastTickTs = now;
-          lastTickBytes = bytesSent;
-          this.emit();
-        }
+        sendState.sentGlobalChunks = globalSentChunks;
+        sendState.sentChunksByFile[fileIdx] = (sendState.sentChunksByFile[fileIdx] ?? 0) + 1;
       }
 
-      const digest = canKeepFullHashInRam ? await sha256Hex(filePlainChunksForHash) : undefined;
+      const digest = fileHasher.hex();
       await this.sendControlMessage(
         peer.peerId,
         {
@@ -1405,32 +1605,15 @@ export class WarpClient {
       );
     }
 
-    // When chunks streamed over WebRTC DataChannel, wait briefly for final receiver ACK
-    // so control finalization over WebSocket does not outrace in-flight SCTP packets.
-    if (transport === 'webrtc' && !sendState.cancelled && sendState.ackedGlobalChunks < globalSentChunks) {
-      await new Promise<void>((resolve) => {
-        const timeout = setTimeout(resolve, 1_200);
-        const checkAck = () => {
-          if (sendState.cancelled || sendState.ackedGlobalChunks >= globalSentChunks) {
-            clearTimeout(timeout);
-            resolve();
-          } else {
-            sendState.ackWaiters.push(checkAck);
-          }
-        };
-        sendState.ackWaiters.push(checkAck);
-      });
-    }
+    // Do not report bytes as received merely because send() queued them. All
+    // transports now wait for receiver-durable chunk ACKs before finalizing.
+    await this.waitForAllChunkAcks(sendState, globalSentChunks, peer.peerId);
     if (sendState.cancelled) return;
 
-    await this.sendControlMessage(
-      peer.peerId,
-      {
-        kind: 'transfer-complete',
-        transferId: session.transferId,
-      },
-      true
-    );
+    const completion = await this.waitForTransferCompletionAck(sendState, peer.peerId);
+    if (!completion.verified) {
+      throw new Error(completion.reason || 'The receiver could not verify this transfer.');
+    }
 
     session.transferredBytes = session.totalBytes;
     session.etaSeconds = 0;
@@ -1444,45 +1627,149 @@ export class WarpClient {
     this.syncHistoryWithPeer(peer).catch(() => {});
   }
 
+  private waitForAckSignal(sendState: InternalSendState, timeoutMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const index = sendState.ackWaiters.indexOf(waiter);
+        if (index >= 0) sendState.ackWaiters.splice(index, 1);
+        resolve();
+      };
+      const waiter = () => finish();
+      const timer = setTimeout(finish, timeoutMs);
+      sendState.ackWaiters.push(waiter);
+    });
+  }
+
+  private assertTransferPeerConnected(sendState: InternalSendState, peerId: string): void {
+    if (sendState.cancelled) return;
+    if (this.destroyed || this.ws?.readyState !== WebSocket.OPEN) {
+      throw new TransferConnectionInterruptedError('Signaling connection lost; resuming transfer.');
+    }
+    if (!this.peers.some((peer) => peer.peerId === peerId)) {
+      throw new TransferConnectionInterruptedError('Receiver disconnected; waiting to resume.');
+    }
+  }
+
+  private async waitForChunkAckProgress(
+    sendState: InternalSendState,
+    peerId: string,
+  ): Promise<void> {
+    this.assertTransferPeerConnected(sendState, peerId);
+    if (sendState.cancelled) return;
+    const elapsed = Date.now() - sendState.lastAckAt;
+    if (elapsed >= ACK_STALL_TIMEOUT_MS) {
+      throw new TransferConnectionInterruptedError('Receiver stopped acknowledging; resuming transfer.');
+    }
+    await this.waitForAckSignal(sendState, Math.min(250, ACK_STALL_TIMEOUT_MS - elapsed));
+    this.assertTransferPeerConnected(sendState, peerId);
+    if (Date.now() - sendState.lastAckAt >= ACK_STALL_TIMEOUT_MS) {
+      throw new TransferConnectionInterruptedError('Receiver stopped acknowledging; resuming transfer.');
+    }
+  }
+
+  private async waitForAllChunkAcks(
+    sendState: InternalSendState,
+    targetChunks: number,
+    peerId: string,
+  ): Promise<void> {
+    while (!sendState.cancelled && sendState.ackedGlobalChunks < targetChunks) {
+      await this.waitForChunkAckProgress(sendState, peerId);
+    }
+  }
+
+  private async waitForTransferCompletionAck(
+    sendState: InternalSendState,
+    peerId: string,
+  ): Promise<{ verified: boolean; reason?: string }> {
+    for (let attempt = 0; attempt <= MAX_COMPLETE_ACK_RETRIES; attempt++) {
+      if (sendState.completionResult) return sendState.completionResult;
+      this.assertTransferPeerConnected(sendState, peerId);
+      const response = new Promise<{ verified: boolean; reason?: string } | null>((resolve) => {
+        let settled = false;
+        const finish = (result: { verified: boolean; reason?: string } | null) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          const index = sendState.completionAckWaiters.indexOf(waiter);
+          if (index >= 0) sendState.completionAckWaiters.splice(index, 1);
+          resolve(result);
+        };
+        const waiter = (result: { verified: boolean; reason?: string }) => finish(result);
+        const timer = setTimeout(() => finish(null), COMPLETE_ACK_TIMEOUT_MS);
+        sendState.completionAckWaiters.push(waiter);
+        if (sendState.completionResult) finish(sendState.completionResult);
+      });
+      await this.sendControlMessage(
+        peerId,
+        { kind: 'transfer-complete', transferId: sendState.session.transferId },
+        true,
+      );
+      const result = await response;
+      if (result) return result;
+      if (this.ws?.readyState !== WebSocket.OPEN || !this.peers.some((peer) => peer.peerId === peerId)) {
+        throw new TransferConnectionInterruptedError('Connection lost while confirming transfer.');
+      }
+    }
+    throw new TransferConnectionInterruptedError('Receiver confirmation timed out; resuming transfer.');
+  }
+
   public async acceptIncomingTransfer(transferId: string): Promise<void> {
     const recvState = this.incomingStates.get(transferId);
     if (!recvState || recvState.session.status !== 'pending-accept') return;
 
-    const peerId = recvState.session.peerId;
-    const preferredTransport: TransportKind = this.canUseWebRtc() ? 'webrtc' : 'ws-relay';
-    if (preferredTransport === 'webrtc') {
-      this.initiateWebRtcIfPossible(peerId);
-    }
-
-    recvState.session.status = 'transferring';
+    recvState.session.status = 'connecting';
     recvState.session.startedAt = Date.now();
     recvState.lastSpeedTs = Date.now();
     this.emit();
 
-    let resumeFromChunks;
-    if (this.canReceiveToDisk() && (await this.probeDiskApi())) {
-      resumeFromChunks = await this.prepareDiskReceivers(recvState);
-    } else if (this.canReceiveViaFileSystem()) {
-      // Must be called synchronously within the user gesture — show the
-      // picker before any other await so the browser treats it as a user
-      // activation. If the user cancels or the API is unavailable, we fall
-      // back to the in-memory browser download.
-      const directoryHandle = await this.showDirectoryPicker();
-      if (directoryHandle) {
-        await this.prepareFileSystemReceivers(recvState, directoryHandle);
+    try {
+      let resumeFromChunks;
+      if (this.canReceiveToDisk() && (await this.probeDiskApi())) {
+        resumeFromChunks = await this.prepareDiskReceivers(recvState);
+      } else if (this.canReceiveViaFileSystem()) {
+        // Must be called synchronously within the user gesture — show the
+        // picker before any other await so the browser treats it as a user
+        // activation. If the user cancels or the API is unavailable, we fall
+        // back to the in-memory browser download.
+        const directoryHandle = await this.showDirectoryPicker();
+        if (directoryHandle) {
+          await this.prepareFileSystemReceivers(recvState, directoryHandle);
+        }
       }
-    }
 
-    await this.sendControlMessage(
-      peerId,
-      {
-        kind: 'transfer-accept',
-        transferId,
-        preferredTransport,
-        ...(resumeFromChunks ? { resumeFromChunks } : {}),
-      },
-      true
-    );
+      if (this.incomingStates.get(transferId) !== recvState) return;
+      const peerId = recvState.session.peerId;
+      const preferredTransport: TransportKind = this.canUseWebRtc() ? 'webrtc' : 'ws-relay';
+      if (preferredTransport === 'webrtc') this.initiateWebRtcIfPossible(peerId);
+
+      recvState.session.transferredBytes = recvState.bytesReceived;
+      recvState.lastSpeedBytes = recvState.bytesReceived;
+      recvState.lastSpeedTs = Date.now();
+      recvState.session.status = 'transferring';
+      this.emit();
+
+      await this.sendControlMessage(
+        peerId,
+        {
+          kind: 'transfer-accept',
+          transferId,
+          preferredTransport,
+          ...(resumeFromChunks ? { resumeFromChunks } : {}),
+          resumeBytesTotal: recvState.bytesReceived,
+        },
+        true
+      );
+    } catch (error) {
+      if (this.incomingStates.get(transferId) === recvState && recvState.session.status === 'connecting') {
+        recvState.session.status = 'pending-accept';
+        this.emit();
+      }
+      throw error;
+    }
   }
 
   /** True when this browser can hand received chunks straight to the local daemon. */
@@ -1536,21 +1823,138 @@ export class WarpClient {
     return '';
   }
 
+  private async getReceiveResume(
+    recvState: InternalReceiveState,
+  ): Promise<{ resumeFromChunks: Record<number, number>; bytes: number }> {
+    const oldDiskReceivers = recvState.diskReceivers;
+    await Promise.all([
+      ...(oldDiskReceivers?.values() ?? []),
+      ...(recvState.fileSystemReceivers?.values() ?? []),
+    ].map((receiver) => receiver.waitIdle()));
+
+    // Re-query the daemon on reconnect instead of trusting only the WebView's
+    // in-memory write set. This also handles a daemon restart, where a small
+    // unjournaled batch may need to be retransmitted. Keep old state only if
+    // the local query itself is unavailable; a 200 response without partial
+    // data means the server has no resumable chunks for that file.
+    if (oldDiskReceivers) {
+      const nextDiskReceivers = new Map<number, DaemonReceiver>();
+      await Promise.all(recvState.session.files.map(async (file) => {
+        const previous = oldDiskReceivers.get(file.index);
+        if (recvState.finalizedFiles.has(file.index) && previous) {
+          nextDiskReceivers.set(file.index, previous);
+          return;
+        }
+        const receiver = new DaemonReceiver(
+          {
+            transferId: recvState.session.transferId,
+            fileIndex: file.index,
+            name: file.name,
+            size: file.size,
+            chunkSize: file.chunkSize,
+            totalChunks: file.totalChunks,
+          },
+          recvState.session.peerName,
+          this.apiBaseUrl(),
+        );
+        const onDisk = await this.queryDiskPartial(recvState.session.transferId, file.index);
+        if (onDisk === null && previous) {
+          nextDiskReceivers.set(file.index, previous);
+          return;
+        }
+        if (
+          onDisk && onDisk.size === file.size &&
+          onDisk.chunkSize === file.chunkSize && onDisk.totalChunks === file.totalChunks
+        ) {
+          for (const index of onDisk.receivedChunks) {
+            if (Number.isInteger(index) && index >= 0 && index < file.totalChunks) {
+              receiver.markReceived(index);
+            }
+          }
+        }
+        nextDiskReceivers.set(file.index, receiver);
+      }));
+      recvState.diskReceivers = nextDiskReceivers;
+    }
+
+    const resumeFromChunks: Record<number, number> = {};
+    let bytes = 0;
+    for (const file of recvState.session.files) {
+      if (recvState.finalizedFiles.has(file.index)) {
+        resumeFromChunks[file.index] = file.totalChunks;
+        bytes += file.size;
+        recvState.receivedChunkCounts[file.index] = file.totalChunks;
+        recvState.nextContiguousChunks[file.index] = file.totalChunks;
+        recvState.lastAckedChunks[file.index] = file.totalChunks - 1;
+        continue;
+      }
+      const streamReceiver =
+        recvState.diskReceivers?.get(file.index) ?? recvState.fileSystemReceivers?.get(file.index);
+      const memoryChunks = recvState.fileChunks[file.index] ?? [];
+      let count = 0;
+      let contiguous = 0;
+      for (let chunk = 0; chunk < file.totalChunks; chunk++) {
+        const stored = streamReceiver
+          ? streamReceiver.hasStored(chunk)
+          : Boolean(memoryChunks[chunk]);
+        if (stored) {
+          count++;
+          bytes += file.size === 0
+            ? 0
+            : Math.min(file.chunkSize, file.size - chunk * file.chunkSize);
+        }
+        if (chunk === contiguous && stored) contiguous++;
+      }
+      recvState.receivedChunkCounts[file.index] = count;
+      recvState.nextContiguousChunks[file.index] = contiguous;
+      recvState.lastAckedChunks[file.index] = contiguous - 1;
+      if (contiguous > 0) resumeFromChunks[file.index] = contiguous;
+    }
+    recvState.bytesReceived = bytes;
+    recvState.session.transferredBytes = bytes;
+    recvState.session.speedBytesPerSec = 0;
+    recvState.session.etaSeconds = null;
+    recvState.lastSpeedBytes = bytes;
+    recvState.lastSpeedTs = Date.now();
+    this.emit();
+    return { resumeFromChunks, bytes };
+  }
+
   private async queryDiskPartial(
     transferId: string,
     fileIndex: number
-  ): Promise<{ receivedChunks: number[]; receivedBytes: number; receivedCount: number } | null> {
+  ): Promise<{
+    name?: string;
+    size?: number;
+    chunkSize?: number;
+    totalChunks?: number;
+    receivedChunks: number[];
+    receivedBytes: number;
+    receivedCount: number;
+  } | null> {
     try {
       const url = `${this.apiBaseUrl()}/api/daemon/received?transferId=${encodeURIComponent(transferId)}&fileIndex=${fileIndex}`;
       const resp = await fetch(url);
       if (!resp.ok) return null;
       const json = (await resp.json()) as {
+        ok?: unknown;
+        name?: unknown;
+        size?: unknown;
+        chunkSize?: unknown;
+        totalChunks?: unknown;
         receivedChunks?: unknown;
         receivedBytes?: unknown;
         receivedCount?: unknown;
       };
-      if (!Array.isArray(json.receivedChunks)) return null;
+      if (!Array.isArray(json.receivedChunks)) {
+        if (json.ok !== true) return null;
+        return { receivedChunks: [], receivedBytes: 0, receivedCount: 0 };
+      }
       return {
+        name: typeof json.name === 'string' ? json.name : undefined,
+        size: Number.isFinite(Number(json.size)) ? Number(json.size) : undefined,
+        chunkSize: Number.isFinite(Number(json.chunkSize)) ? Number(json.chunkSize) : undefined,
+        totalChunks: Number.isInteger(Number(json.totalChunks)) ? Number(json.totalChunks) : undefined,
         receivedChunks: json.receivedChunks as number[],
         receivedBytes: Number(json.receivedBytes) || 0,
         receivedCount: Number(json.receivedCount) || 0,
@@ -1596,14 +2000,26 @@ export class WarpClient {
 
     for (const { file, receiver, onDisk } of probes) {
       let resumeFrom = 0;
-      if (onDisk && onDisk.receivedChunks.length > 0) {
-        const present = new Set(onDisk.receivedChunks);
+      const matchingPartial = Boolean(
+        onDisk &&
+        onDisk.size === file.size &&
+        onDisk.chunkSize === file.chunkSize &&
+        onDisk.totalChunks === file.totalChunks
+      );
+      if (matchingPartial && onDisk!.receivedChunks.length > 0) {
+        const safeChunks = onDisk!.receivedChunks.filter(
+          (index) => Number.isInteger(index) && index >= 0 && index < file.totalChunks,
+        );
+        const present = new Set(safeChunks);
         while (present.has(resumeFrom)) resumeFrom++;
-        for (const idx of onDisk.receivedChunks) receiver.markReceived(idx);
+        for (const idx of safeChunks) receiver.markReceived(idx);
         // Count the already-landed bytes so progress and completion checks
         // reflect the partial, not just the chunks received this session.
-        recvState.receivedChunkCounts[file.index] = onDisk.receivedCount;
-        recvState.bytesReceived += onDisk.receivedBytes;
+        recvState.receivedChunkCounts[file.index] = safeChunks.length;
+        recvState.bytesReceived += safeChunks.reduce(
+          (sum, index) => sum + (file.size === 0 ? 0 : Math.min(file.chunkSize, file.size - index * file.chunkSize)),
+          0,
+        );
       }
       recvState.nextContiguousChunks[file.index] = resumeFrom;
       recvState.lastAckedChunks[file.index] = resumeFrom - 1;
@@ -1728,7 +2144,10 @@ export class WarpClient {
       sendState.session.status = 'cancelled';
       sendState.session.completedAt = Date.now();
       sendState.acceptRejecter?.(new Error('Cancelled'));
-      for (const w of sendState.ackWaiters) w();
+      for (const w of sendState.ackWaiters.splice(0)) w();
+      for (const resolve of sendState.completionAckWaiters.splice(0)) {
+        resolve({ verified: false, reason: 'Transfer cancelled.' });
+      }
       this.outgoingStates.delete(transferId);
       this.sortTransfers();
       this.persistTransferHistory();
@@ -1812,6 +2231,12 @@ export class WarpClient {
     ws.onclose = () => {
       if (this.destroyed) return;
       this.connectionState = 'reconnecting';
+      for (const sendState of this.outgoingStates.values()) {
+        sendState.acceptRejecter?.(
+          new TransferConnectionInterruptedError('Signaling connection lost while waiting for acceptance.'),
+        );
+        for (const wake of sendState.ackWaiters.splice(0)) wake();
+      }
       this.emit();
       this.reconnectTimer = setTimeout(() => this.connectWebSocket(), 1_500);
     };
@@ -1826,6 +2251,7 @@ export class WarpClient {
       case 'welcome': {
         this.connectionState = 'connected';
         this.peerId = msg.peerId;
+        this.persistPeerId(msg.peerId);
         this.pairCode = msg.pairCode;
         this.persistPairCode(msg.pairCode);
         this.lanUrls = msg.lanUrls;
@@ -1874,6 +2300,14 @@ export class WarpClient {
   private syncPeers(nextPeers: PeerSummary[]): void {
     this.peers = nextPeers;
     const activeIds = new Set(nextPeers.map((p) => p.peerId));
+    for (const sendState of this.outgoingStates.values()) {
+      const acceptingPeerId = sendState.acceptingPeerId ?? sendState.session.peerId;
+      if (sendState.acceptRejecter && !activeIds.has(acceptingPeerId)) {
+        sendState.acceptRejecter(
+          new TransferConnectionInterruptedError('Receiver disconnected while waiting for acceptance.'),
+        );
+      }
+    }
 
     // Clean up disconnected RTC peers
     for (const id of this.rtcPeers.keys()) {
@@ -1942,11 +2376,13 @@ export class WarpClient {
     encrypt: boolean
   ): Promise<void> {
     if (!encrypt) {
-      this.sendServer({
+      if (!this.sendServer({
         type: 'transfer-control',
         to: peerId,
         envelope: { encrypted: false, payload },
-      });
+      })) {
+        throw new TransferConnectionInterruptedError('Signaling relay is unavailable; transfer will resume.');
+      }
       return;
     }
 
@@ -1960,11 +2396,13 @@ export class WarpClient {
     }
 
     const envelope = await encryptControlPayload(session.aesKey, payload);
-    this.sendServer({
+    if (!this.sendServer({
       type: 'transfer-control',
       to: peerId,
       envelope,
-    });
+    })) {
+      throw new TransferConnectionInterruptedError('Signaling relay is unavailable; transfer will resume.');
+    }
   }
 
   private async handleIncomingControl(
@@ -2076,7 +2514,98 @@ export class WarpClient {
         // previously could declare billions of chunks and exhaust memory
         // before the user ever saw (let alone accepted) the offer.
         if (!isValidFileManifest(payload.files, payload.totalBytes)) break;
-        if (this.incomingStates.has(payload.transferId)) break;
+        const existingReceive = this.incomingStates.get(payload.transferId);
+        if (existingReceive) {
+          const samePeer =
+            existingReceive.session.peerId === fromPeerId ||
+            Boolean(
+              existingReceive.session.peerDeviceId &&
+              peer?.device.deviceId === existingReceive.session.peerDeviceId,
+            );
+          const sameFiles = existingReceive.session.files.length === payload.files.length &&
+            existingReceive.session.files.every((file, index) => {
+              const offered = payload.files[index];
+              return Boolean(
+                offered && file.index === offered.index && file.name === offered.name &&
+                file.size === offered.size && file.chunkSize === offered.chunkSize &&
+                file.totalChunks === offered.totalChunks && file.mimeType === offered.mimeType,
+              );
+            });
+          if (!samePeer || !sameFiles) break;
+          existingReceive.session.peerId = fromPeerId;
+          if (peer) {
+            existingReceive.session.peerDeviceId = peer.device.deviceId;
+            existingReceive.session.peerName = peer.device.name;
+            existingReceive.session.peerPlatform = peer.device.platform;
+          }
+          if (existingReceive.session.status === 'transferring') {
+            // Pause chunk intake while reconciling durable state. Any in-flight
+            // frame ignored in this short window will be requested again from
+            // the freshly computed resume point.
+            existingReceive.session.status = 'connecting';
+            this.emit();
+            try {
+              const resume = await this.getReceiveResume(existingReceive);
+              if (this.incomingStates.get(payload.transferId) !== existingReceive) break;
+              existingReceive.session.status = 'transferring';
+              this.emit();
+              await this.sendControlMessage(
+                fromPeerId,
+                {
+                  kind: 'transfer-accept',
+                  transferId: payload.transferId,
+                  preferredTransport: this.canUseWebRtc() ? 'webrtc' : 'ws-relay',
+                  ...(Object.keys(resume.resumeFromChunks).length
+                    ? { resumeFromChunks: resume.resumeFromChunks }
+                    : {}),
+                  resumeBytesTotal: resume.bytes,
+                },
+                true,
+              );
+            } catch (error) {
+              if (this.incomingStates.get(payload.transferId) === existingReceive &&
+                  existingReceive.session.status === 'connecting') {
+                existingReceive.session.status = 'transferring';
+                this.emit();
+              }
+              throw error;
+            }
+          }
+          break;
+        }
+        const terminalReceive = this.transfers.find(
+          (transfer) => transfer.transferId === payload.transferId && transfer.direction === 'incoming',
+        );
+        if (terminalReceive && isTerminalTransferStatus(terminalReceive.status)) {
+          const samePeer =
+            terminalReceive.peerId === fromPeerId ||
+            Boolean(terminalReceive.peerDeviceId && peer?.device.deviceId === terminalReceive.peerDeviceId);
+          if (samePeer && terminalReceive.status === 'completed') {
+            const resumeFromChunks = Object.fromEntries(
+              terminalReceive.files.map((file) => [file.index, file.totalChunks]),
+            );
+            await this.sendControlMessage(
+              fromPeerId,
+              {
+                kind: 'transfer-accept',
+                transferId: payload.transferId,
+                preferredTransport: 'ws-relay',
+                resumeFromChunks,
+                resumeBytesTotal: terminalReceive.totalBytes,
+              },
+              true,
+            );
+            await this.sendControlMessage(
+              fromPeerId,
+              { kind: 'transfer-complete-ack', transferId: payload.transferId, verified: true },
+              true,
+            );
+            break;
+          }
+          if (terminalReceive.status === 'declined' || terminalReceive.status === 'cancelled') break;
+          // An incomplete or hash-failed transfer is offered again normally;
+          // the receiver must accept the retry instead of claiming completion.
+        }
         const session = this.cryptoSessions.get(fromPeerId);
         const view: TransferSessionView = {
           transferId: payload.transferId,
@@ -2137,10 +2666,36 @@ export class WarpClient {
       case 'transfer-accept': {
         const sendState = this.outgoingStates.get(payload.transferId);
         if (sendState && sendState.session.peerId === fromPeerId) {
-          if (payload.resumeFromChunks && typeof payload.resumeFromChunks === 'object') {
-            sendState.resumeFromChunks = payload.resumeFromChunks;
-          }
-          sendState.acceptResolver?.(payload.preferredTransport);
+          sendState.resumeFromChunks = normalizeResumeChunks(
+            payload.resumeFromChunks,
+            sendState.session.files,
+          );
+          const calculatedResumeBytes = bytesForResumeChunks(
+            sendState.session.files,
+            sendState.resumeFromChunks,
+          );
+          sendState.resumeBytesTotal =
+            typeof payload.resumeBytesTotal === 'number' &&
+            Number.isInteger(payload.resumeBytesTotal) &&
+            payload.resumeBytesTotal >= calculatedResumeBytes &&
+            payload.resumeBytesTotal <= sendState.session.totalBytes
+              ? payload.resumeBytesTotal
+              : calculatedResumeBytes;
+          sendState.session.transferredBytes = sendState.resumeBytesTotal;
+          sendState.lastAckedBytes = sendState.resumeBytesTotal;
+          sendState.lastAckAt = Date.now();
+          sendState.sentGlobalChunks = 0;
+          sendState.ackedGlobalChunks = 0;
+          sendState.sentChunksByFile = sendState.session.files.map(() => 0);
+          sendState.ackedChunksByFile = sendState.session.files.map(
+            (file) => sendState.resumeFromChunks?.[file.index] ?? 0,
+          );
+          const resolve = sendState.acceptResolver;
+          sendState.acceptResolver = undefined;
+          sendState.acceptRejecter = undefined;
+          sendState.acceptingPeerId = undefined;
+          resolve?.(payload.preferredTransport);
+          this.emit();
         }
         break;
       }
@@ -2174,7 +2729,10 @@ export class WarpClient {
           sendState.session.status = 'cancelled';
           sendState.session.completedAt = Date.now();
           sendState.acceptRejecter?.(new Error('Cancelled'));
-          for (const w of sendState.ackWaiters) w();
+          for (const w of sendState.ackWaiters.splice(0)) w();
+          for (const resolve of sendState.completionAckWaiters.splice(0)) {
+            resolve({ verified: false, reason: 'Transfer cancelled.' });
+          }
           this.outgoingStates.delete(payload.transferId);
           this.sortTransfers();
           this.persistTransferHistory();
@@ -2198,21 +2756,91 @@ export class WarpClient {
         const sendState = this.outgoingStates.get(payload.transferId);
         if (sendState && sendState.session.peerId === fromPeerId) {
           if (!Number.isInteger(payload.fileIndex) || payload.fileIndex < 0 || payload.fileIndex >= sendState.session.files.length) break;
-          // Compute cumulative global chunks acknowledged up to (fileIndex, ackedChunkIndex)
-          let globalAcked = 0;
-          for (let i = 0; i < payload.fileIndex; i++) {
-            globalAcked += sendState.session.files[i]?.totalChunks ?? 0;
-          }
-          globalAcked += payload.ackedChunkIndex + 1;
-          sendState.ackedGlobalChunks = Math.max(sendState.ackedGlobalChunks, globalAcked);
-          sendState.session.transferredBytes = Math.max(
-            sendState.session.transferredBytes,
-            payload.bytesReceivedTotal
+          const file = sendState.session.files[payload.fileIndex];
+          if (
+            !file ||
+            !Number.isInteger(payload.ackedChunkIndex) ||
+            payload.ackedChunkIndex < 0 ||
+            payload.ackedChunkIndex >= file.totalChunks ||
+            !Number.isInteger(payload.bytesReceivedTotal) ||
+            payload.bytesReceivedTotal < 0 ||
+            payload.bytesReceivedTotal > sendState.session.totalBytes
+          ) break;
+          const receiverPrefix = payload.ackedChunkIndex + 1;
+          const resumePrefix = sendState.resumeFromChunks?.[payload.fileIndex] ?? 0;
+          const sentPrefix = resumePrefix + (sendState.sentChunksByFile[payload.fileIndex] ?? 0);
+          // ACKs are per-file. Treating a later file's ACK as proof that all
+          // earlier files were durable allowed multi-file sends to release
+          // the 16 MiB window early and get tens of MiB ahead of the receiver.
+          if (receiverPrefix > sentPrefix) break;
+          const previousAckedChunks = sendState.ackedGlobalChunks;
+          sendState.ackedChunksByFile[payload.fileIndex] = Math.max(
+            sendState.ackedChunksByFile[payload.fileIndex] ?? resumePrefix,
+            receiverPrefix,
           );
+          const newlyAcked = countNewlyAcknowledgedChunks(
+            sendState.ackedChunksByFile,
+            sendState.resumeFromChunks,
+          );
+          sendState.ackedGlobalChunks = Math.min(sendState.sentGlobalChunks, newlyAcked);
+
+          const now = Date.now();
+          const previousConfirmedBytes = sendState.session.transferredBytes;
+          const confirmedBytes = Math.max(
+            previousConfirmedBytes,
+            Math.min(sendState.session.totalBytes, payload.bytesReceivedTotal),
+          );
+          if (confirmedBytes > sendState.lastAckedBytes) {
+            const elapsed = Math.max((now - sendState.lastAckAt) / 1000, 0.001);
+            const instant = (confirmedBytes - sendState.lastAckedBytes) / elapsed;
+            sendState.session.speedBytesPerSec =
+              sendState.session.speedBytesPerSec === 0
+                ? instant
+                : sendState.session.speedBytesPerSec * 0.65 + instant * 0.35;
+            sendState.lastAckedBytes = confirmedBytes;
+            sendState.session.transferredBytes = confirmedBytes;
+            const remaining = Math.max(0, sendState.session.totalBytes - confirmedBytes);
+            sendState.session.etaSeconds =
+              sendState.session.speedBytesPerSec > 1024
+                ? Math.ceil(remaining / sendState.session.speedBytesPerSec)
+                : null;
+          }
+          if (
+            sendState.ackedGlobalChunks > previousAckedChunks ||
+            confirmedBytes > previousConfirmedBytes
+          ) {
+            sendState.lastAckAt = now;
+          }
           const waiters = sendState.ackWaiters.splice(0, sendState.ackWaiters.length);
           for (const w of waiters) w();
           this.emit();
         }
+        break;
+      }
+
+      case 'transfer-complete-ack': {
+        const sendState = this.outgoingStates.get(payload.transferId);
+        if (
+          !sendState ||
+          sendState.session.peerId !== fromPeerId ||
+          typeof payload.verified !== 'boolean'
+        ) break;
+        const result = {
+          verified: payload.verified,
+          reason: typeof payload.reason === 'string' ? payload.reason.slice(0, 512) : undefined,
+        };
+        sendState.completionResult = result;
+        const waiters = sendState.completionAckWaiters.splice(0);
+        for (const waiter of waiters) waiter(result);
+        if (!result.verified) {
+          sendState.session.status = 'error';
+          sendState.session.errorMessage = result.reason || 'The receiver could not verify this transfer.';
+          sendState.session.completedAt = Date.now();
+          this.outgoingStates.delete(payload.transferId);
+          this.sortTransfers();
+          this.persistTransferHistory();
+        }
+        this.emit();
         break;
       }
 
@@ -2232,7 +2860,33 @@ export class WarpClient {
 
       case 'transfer-complete': {
         const recvState = this.incomingStates.get(payload.transferId);
-        if (!recvState || recvState.session.peerId !== fromPeerId) break;
+        if (!recvState) {
+          const terminalReceive = this.transfers.find(
+            (transfer) => transfer.transferId === payload.transferId && transfer.direction === 'incoming',
+          );
+          const peer = this.peers.find((candidate) => candidate.peerId === fromPeerId);
+          const samePeer = terminalReceive && (
+            terminalReceive.peerId === fromPeerId ||
+            Boolean(terminalReceive.peerDeviceId && peer?.device.deviceId === terminalReceive.peerDeviceId)
+          );
+          if (terminalReceive && samePeer && isTerminalTransferStatus(terminalReceive.status) &&
+              terminalReceive.status !== 'declined' && terminalReceive.status !== 'cancelled') {
+            await this.sendControlMessage(
+              fromPeerId,
+              {
+                kind: 'transfer-complete-ack',
+                transferId: payload.transferId,
+                verified: terminalReceive.status === 'completed',
+                ...(terminalReceive.status === 'error'
+                  ? { reason: terminalReceive.errorMessage || 'The previous receive did not verify.' }
+                  : {}),
+              },
+              true,
+            ).catch(() => {});
+          }
+          break;
+        }
+        if (recvState.session.peerId !== fromPeerId) break;
         recvState.transferCompleteReceived = true;
         if (!recvState.fallbackTimer) {
           recvState.fallbackTimer = setTimeout(() => {
@@ -2383,24 +3037,31 @@ export class WarpClient {
     }
 
     if (recvState.transferCompleteReceived && this.incomingStates.has(transferId)) {
+      let completionAck: { verified: boolean; reason?: string } | undefined;
       if (recvState.finalizedFiles.size === totalFiles) {
         if (recvState.fallbackTimer) {
           clearTimeout(recvState.fallbackTimer);
           recvState.fallbackTimer = undefined;
         }
-        recvState.session.transferredBytes = recvState.session.totalBytes;
-        recvState.session.etaSeconds = 0;
-        recvState.session.status = 'completed';
+        const failedFile = recvState.session.receivedFiles.find((file) => !file.verified);
+        if (failedFile) {
+          recvState.session.status = 'error';
+          recvState.session.errorMessage = `SHA-256 verification failed for ${failedFile.name}.`;
+          completionAck = { verified: false, reason: recvState.session.errorMessage };
+        } else {
+          recvState.session.transferredBytes = recvState.session.totalBytes;
+          recvState.session.etaSeconds = 0;
+          recvState.session.status = 'completed';
+          completionAck = { verified: true };
+        }
         recvState.session.completedAt = Date.now();
         this.incomingStates.delete(transferId);
         this.sortTransfers();
         this.persistTransferHistory();
         this.emit();
-        this.opts.onTransferCompleted?.(recvState.session);
+        if (completionAck.verified) this.opts.onTransferCompleted?.(recvState.session);
         const senderPeer = this.peers.find((p) => p.peerId === recvState.session.peerId);
-        if (senderPeer) {
-          this.syncHistoryWithPeer(senderPeer).catch(() => {});
-        }
+        if (senderPeer) this.syncHistoryWithPeer(senderPeer).catch(() => {});
       } else if (hadDiskError) {
         if (recvState.fallbackTimer) {
           clearTimeout(recvState.fallbackTimer);
@@ -2408,10 +3069,25 @@ export class WarpClient {
         }
         recvState.session.status = 'error';
         recvState.session.completedAt = Date.now();
+        completionAck = {
+          verified: false,
+          reason: recvState.session.errorMessage || 'The receiver could not finalize all files.',
+        };
         this.incomingStates.delete(transferId);
         this.sortTransfers();
         this.persistTransferHistory();
         this.emit();
+      }
+      if (completionAck) {
+        await this.sendControlMessage(
+          recvState.session.peerId,
+          {
+            kind: 'transfer-complete-ack',
+            transferId,
+            ...completionAck,
+          },
+          true,
+        ).catch(() => {});
       }
     }
   }
@@ -2736,23 +3412,31 @@ export class WarpClient {
     innerFrame: Uint8Array
   ): Promise<void> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error('Signaling relay socket disconnected');
+      throw new TransferConnectionInterruptedError('Signaling relay socket disconnected; resuming transfer.');
     }
     while (this.ws.bufferedAmount > MAX_BUFFER_HIGH_WATER) {
       if (this.ws.readyState !== WebSocket.OPEN) {
-        throw new Error('Signaling relay socket disconnected');
+        throw new TransferConnectionInterruptedError('Signaling relay socket disconnected; resuming transfer.');
       }
       // Short poll: browsers expose no drain event for WebSocket, and a
       // 15 ms nap here used to cap relay throughput far below link speed.
       await new Promise((r) => setTimeout(r, 3));
     }
     const routed = wrapRoutedRelayFrame(targetPeerId, this.peerId, innerFrame);
-    this.ws.send(routed);
+    try {
+      this.ws.send(routed);
+    } catch {
+      throw new TransferConnectionInterruptedError('Signaling relay socket disconnected; resuming transfer.');
+    }
   }
 
-  private sendServer(msg: ClientToServerMessage): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+  private sendServer(msg: ClientToServerMessage): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+    try {
       this.ws.send(JSON.stringify(msg));
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -2954,6 +3638,15 @@ export class WarpClient {
       }
     } catch {
       // ignore
+    }
+  }
+
+  private persistPeerId(peerId: string): void {
+    if (!/^[0-9a-f]{16}$/.test(peerId)) return;
+    try {
+      getSafeLocalStorage()?.setItem(`${this.storagePrefix}:peerId`, peerId);
+    } catch {
+      // Stable ids improve reconnect recovery, but are not required to connect.
     }
   }
 

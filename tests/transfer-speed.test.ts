@@ -7,6 +7,7 @@ import {
   CHUNK_SIZE,
   MAX_CHUNK_SIZE,
   WarpClient,
+  countNewlyAcknowledgedChunks,
   isValidFileManifest,
   type SendableFileInput,
   type TransferSessionView,
@@ -59,6 +60,20 @@ describe("manifest chunk-size negotiation", () => {
   });
 });
 
+describe("per-file receiver ACK accounting", () => {
+  it("does not treat a later file's ACK as proof that earlier files are durable", () => {
+    // File 1 has ACKed all three chunks, while file 0 has not acknowledged any.
+    // A single concatenated/global-index calculation would incorrectly count
+    // file 0 as complete merely because file 1 produced an ACK.
+    expect(countNewlyAcknowledgedChunks([0, 3, 0], undefined)).toBe(3);
+    expect(countNewlyAcknowledgedChunks([2, 3, 1], undefined)).toBe(6);
+  });
+
+  it("counts only newly transferred chunks when files have durable resume prefixes", () => {
+    expect(countNewlyAcknowledgedChunks([6, 4, 2], { 0: 4, 1: 4, 2: 1 })).toBe(3);
+  });
+});
+
 describe("high-throughput transfer pipeline", () => {
   let server: AirBridgeServerInstance;
   let wsUrl: string;
@@ -78,15 +93,17 @@ describe("high-throughput transfer pipeline", () => {
     await server.close();
   });
 
-  async function makePair(prefix: string) {
+  async function makePair(prefix: string, autoAccept = true) {
     let completed: TransferSessionView | null = null;
+    let incomingOffer: TransferSessionView | null = null;
     const receiver = new WarpClient({
       wsUrl,
       enableWebRtc: false,
       storagePrefix: `${prefix}-rx`,
       deviceOverride: { name: "Receiver Mac", platform: "macos", model: "Mac", formFactor: "laptop" },
       onIncomingTransfer: (offer) => {
-        void receiver.acceptIncomingTransfer(offer.transferId);
+        incomingOffer = offer;
+        if (autoAccept) void receiver.acceptIncomingTransfer(offer.transferId);
       },
       onTransferCompleted: (t) => {
         if (t.direction === "incoming") completed = t;
@@ -108,6 +125,7 @@ describe("high-throughput transfer pipeline", () => {
       receiver,
       senderPeerTarget: sender.getSnapshot().peers[0].peerId,
       getCompleted: () => completed,
+      getIncomingOffer: () => incomingOffer,
       stop: () => {
         sender.stop();
         receiver.stop();
@@ -152,7 +170,7 @@ describe("high-throughput transfer pipeline", () => {
   it("keeps multi-file batches verified and reports live speed on both devices", async () => {
     const pair = await makePair("speed-multi-file");
     try {
-      const files = Array.from({ length: 12 }, (_, fileIndex) => {
+      const files = Array.from({ length: 40 }, (_, fileIndex) => {
         const size = CHUNK_SIZE * 2 + fileIndex * 97;
         const raw = new Uint8Array(size);
         for (let i = 0; i < size; i++) raw[i] = (i * 17 + fileIndex * 31) & 0xff;
@@ -190,6 +208,93 @@ describe("high-throughput transfer pipeline", () => {
       pair.stop();
     }
   });
+
+  it("retries the initial offer after the signaling socket drops", async () => {
+    const pair = await makePair("resume-initial-offer", false);
+    try {
+      const raw = new Uint8Array(CHUNK_SIZE + 37).fill(91);
+      const input: SendableFileInput = {
+        name: "waiting-offer.bin",
+        size: raw.byteLength,
+        type: "application/octet-stream",
+        async sliceBytes(start, end) { return raw.slice(start, end); },
+      };
+      const sending = pair.sender.sendFiles(pair.senderPeerTarget, [input]);
+      await waitForCondition(() => pair.getIncomingOffer() !== null);
+
+      const senderSocket = (pair.sender as unknown as { ws: WebSocket }).ws;
+      senderSocket.close();
+      await waitForCondition(() => pair.sender.getSnapshot().connectionState === "reconnecting");
+      await waitForCondition(
+        () => pair.sender.getSnapshot().connectionState === "connected" &&
+          pair.sender.getSnapshot().peers.length === 1,
+        15_000,
+      );
+      await pair.receiver.acceptIncomingTransfer(pair.getIncomingOffer()!.transferId);
+
+      const senderDone = await sending;
+      await waitForCondition(() => pair.getCompleted() !== null);
+      expect(senderDone.status).toBe("completed");
+      expect(pair.getCompleted()!.receivedFiles[0].verified).toBe(true);
+      expect(Buffer.compare(
+        Buffer.concat(pair.getCompleted()!.receivedFiles[0].chunks.map((chunk) => Buffer.from(chunk))),
+        Buffer.from(raw),
+      )).toBe(0);
+    } finally {
+      pair.stop();
+    }
+  }, 25_000);
+
+  it("resumes a multi-file transfer from receiver-stored chunks after a connection drop", async () => {
+    const pair = await makePair("resume-mid-transfer");
+    try {
+      const files = Array.from({ length: 30 }, (_, fileIndex) => {
+        const size = CHUNK_SIZE * 3 + fileIndex;
+        const raw = new Uint8Array(size);
+        for (let i = 0; i < size; i++) raw[i] = (i * 19 + fileIndex * 43) & 0xff;
+        return {
+          raw,
+          input: {
+            name: `resume-${fileIndex}.bin`,
+            size,
+            type: "application/octet-stream",
+            async sliceBytes(start: number, end: number) {
+              await new Promise((resolve) => setTimeout(resolve, 1));
+              return raw.slice(start, end);
+            },
+          } satisfies SendableFileInput,
+        };
+      });
+      const sending = pair.sender.sendFiles(
+        pair.senderPeerTarget,
+        files.map(({ input }) => input),
+      );
+      await waitForCondition(() => {
+        const active = pair.receiver.getSnapshot().transfers.find(
+          (transfer) => transfer.direction === "incoming" && transfer.status === "transferring",
+        );
+        return Boolean(active && active.transferredBytes >= CHUNK_SIZE * 8);
+      }, 15_000);
+
+      (pair.sender as unknown as { ws: WebSocket }).ws.close();
+      const senderDone = await sending;
+      await waitForCondition(() => pair.getCompleted() !== null, 25_000);
+      const receiverDone = pair.getCompleted()!;
+      expect(senderDone.status).toBe("completed");
+      expect(receiverDone.status).toBe("completed");
+      expect(receiverDone.receivedFiles).toHaveLength(files.length);
+      for (const [index, file] of files.entries()) {
+        const received = receiverDone.receivedFiles[index];
+        expect(received.verified).toBe(true);
+        expect(Buffer.compare(
+          Buffer.concat(received.chunks.map((chunk) => Buffer.from(chunk))),
+          Buffer.from(file.raw),
+        )).toBe(0);
+      }
+    } finally {
+      pair.stop();
+    }
+  }, 35_000);
 
   it("moves a 16 MiB file end-to-end, verified and byte-identical", async () => {
     const pair = await makePair("speed-large");

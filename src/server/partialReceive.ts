@@ -135,8 +135,20 @@ export class PartialReceiveStore {
       throw new Error('Invalid receive manifest.');
     }
     const key = this.key(meta.transferId, meta.fileIndex);
+    const matchesManifest = (candidate: PartialReceiveMeta): boolean =>
+      candidate.transferId === meta.transferId &&
+      candidate.fileIndex === meta.fileIndex &&
+      candidate.name === meta.name &&
+      candidate.size === meta.size &&
+      candidate.chunkSize === meta.chunkSize &&
+      candidate.totalChunks === meta.totalChunks;
     const existing = this.states.get(key);
-    if (existing) return existing;
+    if (existing) {
+      if (!matchesManifest(existing)) {
+        throw new Error('Transfer ID already exists with a different receive manifest.');
+      }
+      return existing;
+    }
 
     const { tempPath, metaPath, journalPath } = this.pathsFor(meta.transferId, meta.fileIndex);
     await fs.promises.mkdir(this.partialDir, { recursive: true });
@@ -144,37 +156,44 @@ export class PartialReceiveStore {
     let receivedChunks: boolean[] = new Array(meta.totalChunks).fill(false);
     let receivedCount = 0;
     let hasSnapshot = false;
+    let parsedManifest:
+      | {
+          transferId?: unknown;
+          fileIndex?: unknown;
+          receivedChunks?: unknown;
+          size?: unknown;
+          chunkSize?: unknown;
+          totalChunks?: unknown;
+          name?: unknown;
+        }
+      | undefined;
     try {
-      const raw = await fs.promises.readFile(metaPath, 'utf8');
-      const parsed = JSON.parse(raw) as {
-        receivedChunks?: unknown;
-        size?: unknown;
-        chunkSize?: unknown;
-        totalChunks?: unknown;
-        name?: unknown;
-      };
-      // Only trust a manifest whose declared dimensions match the current
-      // offer; a stale file from a previous, differently-sized transfer must
-      // not be mistaken for a partial of this one.
-      if (
-        Number(parsed.size) === meta.size &&
-        Number(parsed.chunkSize) === meta.chunkSize &&
-        Number(parsed.totalChunks) === meta.totalChunks &&
-        typeof parsed.name === 'string'
-      ) {
-        const arr = parsed.receivedChunks;
-        if (Array.isArray(arr)) {
-          for (let i = 0; i < arr.length && i < meta.totalChunks; i++) {
-            if (arr[i]) {
-              receivedChunks[i] = true;
-              receivedCount++;
-            }
-          }
-          hasSnapshot = true;
+      parsedManifest = JSON.parse(await fs.promises.readFile(metaPath, 'utf8')) as typeof parsedManifest;
+    } catch {
+      // Fresh receive: no persisted manifest yet, or an unreadable old manifest.
+    }
+    if (parsedManifest) {
+      const matchesPersistedManifest =
+        parsedManifest.transferId === meta.transferId &&
+        parsedManifest.fileIndex === meta.fileIndex &&
+        parsedManifest.size === meta.size &&
+        parsedManifest.chunkSize === meta.chunkSize &&
+        parsedManifest.totalChunks === meta.totalChunks &&
+        parsedManifest.name === meta.name;
+      if (!matchesPersistedManifest) {
+        throw new Error('Transfer ID already exists with a different persisted receive manifest.');
+      }
+      const arr = parsedManifest.receivedChunks;
+      if (!Array.isArray(arr)) {
+        throw new Error('Persisted receive manifest is invalid.');
+      }
+      for (let i = 0; i < arr.length && i < meta.totalChunks; i++) {
+        if (arr[i]) {
+          receivedChunks[i] = true;
+          receivedCount++;
         }
       }
-    } catch {
-      // Fresh receive: no persisted manifest yet.
+      hasSnapshot = true;
     }
 
     const state: PartialReceiveState = {
