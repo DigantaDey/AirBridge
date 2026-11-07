@@ -20,7 +20,6 @@ import {
 import {
   formatBytes,
   formatPairCode,
-  formatSpeed,
   normalizePairCode,
 } from "../../shared/protocol.js";
 import type {
@@ -31,6 +30,7 @@ import {
   triggerBatchZipDownload,
   triggerSingleFileDownload,
 } from "../engine/fileDropUtils.js";
+import { TransferSpeed } from "./TransferSpeed.js";
 
 interface PairingDockProps {
   pairCode: string;
@@ -347,13 +347,12 @@ export function PairingDock({
                           {tr.status === "pending-accept"
                             ? "Waiting for recipient to accept…"
                             : tr.status === "transferring"
-                              ? `${pct}% · ${
-                                  tr.direction === "incoming" ? "Download" : "Upload"
-                                } ${formatSpeed(tr.speedBytesPerSec)}${
-                                  tr.etaSeconds
-                                    ? ` · ${tr.etaSeconds}s left`
-                                    : ""
-                                }`
+                              ? (
+                                <>
+                                  {pct}% ·{" "}
+                                  <TransferSpeed transfer={tr} showIcon={false} />
+                                </>
+                              )
                               : tr.status === "completed"
                                 ? "100% · Verified SHA-256"
                                 : tr.status.toUpperCase()}

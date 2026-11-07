@@ -32,10 +32,13 @@ verification code, and WebP thumbnails for image files under 25 MB. Decline or a
 Ticking *Auto-accept future drops from <device>* marks the sender as trusted so their
 next offers skip the prompt.
 
-During the transfer you get progress, a smoothed speed reading labelled **Upload** on
-the sender and **Download** on the receiver, and an ETA. Either side can cancel. Every file is hashed with SHA-256 as it streams and the receiver compares
-that against the hash the sender declared, so a corrupted file shows up as unverified
-rather than passing quietly.
+During the transfer both devices show the same smoothed live rate in the active-transfer
+row and the transfers dock: **Upload** on the sender and **Download** on the receiver,
+alongside progress and an ETA. On Android the foreground notification mirrors the rate
+while the screen is off. If bytes stop moving, the reading decays to 0 B/s rather than
+freezing at the last value. Either side can cancel. Every file is hashed with SHA-256 as
+it streams and the receiver compares that against the hash the sender declared, so a
+corrupted file shows up as unverified rather than passing quietly.
 
 Transfer history (last 50) lives in the browser's local storage and is reconciled
 between paired devices over the encrypted channel when they reconnect, so a reload on

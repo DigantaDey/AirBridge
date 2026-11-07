@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { formatBytes, formatSpeed } from "../shared/protocol.js";
+import { formatBytes } from "../shared/protocol.js";
 import {
   loadOrCreateDeviceProfile,
   saveDeviceName,
@@ -22,6 +22,7 @@ import {
   triggerSingleFileDownload,
 } from "./engine/fileDropUtils.js";
 import { PairingDock } from "./components/PairingDock.js";
+import { TransferSpeed } from "./components/TransferSpeed.js";
 import { TransferModal } from "./components/TransferModal.js";
 import { DownloadsModal } from "./components/DownloadsModal.js";
 import { ClipboardCenter } from "./components/ClipboardCenter.js";
@@ -30,6 +31,7 @@ import {
   forgetNativeComputer,
   isNativeShell,
   getNativeConnectionContinuity,
+  publishNativeTransferSpeed,
   setNativeConnectionContinuity,
   setNativeTransferActive,
   scanPairingCode,
@@ -56,6 +58,7 @@ export function App() {
   const pendingClipboardWriteRef = useRef<string | null>(null);
   const lastBrowserClipboardRef = useRef<string>("");
   const leftPageRef = useRef<boolean>(false);
+  const lastNativeSpeedPublishRef = useRef({ at: 0, active: false });
 
   const [snap, setSnap] = useState<WarpClientSnapshot>({
     connectionState: "connecting",
@@ -586,6 +589,26 @@ export function App() {
     return () => { setNativeTransferActive(false); };
   }, [hasNativeActiveTransfer]);
 
+  // The Android shell mirrors the same live rate into its foreground
+  // notification. Snapshot updates are frequent, so throttle bridge calls but
+  // keep a 1 s heartbeat that also runs when the transfer pauses.
+  useEffect(() => {
+    const publish = (force = false) => {
+      const live = snap.transfers.find(
+        (transfer) => transfer.status === "transferring",
+      ) ?? null;
+      const now = Date.now();
+      const previous = lastNativeSpeedPublishRef.current;
+      if (!force && live && previous.active && now - previous.at < 500) return;
+      lastNativeSpeedPublishRef.current = { at: now, active: Boolean(live) };
+      publishNativeTransferSpeed(live);
+    };
+    publish();
+    if (!snap.transfers.some((transfer) => transfer.status === "transferring")) return;
+    const timer = window.setInterval(() => publish(true), 1_000);
+    return () => window.clearInterval(timer);
+  }, [snap.transfers]);
+
   const recentTransfers = useMemo(
     () =>
       snap.transfers
@@ -691,7 +714,7 @@ export function App() {
           {stagedFiles.length > 0 && <ul className="staged-list" aria-label="Selected files">{stagedFiles.map((file, index) => <li key={`${file.name}-${index}`}><span>{file.name}</span><small>{formatBytes(file.size)}</small><button className="remove-file" aria-label={`Remove ${file.name}`} onClick={() => setStagedFiles((files) => files.filter((_, itemIndex) => itemIndex !== index))}>×</button></li>)}</ul>}
           {stagedFiles.length > 0 && <p className="selection-hint">{stagedFiles.length} file{stagedFiles.length === 1 ? "" : "s"} selected. Choose a ready device above to send.</p>}
         </section>
-        {activeTransfers.length > 0 && <section className="transfers-section"><div className="section-title"><h2>Transfers</h2><span className="quiet-count">{activeTransfers.length}</span></div>{activeTransfers.map((transfer) => <div className="transfer-row" key={transfer.transferId}><div className="transfer-heading"><strong>{transfer.direction === "incoming" ? `From ${transfer.peerName}` : `To ${transfer.peerName}`}</strong><span>{transfer.status === "pending-accept" ? "Waiting for approval" : transfer.status === "connecting" ? "Connecting" : "Transferring"}</span></div><progress value={transfer.totalBytes ? transfer.transferredBytes : 0} max={Math.max(transfer.totalBytes, 1)} aria-label={`Transfer to ${transfer.peerName}`} /><div className="transfer-foot"><span>{formatBytes(transfer.transferredBytes)} of {formatBytes(transfer.totalBytes)}{transfer.status === "transferring" ? ` · ${transfer.direction === "incoming" ? "Download" : "Upload"} ${formatSpeed(transfer.speedBytesPerSec)}` : ""}</span>{transfer.direction === "outgoing" && <button className="text-button" onClick={() => clientRef.current?.cancelTransfer(transfer.transferId)}>Cancel</button>}</div></div>)}</section>}
+        {activeTransfers.length > 0 && <section className="transfers-section"><div className="section-title"><h2>Transfers</h2><span className="quiet-count">{activeTransfers.length}</span></div>{activeTransfers.map((transfer) => <div className="transfer-row" key={transfer.transferId}><div className="transfer-heading"><strong>{transfer.direction === "incoming" ? `From ${transfer.peerName}` : `To ${transfer.peerName}`}</strong><span className="transfer-heading-state">{transfer.status === "pending-accept" ? "Waiting for approval" : transfer.status === "connecting" ? "Connecting" : "Transferring"}{transfer.status === "transferring" && <TransferSpeed transfer={transfer} showEta className="transfer-speed-badge" />}</span></div><progress value={transfer.totalBytes ? transfer.transferredBytes : 0} max={Math.max(transfer.totalBytes, 1)} aria-label={`Transfer to ${transfer.peerName}`} /><div className="transfer-foot"><span>{formatBytes(transfer.transferredBytes)} of {formatBytes(transfer.totalBytes)}{transfer.status === "transferring" ? <>{" · "}<TransferSpeed transfer={transfer} showEta={false} /></> : ""}</span>{transfer.direction === "outgoing" && <button className="text-button" onClick={() => clientRef.current?.cancelTransfer(transfer.transferId)}>Cancel</button>}</div></div>)}</section>}
         <footer className="utility-footer"><span>Encrypted transfers. No account or cloud storage.</span><button className="text-button" onClick={() => setRecentOpen(true)}>Recent transfers</button></footer>
       </main>
       {pairingOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPairingOpen(false); }}><section className="utility-modal pairing-modal" role="dialog" aria-modal="true" aria-labelledby="pair-title"><div className="modal-heading"><div><p className="section-kicker">PAIR DEVICES</p><h2 id="pair-title">Scan to pair</h2></div><button className="modal-close" aria-label="Close" onClick={() => setPairingOpen(false)}>×</button></div><p className="modal-explainer">Scan this code from AirBridge on your other device. Compare the verification code on both screens before accepting a transfer.</p>{isNativeShell() && <button type="button" className="secondary-button" onClick={() => scanPairingCode()}>Scan with this phone&apos;s camera</button>}<PairingDock pairCode={snap.pairCode} lanUrls={snap.lanUrls} transfers={snap.transfers} clipboardItems={snap.clipboardItems} onJoinPairCode={(code) => clientRef.current?.joinPairCode(code)} onRotatePairCode={() => clientRef.current?.rotatePairCode()} onCancelTransfer={(id) => clientRef.current?.cancelTransfer(id)} onMarkCopied={markLocalCopyHandled} /><button className="text-button advanced-toggle" onClick={() => setShowAdvanced((value) => !value)}>{showAdvanced ? "Hide network details" : "Having trouble pairing?"}</button>{showAdvanced && <div className="help-copy"><p>Both devices must be running the AirBridge app on the same local network. Guest Wi-Fi and some office networks block device-to-device connections.</p><p>Current service: {snap.connectionState}. {snap.lanUrls.length ? `Local address: ${snap.lanUrls[0]}` : "No local address was reported."}</p></div>}</section></div>}

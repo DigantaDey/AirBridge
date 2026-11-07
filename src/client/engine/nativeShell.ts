@@ -43,6 +43,18 @@ export interface AirBridgeNativeBridge {
   setConnectionContinuityEnabled?(enabled: boolean): boolean;
   /** Holds a native foreground service / partial wake lock only while a transfer is active. */
   setTransferActive?(active: boolean): boolean;
+  /** Updates the foreground notification with the live Upload/Download rate. */
+  updateTransferSpeed?(payloadJson: string): boolean;
+}
+
+/** Minimal live-transfer shape the Android notification needs. */
+export interface NativeTransferSpeedSnapshot {
+  direction: "incoming" | "outgoing";
+  status?: string;
+  speedBytesPerSec?: number;
+  transferredBytes?: number;
+  totalBytes?: number;
+  etaSeconds?: number | null;
 }
 
 declare global {
@@ -105,6 +117,44 @@ export function setNativeConnectionContinuity(enabled: boolean): boolean {
 /** Keep the Android CPU awake while the WebView is actively sending or receiving a transfer. */
 export function setNativeTransferActive(active: boolean): boolean {
   try { return nativeBridge()?.setTransferActive?.(active) === true; } catch { return false; }
+}
+
+/**
+ * Mirrors the in-page rate onto the Android foreground notification, so the
+ * phone still shows Upload/Download speed while its screen is off. A null
+ * snapshot clears the live rate when the transfer finishes or is cancelled.
+ */
+export function publishNativeTransferSpeed(
+  snapshot: NativeTransferSpeedSnapshot | null,
+): boolean {
+  // A speed-only bridge is enough here; do not require the clipboard/save
+  // methods that `nativeBridge()` uses to identify the full Android shell.
+  const bridge = typeof window === "undefined" ? undefined : window.AirBridgeAndroid;
+  if (!bridge || typeof bridge.updateTransferSpeed !== "function") return false;
+  const active =
+    snapshot !== null && (snapshot.status === undefined || snapshot.status === "transferring");
+  const finite = (value: number | undefined): number =>
+    typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+  const etaValue = snapshot?.etaSeconds;
+  const eta =
+    typeof etaValue === "number" && Number.isFinite(etaValue) && etaValue > 0
+      ? Math.ceil(etaValue)
+      : null;
+  const payload = active && snapshot
+    ? {
+        active: true,
+        direction: snapshot.direction === "incoming" ? "download" : "upload",
+        speedBytesPerSec: finite(snapshot.speedBytesPerSec),
+        transferredBytes: finite(snapshot.transferredBytes),
+        totalBytes: finite(snapshot.totalBytes),
+        etaSeconds: eta,
+      }
+    : { active: false };
+  try {
+    return bridge.updateTransferSpeed!(JSON.stringify(payload)) !== false;
+  } catch {
+    return false;
+  }
 }
 
 /** base64 for a byte array without blowing the argument stack on large chunks. */

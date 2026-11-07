@@ -419,6 +419,10 @@ class MainActivity : Activity() {
         return true
     }
 
+    /** Mirrors the WebView's live Upload/Download rate into the foreground notification. */
+    fun updateTransferSpeed(payloadJson: String): Boolean =
+        ConnectionService.publishTransferSpeed(payloadJson)
+
     /** Starts a foreground service and CPU wake lock for the active WebView transfer. */
     fun setTransferActive(active: Boolean): Boolean {
         if (transferActive == active) return true

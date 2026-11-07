@@ -107,6 +107,9 @@ export function countNewlyAcknowledgedChunks(
 const MAX_UNACKED_CHUNKS = 64; // 16 MiB of receiver-confirmed work: deep for LAN RTTs without hiding a slow disk
 const ACK_INTERVAL_CHUNKS = 8; // 2 MiB ACK cadence keeps both devices' progress closely aligned
 const ACK_STALL_TIMEOUT_MS = 15_000;
+// Keep the displayed rate truthful when disk writes or the network pause.
+const SPEED_SAMPLE_INTERVAL_MS = 250;
+const SPEED_STALE_TIMEOUT_MS = 1_500;
 const COMPLETE_ACK_TIMEOUT_MS = 60_000;
 const MAX_COMPLETE_ACK_RETRIES = 2;
 const ENCRYPT_PIPELINE_DEPTH = 8; // file reads + AES-GCM encrypts kept in flight ahead of the socket (2 MiB of frames)
@@ -267,6 +270,9 @@ interface InternalSendState {
   ackWaiters: Array<() => void>;
   lastAckAt: number;
   lastAckedBytes: number;
+  /** Speed sampling is separate from ACK-stall detection, so a paused stream can show 0 B/s. */
+  lastSpeedTs: number;
+  lastSpeedBytes: number;
   cancelled: boolean;
   acceptResolver?: (transport: TransportKind) => void;
   acceptRejecter?: (reason: Error) => void;
@@ -708,6 +714,8 @@ export class WarpClient {
   private ws: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
+  private speedTicker: ReturnType<typeof setInterval> | null = null;
+  private readonly speedProgress = new Map<string, { bytes: number; at: number }>();
   private destroyed = false;
 
   private connectionState: WarpClientSnapshot['connectionState'] = 'connecting';
@@ -858,6 +866,12 @@ export class WarpClient {
 
     this.connectWebSocket();
 
+    if (this.speedTicker) clearInterval(this.speedTicker);
+    this.speedTicker = setInterval(
+      () => this.refreshLiveTransferSpeeds(),
+      SPEED_SAMPLE_INTERVAL_MS,
+    );
+
     this.pingInterval = setInterval(() => {
       for (const peer of this.peers) {
         this.sendControlMessage(peer.peerId, { kind: 'ping', ts: Date.now() }, false).catch(
@@ -879,6 +893,9 @@ export class WarpClient {
     }
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.pingInterval) clearInterval(this.pingInterval);
+    if (this.speedTicker) clearInterval(this.speedTicker);
+    this.speedTicker = null;
+    this.speedProgress.clear();
     for (const recv of this.incomingStates.values()) {
       if (recv.fallbackTimer) clearTimeout(recv.fallbackTimer);
     }
@@ -1287,6 +1304,8 @@ export class WarpClient {
       ackWaiters: [],
       lastAckAt: Date.now(),
       lastAckedBytes: 0,
+      lastSpeedTs: Date.now(),
+      lastSpeedBytes: 0,
       cancelled: false,
       completionAckWaiters: [],
     };
@@ -1346,6 +1365,8 @@ export class WarpClient {
         sendState.session.status = 'connecting';
         sendState.session.speedBytesPerSec = 0;
         sendState.session.etaSeconds = null;
+        sendState.lastSpeedTs = Date.now();
+        sendState.lastSpeedBytes = sendState.session.transferredBytes;
         this.emit();
         peer = await this.waitForTransferPeer(sendState);
         cryptoSession = await this.ensureCryptoSession(peer);
@@ -1416,6 +1437,8 @@ export class WarpClient {
         sendState.session.status = 'connecting';
         sendState.session.speedBytesPerSec = 0;
         sendState.session.etaSeconds = null;
+        sendState.lastSpeedTs = Date.now();
+        sendState.lastSpeedBytes = sendState.session.transferredBytes;
         this.emit();
         currentPeer = await this.waitForTransferPeer(sendState);
         currentCryptoSession = await this.ensureCryptoSession(currentPeer);
@@ -1487,6 +1510,8 @@ export class WarpClient {
     session.etaSeconds = null;
     sendState.lastAckAt = Date.now();
     sendState.lastAckedBytes = resumedBytes;
+    sendState.lastSpeedTs = Date.now();
+    sendState.lastSpeedBytes = resumedBytes;
     this.emit();
 
     for (let fileIdx = 0; fileIdx < inputs.length; fileIdx++) {
@@ -2684,6 +2709,8 @@ export class WarpClient {
           sendState.session.transferredBytes = sendState.resumeBytesTotal;
           sendState.lastAckedBytes = sendState.resumeBytesTotal;
           sendState.lastAckAt = Date.now();
+          sendState.lastSpeedTs = Date.now();
+          sendState.lastSpeedBytes = sendState.resumeBytesTotal;
           sendState.sentGlobalChunks = 0;
           sendState.ackedGlobalChunks = 0;
           sendState.sentChunksByFile = sendState.session.files.map(() => 0);
@@ -2791,13 +2818,15 @@ export class WarpClient {
             Math.min(sendState.session.totalBytes, payload.bytesReceivedTotal),
           );
           if (confirmedBytes > sendState.lastAckedBytes) {
-            const elapsed = Math.max((now - sendState.lastAckAt) / 1000, 0.001);
-            const instant = (confirmedBytes - sendState.lastAckedBytes) / elapsed;
+            const elapsed = Math.max((now - sendState.lastSpeedTs) / 1000, 0.001);
+            const instant = (confirmedBytes - sendState.lastSpeedBytes) / elapsed;
             sendState.session.speedBytesPerSec =
               sendState.session.speedBytesPerSec === 0
                 ? instant
                 : sendState.session.speedBytesPerSec * 0.65 + instant * 0.35;
             sendState.lastAckedBytes = confirmedBytes;
+            sendState.lastSpeedBytes = confirmedBytes;
+            sendState.lastSpeedTs = now;
             sendState.session.transferredBytes = confirmedBytes;
             const remaining = Math.max(0, sendState.session.totalBytes - confirmedBytes);
             sendState.session.etaSeconds =
@@ -3648,6 +3677,75 @@ export class WarpClient {
     } catch {
       // Stable ids improve reconnect recovery, but are not required to connect.
     }
+  }
+
+  /**
+   * Speeds are sampled from ACKs (sender) and stored chunks (receiver), but a
+   * paused transfer emits neither. Refresh on a slow heartbeat so both devices
+   * stop advertising a stale rate, drop an impossible ETA, and then recover a
+   * clean baseline when bytes start moving again.
+   */
+  private refreshLiveTransferSpeeds(): void {
+    if (this.destroyed) return;
+    const now = Date.now();
+    const liveIds = new Set<string>();
+    let changed = false;
+
+    for (const transfer of this.transfers) {
+      if (transfer.status !== 'transferring') continue;
+      const receiveState = this.incomingStates.get(transfer.transferId);
+      const sendState = this.outgoingStates.get(transfer.transferId);
+      if (transfer.direction === 'incoming' ? !receiveState : !sendState) continue;
+      liveIds.add(transfer.transferId);
+
+      const sample = this.speedProgress.get(transfer.transferId);
+      if (!sample || sample.bytes !== transfer.transferredBytes) {
+        this.speedProgress.set(transfer.transferId, {
+          bytes: transfer.transferredBytes,
+          at: now,
+        });
+        const remaining = Math.max(0, transfer.totalBytes - transfer.transferredBytes);
+        const eta =
+          transfer.speedBytesPerSec > 1024 && remaining > 0
+            ? Math.ceil(remaining / transfer.speedBytesPerSec)
+            : null;
+        if (transfer.etaSeconds !== eta) {
+          transfer.etaSeconds = eta;
+          changed = true;
+        }
+        continue;
+      }
+
+      if (now - sample.at < SPEED_STALE_TIMEOUT_MS) continue;
+      // All bytes have crossed; the remaining pause is SHA-256 verification /
+      // the final completion ACK, not a stalled data stream. Keep the last
+      // measured rate so a completed transfer can still report its speed.
+      const allBytesTransferred =
+        transfer.totalBytes > 0 && transfer.transferredBytes >= transfer.totalBytes;
+      if (!allBytesTransferred && transfer.speedBytesPerSec !== 0) {
+        transfer.speedBytesPerSec = 0;
+        changed = true;
+      }
+      if (transfer.etaSeconds !== null) {
+        transfer.etaSeconds = null;
+        changed = true;
+      }
+      // Restart the next instant-rate window at the stalled byte count; the
+      // ACK-stall timer (`lastAckAt`) is deliberately left untouched.
+      if (receiveState) {
+        receiveState.lastSpeedTs = now;
+        receiveState.lastSpeedBytes = receiveState.bytesReceived;
+      }
+      if (sendState) {
+        sendState.lastSpeedTs = now;
+        sendState.lastSpeedBytes = sendState.session.transferredBytes;
+      }
+    }
+
+    for (const id of Array.from(this.speedProgress.keys())) {
+      if (!liveIds.has(id)) this.speedProgress.delete(id);
+    }
+    if (changed) this.emit();
   }
 
   private emit(): void {
