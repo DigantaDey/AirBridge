@@ -23,13 +23,14 @@ import java.net.URL
 /**
  * `window.AirBridgeAndroid` — the only bridge between the web UI and Android.
  *
- * The shell renders the untouched web app, so this exists purely for the four
+ * The shell renders the untouched web app, so this exists purely for the five
  * things a WebView cannot do on its own:
  *
  *   1. clipboard read/write (WebView never shows the permission prompt),
  *   2. saving received files (`<a download>` of a `blob:` URL is a no-op),
  *   3. scanning a pairing QR with the camera,
- *   4. leaving/joining a computer from the unpaired connect screen.
+ *   4. leaving/joining a computer from the unpaired connect screen,
+ *   5. showing live transfer speed in the foreground notification.
  *
  * Everything here is called from a WebView Javascript thread, so it must not
  * touch Android UI directly; UI work is posted to the main thread.
@@ -265,6 +266,10 @@ class ShellBridge(private val activity: MainActivity) {
     @JavascriptInterface
     fun setTransferActive(active: Boolean): Boolean =
         activity.setTransferActive(active)
+
+    @JavascriptInterface
+    fun updateTransferSpeed(payloadJson: String): Boolean =
+        activity.updateTransferSpeed(payloadJson)
 
     // ------------------------------------------------------------------ helpers
 

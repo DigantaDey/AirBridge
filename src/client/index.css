@@ -82,6 +82,17 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .transfer-heading, .transfer-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .transfer-heading strong { font-size: 12px; font-weight: 550; }
 .transfer-heading span, .transfer-foot { color: var(--ab-muted); font-size: 11px; }
+.transfer-heading-state { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
+/* One live rate badge shared by the sender (Upload) and receiver (Download). */
+.transfer-speed { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: inherit; font-variant-numeric: tabular-nums; }
+.transfer-speed-icon { width: 12px; height: 12px; flex-shrink: 0; }
+.transfer-speed-text { font-variant-numeric: tabular-nums; }
+.transfer-heading .transfer-speed-badge { border: 1px solid var(--ab-border); border-radius: 999px; padding: 1px 7px; background: var(--ab-subtle); color: var(--ab-secondary); font-size: 10px; font-weight: 600; }
+.transfer-heading .transfer-speed-badge .transfer-speed-icon { width: 11px; height: 11px; }
+.transfer-heading .transfer-speed-badge[data-direction="incoming"] .transfer-speed-icon { color: #059669; }
+.transfer-heading .transfer-speed-badge[data-direction="outgoing"] .transfer-speed-icon { color: #0284c7; }
+html.dark .transfer-heading .transfer-speed-badge[data-direction="incoming"] .transfer-speed-icon { color: #34d399; }
+html.dark .transfer-heading .transfer-speed-badge[data-direction="outgoing"] .transfer-speed-icon { color: #38bdf8; }
 .transfer-row progress { width: 100%; height: 3px; display: block; margin: 10px 0 5px; appearance: none; border: 0; background: var(--ab-border); }
 .transfer-row progress::-webkit-progress-bar { background: var(--ab-border); }
 .transfer-row progress::-webkit-progress-value { background: var(--ab-text); }

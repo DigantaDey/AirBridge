@@ -28,6 +28,144 @@ function waitForCondition(predicate: () => boolean, timeoutMs = 20000): Promise<
   });
 }
 
+interface SpeedTestInternals {
+  transfers: TransferSessionView[];
+  outgoingStates: Map<string, {
+    session: TransferSessionView;
+    lastSpeedTs: number;
+    lastSpeedBytes: number;
+    ackWaiters: Array<() => void>;
+    completionAckWaiters: Array<(result: { verified: boolean; reason?: string }) => void>;
+    cancelled: boolean;
+  }>;
+  incomingStates: Map<string, {
+    session: TransferSessionView;
+    bytesReceived: number;
+    lastSpeedTs: number;
+    lastSpeedBytes: number;
+  }>;
+  speedProgress: Map<string, { bytes: number; at: number }>;
+  refreshLiveTransferSpeeds(): void;
+}
+
+function liveSpeedView(direction: "incoming" | "outgoing"): TransferSessionView {
+  return {
+    transferId: `live-${direction}`,
+    peerId: "1122334455667788",
+    peerName: "Test device",
+    peerPlatform: "android",
+    sasCode: "123 · 456",
+    direction,
+    status: "transferring",
+    transport: "ws-relay",
+    files: [{
+      index: 0,
+      name: "live.bin",
+      size: 4096,
+      mimeType: "application/octet-stream",
+      totalChunks: 1,
+      chunkSize: 256 * 1024,
+    }],
+    totalBytes: 4096,
+    transferredBytes: 512,
+    speedBytesPerSec: 8 * 1024 * 1024,
+    etaSeconds: 42,
+    startedAt: Date.now(),
+    receivedFiles: [],
+  };
+}
+
+describe("live speed heartbeat on both peers", () => {
+  it("clears a stale rate and ETA when neither device reports progress", () => {
+    const client = new WarpClient({ enableWebRtc: false, storagePrefix: "speed-heartbeat" });
+    const internal = client as unknown as SpeedTestInternals;
+    const outgoing = liveSpeedView("outgoing");
+    const incoming = liveSpeedView("incoming");
+    internal.transfers = [outgoing, incoming];
+    internal.outgoingStates.set(outgoing.transferId, {
+      session: outgoing,
+      lastSpeedTs: 0,
+      lastSpeedBytes: 0,
+      ackWaiters: [],
+      completionAckWaiters: [],
+      cancelled: false,
+    });
+    internal.incomingStates.set(incoming.transferId, {
+      session: incoming,
+      bytesReceived: 512,
+      lastSpeedTs: 0,
+      lastSpeedBytes: 0,
+    });
+    for (const view of [outgoing, incoming]) {
+      internal.speedProgress.set(view.transferId, {
+        bytes: 512,
+        at: Date.now() - 2_000,
+      });
+    }
+
+    internal.refreshLiveTransferSpeeds();
+
+    expect(outgoing.speedBytesPerSec).toBe(0);
+    expect(incoming.speedBytesPerSec).toBe(0);
+    expect(outgoing.etaSeconds).toBeNull();
+    expect(incoming.etaSeconds).toBeNull();
+    expect(internal.outgoingStates.get(outgoing.transferId)!.lastSpeedBytes).toBe(512);
+    expect(internal.incomingStates.get(incoming.transferId)!.lastSpeedBytes).toBe(512);
+    client.stop();
+  });
+
+  it("keeps a fresh rate and recalculates ETA while bytes are moving", () => {
+    const client = new WarpClient({ enableWebRtc: false, storagePrefix: "speed-heartbeat-live" });
+    const internal = client as unknown as SpeedTestInternals;
+    const outgoing = liveSpeedView("outgoing");
+    outgoing.transferredBytes = 1024;
+    internal.transfers = [outgoing];
+    internal.outgoingStates.set(outgoing.transferId, {
+      session: outgoing,
+      lastSpeedTs: Date.now(),
+      lastSpeedBytes: 1024,
+      ackWaiters: [],
+      completionAckWaiters: [],
+      cancelled: false,
+    });
+    internal.speedProgress.set(outgoing.transferId, {
+      bytes: 512,
+      at: Date.now(),
+    });
+
+    internal.refreshLiveTransferSpeeds();
+
+    expect(outgoing.speedBytesPerSec).toBe(8 * 1024 * 1024);
+    expect(outgoing.etaSeconds).toBe(1);
+    expect(internal.speedProgress.get(outgoing.transferId)!.bytes).toBe(1024);
+    client.stop();
+  });
+
+  it("preserves the final rate while the receiver verifies and ACKs completion", () => {
+    const client = new WarpClient({ enableWebRtc: false, storagePrefix: "speed-heartbeat-final" });
+    const internal = client as unknown as SpeedTestInternals;
+    const incoming = liveSpeedView("incoming");
+    incoming.transferredBytes = incoming.totalBytes;
+    internal.transfers = [incoming];
+    internal.incomingStates.set(incoming.transferId, {
+      session: incoming,
+      bytesReceived: incoming.totalBytes,
+      lastSpeedTs: 0,
+      lastSpeedBytes: 0,
+    });
+    internal.speedProgress.set(incoming.transferId, {
+      bytes: incoming.totalBytes,
+      at: Date.now() - 2_000,
+    });
+
+    internal.refreshLiveTransferSpeeds();
+
+    expect(incoming.speedBytesPerSec).toBe(8 * 1024 * 1024);
+    expect(incoming.etaSeconds).toBeNull();
+    client.stop();
+  });
+});
+
 describe("manifest chunk-size negotiation", () => {
   const manifestWith = (size: number, chunkSize: number) => [
     {

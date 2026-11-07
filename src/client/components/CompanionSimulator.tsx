@@ -12,7 +12,7 @@ import {
   Wifi,
   X,
 } from 'lucide-react';
-import { formatBytes, formatSpeed } from '../../shared/protocol.js';
+import { formatBytes } from '../../shared/protocol.js';
 import {
   WarpClient,
   type SendableFileInput,
@@ -20,6 +20,7 @@ import {
   wrapBrowserFile,
 } from '../engine/warpClient.js';
 import { triggerSingleFileDownload } from '../engine/fileDropUtils.js';
+import { TransferSpeed } from './TransferSpeed.js';
 
 interface CompanionSimulatorProps {
   open: boolean;
@@ -355,7 +356,7 @@ export function CompanionSimulator({
                 </span>
                 <span className="font-mono-tabular text-[10px] text-emerald-400 shrink-0">
                   {tr.status === 'transferring'
-                    ? `${tr.direction === 'incoming' ? 'Download' : 'Upload'} ${formatSpeed(tr.speedBytesPerSec)}`
+                    ? <TransferSpeed transfer={tr} showEta={false} showIcon={false} />
                     : tr.status}
                 </span>
               </div>

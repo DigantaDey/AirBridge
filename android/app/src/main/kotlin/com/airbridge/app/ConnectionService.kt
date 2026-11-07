@@ -6,22 +6,39 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
+import org.json.JSONObject
+import java.util.Locale
+import kotlin.math.floor
+import kotlin.math.log
+import kotlin.math.pow
 
 /** Opt-in connection anchor and short-lived transfer CPU wake-lock owner. */
 class ConnectionService : Service() {
     private var transferActive = false
     private var transferWakeLock: PowerManager.WakeLock? = null
+    private var transferSpeed: TransferSpeedSnapshot? = null
+
+    private data class TransferSpeedSnapshot(
+        val uploading: Boolean,
+        val speedBytesPerSec: Double,
+        val transferredBytes: Long,
+        val totalBytes: Long,
+        val etaSeconds: Long?,
+    )
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "AirBridge connection and transfers",
                 NotificationManager.IMPORTANCE_LOW,
-            ).apply { description = "Keeps AirBridge connected and active transfers running while the screen is off" }
+            ).apply { description = "Keeps AirBridge connected and shows live transfer speed" }
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
@@ -30,13 +47,22 @@ class ConnectionService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 transferActive = false
+                transferSpeed = null
                 releaseTransferWakeLock()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
             }
-            ACTION_TRANSFER_START -> transferActive = true
-            ACTION_TRANSFER_STOP -> transferActive = false
+            ACTION_TRANSFER_START -> {
+                transferActive = true
+                transferSpeed = null
+            }
+            ACTION_TRANSFER_STOP -> {
+                transferActive = false
+                transferSpeed = null
+            }
+            ACTION_TRANSFER_PROGRESS ->
+                applyTransferSpeed(intent?.getStringExtra(EXTRA_TRANSFER_PROGRESS).orEmpty())
             null -> {
                 // A sticky restart is only useful for the explicitly opted-in
                 // connection service; transfers themselves resume from the
@@ -50,25 +76,7 @@ class ConnectionService : Service() {
         }
 
         updateTransferWakeLock()
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, CHANNEL_ID)
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-        }
-        val notification: Notification = builder
-            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
-            .setContentTitle(if (transferActive) "AirBridge transfer in progress" else "AirBridge is connected")
-            .setContentText(
-                if (transferActive) {
-                    "Keeping the transfer active while the screen is off. Keep AirBridge open until it completes."
-                } else {
-                    "Connection continuity is enabled. Clipboard access is limited by Android."
-                },
-            )
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .build()
+        val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -85,6 +93,91 @@ class ConnectionService : Service() {
             return START_NOT_STICKY
         }
         return START_STICKY
+    }
+
+    /** Refreshes the foreground notification from the WebView's live rate. */
+    private fun applyTransferSpeed(payloadJson: String) {
+        transferSpeed = parseTransferSpeed(payloadJson)
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, buildNotification())
+    }
+
+    private fun parseTransferSpeed(payloadJson: String): TransferSpeedSnapshot? {
+        if (payloadJson.isEmpty()) return null
+        return try {
+            val json = JSONObject(payloadJson)
+            if (!json.optBoolean("active", false)) return null
+            val speed = json.optDouble("speedBytesPerSec", 0.0).let {
+                if (it.isNaN() || it.isInfinite() || it < 0.0) 0.0 else it
+            }
+            val total = json.optLong("totalBytes", 0L).coerceAtLeast(0L)
+            val transferred = json.optLong("transferredBytes", 0L)
+                .coerceAtLeast(0L)
+                .coerceAtMost(if (total > 0L) total else Long.MAX_VALUE)
+            val eta = if (json.has("etaSeconds") && !json.isNull("etaSeconds")) {
+                json.optLong("etaSeconds", -1L).takeIf { it > 0L }
+            } else {
+                null
+            }
+            TransferSpeedSnapshot(
+                uploading = json.optString("direction") == "upload",
+                speedBytesPerSec = speed,
+                transferredBytes = transferred,
+                totalBytes = total,
+                etaSeconds = eta,
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun buildNotification(): Notification {
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        val speed = transferSpeed
+        val percent = speed?.let {
+            if (it.totalBytes > 0L) {
+                (it.transferredBytes * 100.0 / it.totalBytes).toInt().coerceIn(0, 100)
+            } else {
+                0
+            }
+        } ?: 0
+        val title = when {
+            !transferActive -> "AirBridge is connected"
+            speed == null -> "AirBridge transfer in progress"
+            speed.uploading -> "AirBridge upload in progress"
+            else -> "AirBridge download in progress"
+        }
+        val text = when {
+            !transferActive ->
+                "Connection continuity is enabled. Clipboard access is limited by Android."
+            speed == null ->
+                "Keeping the transfer active while the screen is off. Keep AirBridge open until it completes."
+            else -> {
+                val label = if (speed.uploading) "Upload" else "Download"
+                val eta = speed.etaSeconds?.let { " · ${it}s left" }.orEmpty()
+                "$label ${formatSpeed(speed.speedBytesPerSec)} · $percent%$eta"
+            }
+        }
+
+        builder
+            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+        if (transferActive) {
+            if (speed == null) {
+                builder.setProgress(0, 0, true)
+            } else {
+                builder.setProgress(100, percent, false)
+            }
+        }
+        return builder.build()
     }
 
     private fun updateTransferWakeLock() {
@@ -110,6 +203,7 @@ class ConnectionService : Service() {
     }
 
     override fun onDestroy() {
+        if (instance === this) instance = null
         releaseTransferWakeLock()
         super.onDestroy()
     }
@@ -121,7 +215,42 @@ class ConnectionService : Service() {
         const val ACTION_STOP = "com.airbridge.app.connection.STOP"
         const val ACTION_TRANSFER_START = "com.airbridge.app.connection.TRANSFER_START"
         const val ACTION_TRANSFER_STOP = "com.airbridge.app.connection.TRANSFER_STOP"
+        const val ACTION_TRANSFER_PROGRESS = "com.airbridge.app.connection.TRANSFER_PROGRESS"
+        const val EXTRA_TRANSFER_PROGRESS = "com.airbridge.app.connection.TRANSFER_PROGRESS_JSON"
         private const val CHANNEL_ID = "airbridge_connection"
         private const val NOTIFICATION_ID = 3411
+
+        @Volatile
+        private var instance: ConnectionService? = null
+
+        /**
+         * Called from the WebView bridge. Updating an already-foreground
+         * service through its live instance avoids Android's background
+         * `startService` restrictions when the phone screen is off.
+         */
+        fun publishTransferSpeed(payloadJson: String): Boolean {
+            val service = instance ?: return false
+            Handler(Looper.getMainLooper()).post {
+                if (instance === service) service.applyTransferSpeed(payloadJson)
+            }
+            return true
+        }
+
+        /** Matches the web UI's `formatSpeed` so both devices show the same number. */
+        private fun formatSpeed(bytesPerSec: Double): String {
+            if (bytesPerSec.isNaN() || bytesPerSec.isInfinite() || bytesPerSec <= 0.0) {
+                return "0 B/s"
+            }
+            val units = arrayOf("B", "KB", "MB", "GB", "TB")
+            val exponent = floor(log(bytesPerSec, 1024.0)).toInt()
+                .coerceIn(0, units.lastIndex)
+            val value = bytesPerSec / 1024.0.pow(exponent)
+            val number = when {
+                value >= 100.0 || exponent == 0 -> String.format(Locale.US, "%.0f", value)
+                value >= 10.0 -> String.format(Locale.US, "%.1f", value)
+                else -> String.format(Locale.US, "%.2f", value)
+            }
+            return "$number ${units[exponent]}/s"
+        }
     }
 }

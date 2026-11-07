@@ -5,6 +5,7 @@ import {
   forgetNativeComputer,
   installNativeShellBridge,
   isNativeShell,
+  publishNativeTransferSpeed,
   saveBlobToDevice,
   scanPairingCode,
   setNativeTransferActive,
@@ -24,8 +25,13 @@ class FakeBridge implements AirBridgeNativeBridge {
   scanQr: () => boolean = () => true;
   forgetComputer: () => boolean = () => true;
   transferStates: boolean[] = [];
+  speedPayloads: string[] = [];
   setTransferActive(active: boolean): boolean {
     this.transferStates.push(active);
+    return true;
+  }
+  updateTransferSpeed(payloadJson: string): boolean {
+    this.speedPayloads.push(payloadJson);
     return true;
   }
   private open = new Map<number, { name: string; mimeType: string; chunks: Uint8Array[] }>();
@@ -135,6 +141,71 @@ describe("native shell detection", () => {
     expect(setNativeTransferActive(true)).toBe(true);
     expect(setNativeTransferActive(false)).toBe(true);
     expect(bridge.transferStates).toEqual([true, false]);
+  });
+
+  it("publishes Upload/Download speed to the Android notification", () => {
+    const bridge = new FakeBridge();
+    (window as { AirBridgeAndroid?: unknown }).AirBridgeAndroid = bridge;
+    const upload = {
+      direction: "outgoing" as const,
+      status: "transferring",
+      speedBytesPerSec: 12 * 1024 * 1024,
+      transferredBytes: 512,
+      totalBytes: 1024,
+      etaSeconds: 3,
+    };
+    const download = {
+      ...upload,
+      direction: "incoming" as const,
+      speedBytesPerSec: 4 * 1024 * 1024,
+      etaSeconds: null,
+    };
+
+    expect(publishNativeTransferSpeed(upload)).toBe(true);
+    expect(publishNativeTransferSpeed(download)).toBe(true);
+    expect(publishNativeTransferSpeed(null)).toBe(true);
+
+    const payloads = bridge.speedPayloads.map((item) => JSON.parse(item));
+    expect(payloads[0]).toEqual({
+      active: true,
+      direction: "upload",
+      speedBytesPerSec: 12 * 1024 * 1024,
+      transferredBytes: 512,
+      totalBytes: 1024,
+      etaSeconds: 3,
+    });
+    expect(payloads[1]).toMatchObject({
+      active: true,
+      direction: "download",
+      speedBytesPerSec: 4 * 1024 * 1024,
+      etaSeconds: null,
+    });
+    expect(payloads[2]).toEqual({ active: false });
+  });
+
+  it("accepts a speed-only bridge without clipboard/save methods", () => {
+    const updateTransferSpeed = vi.fn((_payload: string) => true);
+    (window as { AirBridgeAndroid?: unknown }).AirBridgeAndroid = {
+      updateTransferSpeed,
+    };
+    expect(publishNativeTransferSpeed({
+      direction: "incoming",
+      speedBytesPerSec: 2048,
+    })).toBe(true);
+    expect(updateTransferSpeed).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(updateTransferSpeed.mock.calls[0][0])).toMatchObject({
+      active: true,
+      direction: "download",
+      speedBytesPerSec: 2048,
+    });
+  });
+
+  it("does not publish native speed in a plain browser", () => {
+    expect(publishNativeTransferSpeed({
+      direction: "outgoing",
+      status: "transferring",
+      speedBytesPerSec: 1024,
+    })).toBe(false);
   });
 
   it("reports a camera-less phone as unable to scan", () => {
