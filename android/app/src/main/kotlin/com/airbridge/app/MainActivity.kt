@@ -5,6 +5,8 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -13,7 +15,8 @@ import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowInsets
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.RenderProcessGoneDetail
@@ -57,6 +60,8 @@ class MainActivity : Activity() {
     private var pendingScanAfterPermission = false
     @Volatile private var transferActive = false
     private var connectedLink: PairingLink? = null
+    private var darkTheme = false
+    private var backInvokedCallback: Any? = null
     private lateinit var bridge: ShellBridge
 
     /** Computers announced over mDNS, keyed by base address. */
@@ -65,7 +70,9 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = Prefs(this)
+        configureEdgeToEdge()
         buildContentView()
+        registerSystemBackCallback()
         startDiscovery()
         if (prefs.connectionContinuity && prefs.pairingLink() != null) startConnectionService()
 
@@ -107,17 +114,71 @@ class MainActivity : Activity() {
             (webView.parent as? ViewGroup)?.removeView(webView)
             webView.destroy()
         }
+        unregisterSystemBackCallback()
         super.onDestroy()
     }
 
     // Framework-only activity: no AndroidX back dispatcher is available.
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
+        if (!handleSystemBack()) {
+            super.onBackPressed()
+        }
+    }
+
+    /**
+     * Android 13+ delivers Back through OnBackInvokedCallback when the app opts
+     * in; older versions still use onBackPressed. Both routes share this logic:
+     * scanner → file chooser → in-page sheets → WebView history → exit.
+     */
+    private fun registerSystemBackCallback() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val callback = OnBackInvokedCallback { handleSystemBack(); Unit }
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                callback,
+            )
+            backInvokedCallback = callback
+        }
+    }
+
+    private fun unregisterSystemBackCallback() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val callback = backInvokedCallback as? OnBackInvokedCallback ?: return
+            onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback)
+            backInvokedCallback = null
+        }
+    }
+
+    /** Returns true when Back was consumed (or is being handled asynchronously). */
+    private fun handleSystemBack(): Boolean {
         if (scanner != null) {
             closeScanner()
-            return
+            return true
         }
-        super.onBackPressed()
+        if (pendingChooser != null) {
+            pendingChooser?.onReceiveValue(null)
+            pendingChooser = null
+            return true
+        }
+        if (!::webView.isInitialized) {
+            finish()
+            return true
+        }
+        webView.evaluateJavascript(
+            "(function(){return typeof window.__airbridgeSystemBack === 'function' && window.__airbridgeSystemBack() === true ? 'true' : 'false'})()",
+        ) { result ->
+            val handled = result?.trim('"') == "true"
+            runOnUiThread {
+                if (handled) return@runOnUiThread
+                if (webView.canGoBack()) {
+                    webView.goBack()
+                } else {
+                    finish()
+                }
+            }
+        }
+        return true
     }
 
     // ------------------------------------------------------------------ webview
@@ -156,7 +217,6 @@ class MainActivity : Activity() {
                 }
             }
         }
-        installSystemBarInsets(webView)
         attachWebView(webView)
         root.addView(
             webView,
@@ -166,11 +226,17 @@ class MainActivity : Activity() {
             ),
         )
         setContentView(root)
+        applySystemBarColors(darkTheme)
+        applySystemBarAppearance(darkTheme)
+        installSystemBarInsets(webView)
     }
 
     private inner class ShellWebViewClient : WebViewClient() {
         override fun onPageFinished(view: WebView, url: String) {
             super.onPageFinished(view, url)
+            // Top-level loads replace the shell rather than being user
+            // navigation; keep Back from returning to a stale connect page.
+            view.clearHistory()
             publishAccessibilityServiceState()
         }
 
@@ -348,23 +414,74 @@ class MainActivity : Activity() {
         toast("Connecting to ${link.host}")
     }
 
-    /** Keep WebView content below the status bar and above the navigation bar. */
+    /**
+     * Android 15+ enforces edge-to-edge display and WebView children can get
+     * all-zero insets. Listen on the decor view, which always sees the real
+     * values, then pad the WebView and scanner chrome manually.
+     */
     private fun installSystemBarInsets(view: View) {
-        view.setOnApplyWindowInsetsListener { target, insets ->
-            val (top, bottom) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val bars = insets.getInsets(WindowInsets.Type.systemBars())
-                bars.top to bars.bottom
-            } else {
-                legacySystemBarInsets(insets)
-            }
-            target.setPadding(target.paddingLeft, top, target.paddingRight, bottom)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        window.decorView.setOnApplyWindowInsetsListener { _, insets ->
+            val bars = insets.systemBarInsets()
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            scanner?.applyChromeInsets(bars)
             insets
+        }
+        view.post { window.decorView.requestApplyInsets() }
+    }
+
+    /** Opt into edge-to-edge on API 30-34; API 35+ already enforces it. */
+    private fun configureEdgeToEdge() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            @Suppress("DEPRECATION")
+            window.setDecorFitsSystemWindows(false)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
+        darkTheme = isSystemDarkTheme()
+        applySystemBarColors(darkTheme)
+    }
+
+    private fun isSystemDarkTheme(): Boolean =
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+
+    /** Fill the system-bar areas with the web app's background colour. */
+    private fun applySystemBarColors(dark: Boolean) {
+        val color = if (dark) 0xFF111111.toInt() else 0xFFFFFFFF.toInt()
+        // API 35+ ignores statusBarColor/navigationBarColor; the decor view
+        // background is what shows behind the padded WebView content.
+        window.decorView.setBackgroundColor(color)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            window.statusBarColor = Color.TRANSPARENT
+            window.navigationBarColor = Color.TRANSPARENT
+        } else {
+            window.statusBarColor = color
+            window.navigationBarColor = color
         }
     }
 
-    @Suppress("DEPRECATION")
-    private fun legacySystemBarInsets(insets: WindowInsets): Pair<Int, Int> =
-        insets.systemWindowInsetTop to insets.systemWindowInsetBottom
+    /** Keep status/navigation-bar icons legible in light and dark themes. */
+    private fun applySystemBarAppearance(dark: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            @Suppress("DEPRECATION")
+            val lightFlags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
+                View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+            val decor = window.decorView
+            val flags = decor.systemUiVisibility and lightFlags.inv()
+            decor.systemUiVisibility = if (dark) flags else flags or lightFlags
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val controller = window.decorView.windowInsetsController
+            val appearance = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+            controller?.setSystemBarsAppearance(
+                if (dark) 0 else appearance,
+                appearance,
+            )
+        }
+    }
 
     /** Push the OS accessibility-service state to the settings UI. */
     private fun publishAccessibilityServiceState() {
@@ -383,26 +500,9 @@ class MainActivity : Activity() {
     /** Match the system bars to the web app's light/dark theme. */
     fun setDarkTheme(enabled: Boolean): Boolean {
         runOnUiThread {
-            val color = if (enabled) 0xFF111111.toInt() else 0xFFFFFFFF.toInt()
-            window.statusBarColor = color
-            window.navigationBarColor = color
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                @Suppress("DEPRECATION")
-                val lightFlags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
-                    View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
-                val decor = window.decorView
-                val flags = decor.systemUiVisibility and lightFlags.inv()
-                decor.systemUiVisibility = if (enabled) flags else flags or lightFlags
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val controller = window.insetsController
-                val appearance = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
-                    android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
-                controller?.setSystemBarsAppearance(
-                    if (enabled) 0 else appearance,
-                    appearance,
-                )
-            }
+            darkTheme = enabled
+            applySystemBarColors(enabled)
+            applySystemBarAppearance(enabled)
         }
         return true
     }
@@ -442,6 +542,7 @@ class MainActivity : Activity() {
                 FrameLayout.LayoutParams.MATCH_PARENT,
             ),
         )
+        window.decorView.requestApplyInsets()
         view.start()
     }
 

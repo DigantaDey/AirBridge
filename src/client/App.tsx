@@ -611,6 +611,36 @@ export function App() {
   const [dragging, setDragging] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  // Let Android's system Back button/gesture close the topmost in-page layer
+  // before the shell falls back to WebView history or exits. The same handler
+  // powers the Escape key in desktop browsers.
+  useEffect(() => {
+    const closeTopmostLayer = (): boolean => {
+      if (folderPickerOpen) { setFolderPickerOpen(false); return true; }
+      if (clipboardOpen) { setClipboardOpen(false); return true; }
+      if (activeIncomingOffer) {
+        clientRef.current?.declineIncomingTransfer(activeIncomingOffer.transferId);
+        return true;
+      }
+      if (pairingOpen) { setPairingOpen(false); return true; }
+      if (downloadsOpen) { setDownloadsOpen(false); return true; }
+      if (recentOpen) { setRecentOpen(false); return true; }
+      if (settingsOpen) { setSettingsOpen(false); return true; }
+      if (showAdvanced) { setShowAdvanced(false); return true; }
+      if (toast) { setToast(null); return true; }
+      return false;
+    };
+    window.__airbridgeSystemBack = closeTopmostLayer;
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && closeTopmostLayer()) event.preventDefault();
+    };
+    window.addEventListener("keydown", onEscape);
+    return () => {
+      delete window.__airbridgeSystemBack;
+      window.removeEventListener("keydown", onEscape);
+    };
+  }, [folderPickerOpen, clipboardOpen, activeIncomingOffer, pairingOpen, downloadsOpen, recentOpen, settingsOpen, showAdvanced, toast]);
+
   // Android reports the OS Accessibility Service state after the page loads and
   // whenever the user returns from Android Settings. Keep the opt-in UI honest.
   useEffect(() => {
@@ -697,19 +727,19 @@ export function App() {
       <header className="utility-header">
         <div className="brand"><span className="brand-mark">A</span><span>AirBridge</span></div>
         <div className="header-actions">
-          <button className="quiet-button" aria-label="Clipboard" onClick={() => { setClipboardPeerId(null); setClipboardPrefill(""); setClipboardOpen(true); }}>
+          <button type="button" className="quiet-button" aria-label="Clipboard" onClick={() => { setClipboardPeerId(null); setClipboardPrefill(""); setClipboardOpen(true); }}>
             Clipboard{snap.clipboardItems.length > 0 && <span className="header-count"> ({snap.clipboardItems.length})</span>}
           </button>
-          <button className="quiet-button" aria-label="Recent transfers" onClick={() => setRecentOpen(true)}>
+          <button type="button" className="quiet-button" aria-label="Recent transfers" onClick={() => setRecentOpen(true)}>
             Recent{recentTransfers.length > 0 && <span className="header-count"> ({recentTransfers.length})</span>}
           </button>
           {receivedFolder && (
-            <button className="icon-button folder-locate-button" aria-label="Open received files folder" title={`Open received files folder (${receivedFolder})`} onClick={() => openReceivedFolder()}>
+            <button type="button" className="icon-button folder-locate-button" aria-label="Open received files folder" title={`Open received files folder (${receivedFolder})`} onClick={() => openReceivedFolder()}>
               <FolderOpen size={16} aria-hidden="true" />
             </button>
           )}
-          <button className="icon-button" aria-label="Downloads" title="Download AirBridge for another device" onClick={() => setDownloadsOpen(true)}>Downloads</button>
-            <button className="icon-button" aria-label="Settings" title="Settings" onClick={() => setSettingsOpen(true)}>Settings</button>
+          <button type="button" className="icon-button" aria-label="Downloads" title="Download AirBridge for another device" onClick={() => setDownloadsOpen(true)}>Downloads</button>
+          <button type="button" className="icon-button" aria-label="Settings" title="Settings" onClick={() => setSettingsOpen(true)}>Settings</button>
         </div>
       </header>
       <main className="utility-main">

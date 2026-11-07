@@ -18,8 +18,12 @@
     <style>
       :root {
         color-scheme: light;
+        --ab-gutter: 16px;
+        --ab-gutter: clamp(12px, 4vw, 24px);
         --ab-safe-top: env(safe-area-inset-top, 0px);
+        --ab-safe-right: env(safe-area-inset-right, 0px);
         --ab-safe-bottom: env(safe-area-inset-bottom, 0px);
+        --ab-safe-left: env(safe-area-inset-left, 0px);
         --ab-bg: #fff;
         --ab-text: #111;
         --ab-secondary: #454545;
@@ -29,7 +33,7 @@
         --ab-subtle: #f7f7f7;
         --ab-danger: #b91c1c;
       }
-      html.ab-native-shell { --ab-safe-top: 0px; --ab-safe-bottom: 0px; }
+      html.ab-native-shell { --ab-safe-top: 0px; --ab-safe-right: 0px; --ab-safe-bottom: 0px; --ab-safe-left: 0px; }
       @media (prefers-color-scheme: dark) {
         :root {
           color-scheme: dark;
@@ -44,6 +48,7 @@
         }
       }
       * { box-sizing: border-box; }
+      html { max-width: 100%; overflow-x: hidden; }
       body {
         margin: 0;
         max-width: 100%;
@@ -54,7 +59,8 @@
         letter-spacing: 0;
         -webkit-font-smoothing: antialiased;
       }
-      button, input { font: inherit; }
+      button, input, textarea, select { font: inherit; max-width: 100%; }
+      img, svg, canvas { max-width: 100%; }
       button { cursor: pointer; }
       button:focus-visible, input:focus-visible { outline: 2px solid var(--ab-text); outline-offset: 3px; }
       .utility-shell { min-height: 100vh; }
@@ -62,12 +68,16 @@
         height: calc(62px + var(--ab-safe-top));
         border-bottom: 1px solid var(--ab-border);
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         justify-content: space-between;
         gap: 10px;
+        min-width: 0;
         padding: var(--ab-safe-top) 18px 0;
+        padding-left: calc(var(--ab-gutter) + var(--ab-safe-left));
+        padding-right: calc(var(--ab-gutter) + var(--ab-safe-right));
       }
-      .brand { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 650; letter-spacing: -0.02em; }
+      .brand { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 14px; font-weight: 650; letter-spacing: -0.02em; }
       .brand-mark {
         width: 23px;
         height: 23px;
@@ -77,10 +87,10 @@
         place-items: center;
         font-size: 12px;
       }
-      .utility-main { width: min(100% - 36px, 680px); margin: 0 auto; padding: 30px 0 28px; }
-      .device-heading { display: flex; flex-direction: column; gap: 10px; margin-bottom: 27px; }
+      .utility-main { width: calc(100% - 36px); max-width: 680px; width: min(calc(100% - var(--ab-gutter) - var(--ab-gutter)), 680px); margin: 0 auto; padding: 30px 0 28px; padding: clamp(24px, 6vw, 30px) 0 clamp(24px, 5vw, 28px); }
+      .device-heading { display: flex; flex-direction: column; gap: 10px; min-width: 0; margin-bottom: 27px; }
       .section-kicker { color: var(--ab-muted); font-size: 10px; font-weight: 600; letter-spacing: 0.11em; margin: 0 0 5px; }
-      h1 { font-size: 23px; line-height: 1.2; letter-spacing: -0.045em; font-weight: 550; margin: 0; }
+      h1 { font-size: clamp(21px, 6vw, 23px); line-height: 1.2; letter-spacing: -0.045em; font-weight: 550; margin: 0; overflow-wrap: anywhere; }
       .service-state { display: flex; align-items: center; gap: 8px; color: var(--ab-secondary); font-size: 12px; }
       .state-symbol { font-size: 10px; color: var(--ab-text); }
       .recovery-note {
@@ -89,20 +99,24 @@
         padding: 13px 15px;
         margin: 0 0 26px;
         display: flex;
+        flex-wrap: wrap;
         flex-direction: column;
         gap: 13px;
+        min-width: 0;
       }
       .recovery-note strong { font-weight: 600; font-size: 13px; }
       .recovery-note p { color: var(--ab-muted); margin: 3px 0 0; font-size: 12px; }
-      .section-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 11px; margin-top: 26px; }
+      .section-title { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; min-width: 0; margin-bottom: 11px; margin-top: 26px; }
       .section-title h2 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.02em; }
       .device-list { list-style: none; padding: 0; margin: 0; border-top: 1px solid var(--ab-border); }
       .device-row {
         border-bottom: 1px solid var(--ab-border);
         min-height: 65px;
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         gap: 12px;
+        min-width: 0;
       }
       .device-glyph {
         width: 32px;
@@ -117,21 +131,23 @@
       }
       .device-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; }
       .device-copy strong { font-weight: 550; font-size: 13px; }
-      .device-copy small { color: var(--ab-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .device-copy small { color: var(--ab-muted); font-size: 11px; overflow-wrap: anywhere; white-space: normal; }
       .send-device-button, .secondary-button {
         border: 1px solid var(--ab-text);
         border-radius: 6px;
         background: var(--ab-text);
         color: var(--ab-bg);
+        flex-shrink: 0;
         padding: 7px 15px;
         font-size: 12px;
-        white-space: nowrap;
+        white-space: normal;
+        overflow-wrap: anywhere;
       }
       .secondary-button { background: transparent; color: var(--ab-text); }
       .empty-devices { border: 1px solid var(--ab-border); padding: 18px; }
       .empty-devices p { margin: 0 0 3px; font-weight: 550; }
       .empty-devices span { display: block; color: var(--ab-muted); font-size: 12px; margin-bottom: 14px; }
-      .address-form { display: flex; gap: 8px; margin-top: 11px; }
+      .address-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 11px; }
       .address-form input {
         flex: 1;
         min-width: 0;
@@ -143,7 +159,7 @@
       }
       .error { color: var(--ab-danger); font-size: 12px; margin: 10px 0 0; }
       .utility-footer {
-        padding-bottom: var(--ab-safe-bottom);
+        padding-bottom: calc(8px + var(--ab-safe-bottom));
         margin-top: 38px;
         padding-top: 13px;
         border-top: 1px solid var(--ab-border);
@@ -162,12 +178,17 @@
       }
       .quiet-button:hover, .text-button:hover { color: var(--ab-text); text-decoration: underline; }
       [hidden] { display: none !important; }
+      @media (max-width: 480px) {
+        .utility-header { padding-left: calc(var(--ab-gutter) + var(--ab-safe-left)); padding-right: calc(var(--ab-gutter) + var(--ab-safe-right)); }
+        .utility-main { width: calc(100% - 24px); }
+        .device-glyph { flex-shrink: 0; }
+        .address-form { flex-direction: column; }
+        .address-form button { width: 100%; }
+      }
       @media (max-width: 420px) {
-        .utility-header { padding-left: 12px; padding-right: 12px; }
         .brand { font-size: 13px; }
         .brand-mark { width: 21px; height: 21px; }
         #scan-header { font-size: 12px; padding: 6px 0; }
-        .address-form { flex-direction: column; }
       }
     </style>
   </head>
@@ -359,8 +380,24 @@
         refresh();
         if (bridge) setInterval(refresh, 1500);
 
+        // Android's system Back gesture first asks the active page to dismiss
+        // its own transient UI. On the connect screen that means clearing an
+        // inline error; the native shell handles the QR scanner and exit.
+        window.__airbridgeSystemBack = function () {
+          if (!errorEl.hidden) {
+            showError("");
+            return true;
+          }
+          return false;
+        };
+
         // Exposed for tests/connect-screen.test.ts; harmless in the app.
-        window.AirBridgeConnect = { refresh: refresh, connect: connect, scan: scan };
+        window.AirBridgeConnect = {
+          refresh: refresh,
+          connect: connect,
+          scan: scan,
+          back: function () { return window.__airbridgeSystemBack(); }
+        };
       })();
     </script>
   </body>
