@@ -42,7 +42,7 @@ describe("responsive Android web UI", () => {
     expect(css).toContain("overscroll-behavior: contain");
   });
 
-  it("applies decor-view insets to both the WebView and QR scanner", () => {
+  it("applies decor-view insets to the WebView container and QR scanner", () => {
     const activity = read(
       "android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt",
     );
@@ -50,10 +50,16 @@ describe("responsive Android web UI", () => {
     expect(activity).toContain("setDecorFitsSystemWindows(false)");
     expect(activity).toContain("isNavigationBarContrastEnforced = false");
     expect(activity).toContain("Color.TRANSPARENT");
+    expect(activity).toContain("contentFrame = FrameLayout(this)");
+    expect(activity).toContain("installSystemBarInsets(contentFrame)");
+    expect(activity).toContain("WindowInsets.CONSUMED");
     expect(activity).toContain("scanner?.applyChromeInsets(bars)");
     expect(activity).toContain("insets.systemBarInsets()");
+    expect(activity).toContain("injectNativeShellShim(view)");
+    expect(activity).toContain("onPageCommitVisible(view: WebView, url: String)");
     expect(activity).toContain("registerSystemBackCallback()");
     expect(activity).toContain("__airbridgeSystemBack");
+    expect(activity).not.toContain("installSystemBarInsets(webView)");
 
     const scanner = read(
       "android/app/src/main/kotlin/com/airbridge/app/QrScannerView.kt",
@@ -69,7 +75,7 @@ describe("responsive Android web UI", () => {
     expect(helper).toContain("data class SystemBarInsets");
     expect(helper).toContain("WindowInsets.Type.systemBars()");
     expect(helper).toContain("WindowInsets.Type.displayCutout()");
-    expect(helper).toContain("WindowInsets.Type.ime()");
+    expect(helper).not.toContain("WindowInsets.Type.ime()");
   });
 
   it("keeps the unpaired connect screen responsive", () => {

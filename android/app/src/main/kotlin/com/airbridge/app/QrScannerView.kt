@@ -83,6 +83,13 @@ class QrScannerView(context: Context) : FrameLayout(context) {
     private var wanted = false
     @Volatile private var delivered = false
 
+    // Optimization: Reuse byte array buffer to eliminate per-frame heap allocations & GC churn
+    private var yuvBuffer: ByteArray? = null
+
+    // Performance metrics tracking
+    @Volatile private var frameCount = 0L
+    @Volatile private var totalDecodeTimeNs = 0L
+
     init {
         setBackgroundColor(Color.BLACK)
         addView(previewHost, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -352,8 +359,9 @@ class QrScannerView(context: Context) : FrameLayout(context) {
         val analysisSizes = map.getOutputSizes(ImageFormat.YUV_420_888)?.toList().orEmpty()
         if (analysisSizes.isEmpty()) return null
         val analysisKeys = analysisSizes.map { it.width to it.height }.toSet()
+        // Optimization: Limit analysis resolution to <= 1280 (e.g. 720p) to reduce CPU decoding workload per frame
         val shared = previewSizes.filter {
-            (it.width to it.height) in analysisKeys && it.width <= 1920 && it.height <= 1920
+            (it.width to it.height) in analysisKeys && it.width <= 1280 && it.height <= 1280
         }
         val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
         val displayDegrees = displayRotationDegrees()
@@ -366,7 +374,7 @@ class QrScannerView(context: Context) : FrameLayout(context) {
         }
         val size = (aspectMatched.ifEmpty { shared })
             .maxByOrNull { it.width.toLong() * it.height }
-            ?: analysisSizes.filter { it.width <= 1920 }
+            ?: analysisSizes.filter { it.width <= 1280 }
                 .maxByOrNull { it.width.toLong() * it.height }
             ?: analysisSizes.first()
         return CameraSpec(cameraId, size, sensorOrientation, displayDegrees)
@@ -487,22 +495,60 @@ class QrScannerView(context: Context) : FrameLayout(context) {
     }
 
     private fun decode(image: Image): String? {
+        val startTime = System.nanoTime()
         val plane = image.planes.firstOrNull() ?: return null
         if (plane.pixelStride != 1) return null
         val rowStride = plane.rowStride
         val height = image.height
         val width = image.width
         if (rowStride < width) return null
-        val data = ByteArray(rowStride * height)
+
+        val requiredSize = rowStride * height
+        // Optimization: Reuse byte array buffer to eliminate per-frame heap allocations & GC churn
+        var data = yuvBuffer
+        if (data == null || data.size < requiredSize) {
+            data = ByteArray(requiredSize)
+            yuvBuffer = data
+        }
+
         val buffer = plane.buffer
         val read = min(buffer.remaining(), data.size)
         buffer.get(data, 0, read)
-        val luminance = PlanarYUVLuminanceSource(data, rowStride, height, 0, 0, width, height, false)
+
+        // Optimization: Crop luminance source to central viewfinder region (~66% of frame)
+        // to avoid binarizing and scanning unneeded outer pixels
+        val cropSide = min(width, height) * 66 / 100
+        val cropLeft = (width - cropSide) / 2
+        val cropTop = (height - cropSide) / 2
+        val luminance = PlanarYUVLuminanceSource(
+            data, rowStride, height,
+            cropLeft, cropTop, cropSide, cropSide,
+            false
+        )
+
         return try {
-            zxing.decodeWithState(BinaryBitmap(HybridBinarizer(luminance))).text
+            val result = zxing.decodeWithState(BinaryBitmap(HybridBinarizer(luminance))).text
+            val elapsedNs = System.nanoTime() - startTime
+            frameCount++
+            totalDecodeTimeNs += elapsedNs
+            Log.d(
+                TAG,
+                "QR decoded in %.2f ms after %d frames (avg %.2f ms/frame)".format(
+                    elapsedNs / 1_000_000.0,
+                    frameCount,
+                    (totalDecodeTimeNs / 1_000_000.0) / frameCount,
+                ),
+            )
+            result
         } catch (_: NotFoundException) {
+            val elapsedNs = System.nanoTime() - startTime
+            frameCount++
+            totalDecodeTimeNs += elapsedNs
             null
         } catch (_: Exception) {
+            val elapsedNs = System.nanoTime() - startTime
+            frameCount++
+            totalDecodeTimeNs += elapsedNs
             null
         } finally {
             zxing.reset()

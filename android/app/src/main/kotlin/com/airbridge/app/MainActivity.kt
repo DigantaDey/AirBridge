@@ -15,6 +15,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
 import android.webkit.ValueCallback
@@ -38,8 +39,9 @@ data class NearbyHost(val name: String, val address: String)
  * The Android app *is* the web app.
  *
  * The desktop server already ships this exact UI, so the phone renders the same
- * page in a WebView instead of re-implementing it: every screen, feature and
- * fix lands on both devices at once. [LoopbackRelay] puts that page on a
+ * page in a WebView instead of re-implementing it. The shell injects a small
+ * compatibility shim because the desktop binary can be an older release than
+ * the APK. [LoopbackRelay] puts that page on a
  * `http://127.0.0.1:<port>` origin, which is why the browser APIs the UI needs
  * (WebCrypto, storage) are available without trusting a certificate.
  *
@@ -51,7 +53,10 @@ data class NearbyHost(val name: String, val address: String)
 class MainActivity : Activity() {
 
     private lateinit var prefs: Prefs
+    /** Full-screen host: holds the padded WebView container and the scanner overlay. */
     private lateinit var root: FrameLayout
+    /** Physically positions the WebView clear of status/navigation bars and cutouts. */
+    private lateinit var contentFrame: FrameLayout
     private lateinit var webView: WebView
     private var relay: LoopbackRelay? = null
     private var discovery: ServerDiscovery? = null
@@ -62,6 +67,10 @@ class MainActivity : Activity() {
     private var connectedLink: PairingLink? = null
     private var darkTheme = false
     private var backInvokedCallback: Any? = null
+    private var lastChromeInsets = SystemBarInsets(0, 0, 0, 0)
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var backFallback: Runnable? = null
+    private var nativeShellScript: String? = null
     private lateinit var bridge: ShellBridge
 
     /** Computers announced over mDNS, keyed by base address. */
@@ -114,6 +123,8 @@ class MainActivity : Activity() {
             (webView.parent as? ViewGroup)?.removeView(webView)
             webView.destroy()
         }
+        backFallback?.let { mainHandler.removeCallbacks(it) }
+        backFallback = null
         unregisterSystemBackCallback()
         super.onDestroy()
     }
@@ -152,6 +163,7 @@ class MainActivity : Activity() {
 
     /** Returns true when Back was consumed (or is being handled asynchronously). */
     private fun handleSystemBack(): Boolean {
+        if (isFinishing || isDestroyed) return true
         if (scanner != null) {
             closeScanner()
             return true
@@ -165,18 +177,38 @@ class MainActivity : Activity() {
             finish()
             return true
         }
-        webView.evaluateJavascript(
-            "(function(){return typeof window.__airbridgeSystemBack === 'function' && window.__airbridgeSystemBack() === true ? 'true' : 'false'})()",
-        ) { result ->
-            val handled = result?.trim('"') == "true"
-            runOnUiThread {
-                if (handled) return@runOnUiThread
-                if (webView.canGoBack()) {
-                    webView.goBack()
-                } else {
-                    finish()
-                }
+
+        fun goBackOrFinish() {
+            if (isFinishing || isDestroyed) return
+            if (::webView.isInitialized && webView.canGoBack()) {
+                webView.goBack()
+            } else {
+                finish()
             }
+        }
+
+        val script = "(function(){try{" +
+            "return typeof window.__airbridgeSystemBack === 'function' && " +
+            "window.__airbridgeSystemBack() === true ? 'true' : 'false'" +
+            "}catch(e){return 'false'}})()"
+        var responded = false
+        val fallback = Runnable {
+            if (responded || isFinishing || isDestroyed) return@Runnable
+            responded = true
+            backFallback = null
+            goBackOrFinish()
+        }
+        backFallback?.let { mainHandler.removeCallbacks(it) }
+        backFallback = fallback
+        mainHandler.postDelayed(fallback, BACK_CALLBACK_TIMEOUT_MS)
+
+        webView.evaluateJavascript(script) { result ->
+            if (responded || isFinishing || isDestroyed) return@evaluateJavascript
+            responded = true
+            mainHandler.removeCallbacks(fallback)
+            backFallback = null
+            val handled = result?.trim()?.trim('\"')?.equals("true", ignoreCase = true) == true
+            if (!handled) goBackOrFinish()
         }
         return true
     }
@@ -185,11 +217,19 @@ class MainActivity : Activity() {
 
     private fun buildContentView() {
         root = FrameLayout(this)
+        contentFrame = FrameLayout(this)
+        // Chromium ignores View.setPadding() on WebView itself. Pad a plain
+        // parent FrameLayout instead so its Chromium surface is physically
+        // positioned below the status bar and above the navigation bar.
+        val fallback = fallbackSystemBarInsets()
+        lastChromeInsets = fallback
+        contentFrame.setPadding(fallback.left, fallback.top, fallback.right, fallback.bottom)
+
         webView = WebView(this).apply {
             setBackgroundColor(0xFFFFFFFF.toInt())
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
-            settings.useWideViewPort = true
+            settings.useWideViewPort = false
             // An overflowing header used to make WebView zoom the whole page
             // out to fit its wider layout, shrinking/clipping every control.
             settings.loadWithOverviewMode = false
@@ -218,8 +258,15 @@ class MainActivity : Activity() {
             }
         }
         attachWebView(webView)
-        root.addView(
+        contentFrame.addView(
             webView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        root.addView(
+            contentFrame,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -228,12 +275,20 @@ class MainActivity : Activity() {
         setContentView(root)
         applySystemBarColors(darkTheme)
         applySystemBarAppearance(darkTheme)
-        installSystemBarInsets(webView)
+        installSystemBarInsets(contentFrame)
     }
 
     private inner class ShellWebViewClient : WebViewClient() {
+        /** Inject as soon as the new document exists, before its scripts run. */
+        override fun onPageCommitVisible(view: WebView, url: String) {
+            super.onPageCommitVisible(view, url)
+            injectNativeShellShim(view)
+        }
+
         override fun onPageFinished(view: WebView, url: String) {
             super.onPageFinished(view, url)
+            // Covers loadDataWithBaseURL() and any late/redirected document.
+            injectNativeShellShim(view)
             // Top-level loads replace the shell rather than being user
             // navigation; keep Back from returning to a stale connect page.
             view.clearHistory()
@@ -414,20 +469,63 @@ class MainActivity : Activity() {
         toast("Connecting to ${link.host}")
     }
 
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
+
+    /** Reserve the status bar before the first WindowInsets dispatch arrives. */
+    private fun fallbackSystemBarInsets(): SystemBarInsets {
+        fun dimension(name: String, fallbackDp: Int): Int {
+            val id = resources.getIdentifier(name, "dimen", "android")
+            return if (id > 0) {
+                try {
+                    resources.getDimensionPixelSize(id)
+                } catch (e: Exception) {
+                    dp(fallbackDp)
+                }
+            } else {
+                dp(fallbackDp)
+            }
+        }
+        val top = dimension("status_bar_height", 24)
+        val bottom = dimension("navigation_bar_height", 0)
+        return SystemBarInsets(0, top, 0, bottom)
+    }
+
     /**
-     * Android 15+ enforces edge-to-edge display and WebView children can get
-     * all-zero insets. Listen on the decor view, which always sees the real
-     * values, then pad the WebView and scanner chrome manually.
+     * The WebView's Chromium surface ignores View.setPadding(), so inset padding
+     * is applied to a plain parent FrameLayout instead. Android 15+ can also
+     * dispatch all-zero insets to WebView children; the decor view always sees
+     * the real values. Consuming them here prevents CSS safe-area variables from
+     * adding a second copy of the same space.
      */
-    private fun installSystemBarInsets(view: View) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+    private fun installSystemBarInsets(view: FrameLayout) {
         window.decorView.setOnApplyWindowInsetsListener { _, insets ->
             val bars = insets.systemBarInsets()
+            lastChromeInsets = bars
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             scanner?.applyChromeInsets(bars)
-            insets
+            WindowInsets.CONSUMED
         }
         view.post { window.decorView.requestApplyInsets() }
+    }
+
+    /**
+     * The paired UI is served by the desktop binary. Inject a small shim so the
+     * phone still gets native-shell CSS and Back handling with an older desktop
+     * build; the injected script is idempotent and preserves a page handler.
+     */
+    private fun injectNativeShellShim(view: WebView) {
+        if (nativeShellScript == null) {
+            nativeShellScript = try {
+                assets.open(NATIVE_SHELL_ASSET).bufferedReader().use { it.readText() }
+            } catch (e: Exception) {
+                Log.w(TAG, "native shell shim missing: ${e.message}")
+                ""
+            }
+        }
+        val script = nativeShellScript.orEmpty()
+        if (script.isBlank()) return
+        view.evaluateJavascript(script, null)
     }
 
     /** Opt into edge-to-edge on API 30-34; API 35+ already enforces it. */
@@ -450,9 +548,12 @@ class MainActivity : Activity() {
     /** Fill the system-bar areas with the web app's background colour. */
     private fun applySystemBarColors(dark: Boolean) {
         val color = if (dark) 0xFF111111.toInt() else 0xFFFFFFFF.toInt()
-        // API 35+ ignores statusBarColor/navigationBarColor; the decor view
-        // background is what shows behind the padded WebView content.
+        // API 35+ ignores statusBarColor/navigationBarColor; the decor/root
+        // backgrounds are what shows behind the padded WebView container.
         window.decorView.setBackgroundColor(color)
+        if (::root.isInitialized) root.setBackgroundColor(color)
+        if (::contentFrame.isInitialized) contentFrame.setBackgroundColor(color)
+        if (::webView.isInitialized) webView.setBackgroundColor(color)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
             window.statusBarColor = Color.TRANSPARENT
             window.navigationBarColor = Color.TRANSPARENT
@@ -535,6 +636,9 @@ class MainActivity : Activity() {
             }
         }
         scanner = view
+        // The scanner is a full-screen overlay on root; only its chrome needs
+        // the system-bar insets, not its camera preview.
+        view.applyChromeInsets(lastChromeInsets)
         root.addView(
             view,
             FrameLayout.LayoutParams(
@@ -697,10 +801,12 @@ class MainActivity : Activity() {
         private const val TAG = "AirBridgeMain"
         private const val BRIDGE_NAME = "AirBridgeAndroid"
         private const val CONNECT_ASSET = "shell/connect.html"
+        private const val NATIVE_SHELL_ASSET = "shell/native-shell-shim.js"
         private const val CONNECT_HOST = "shell.airbridge.local"
         private const val CONNECT_ORIGIN = "https://$CONNECT_HOST/"
         private const val REQ_PICK = 41
         private const val REQ_CAMERA = 42
+        private const val BACK_CALLBACK_TIMEOUT_MS = 250L
 
         @Volatile
         private var webViewRef: WeakReference<WebView>? = null
