@@ -12,6 +12,8 @@ describe("Android shell layout", () => {
     const activity = read("android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt");
     expect(activity).toContain("settings.loadWithOverviewMode = false");
     expect(activity).toContain("installSystemBarInsets(webView)");
+    expect(activity).toContain("window.decorView.setOnApplyWindowInsetsListener");
+    expect(activity).toContain("setDecorFitsSystemWindows(false)");
     expect(activity).toContain("fun setDarkTheme(enabled: Boolean)");
   });
 
@@ -20,13 +22,18 @@ describe("Android shell layout", () => {
     expect(scanner).toContain("class AspectPreview");
     expect(scanner).toContain("preview.aspectRatio = previewAspect(info)");
     expect(scanner).toContain("installChromeInsets()");
+    expect(scanner).toContain("fun applyChromeInsets(insets: SystemBarInsets)");
   });
 
   it("uses safe areas and keeps header actions reachable on narrow screens", () => {
     const css = read("src/client/index.css");
     expect(css).toContain("--ab-safe-top: env(safe-area-inset-top, 0px)");
     expect(css).toContain("html.ab-native-shell { --ab-safe-top: 0px;");
+    expect(css).toContain("@media (max-width: 920px)");
     expect(css).toContain("@media (max-width: 720px)");
+    expect(css).toContain("@media (max-width: 480px)");
+    expect(css).toContain("--ab-safe-left");
+    expect(css).toContain("--ab-gutter");
     expect(css).toContain(".header-count { display: none; }");
     expect(css).toContain(".settings-modal .advanced-toggle");
   });
@@ -35,7 +42,9 @@ describe("Android shell layout", () => {
     const connect = read("android/app/src/main/assets/shell/connect.html");
     expect(connect).toContain("--ab-safe-top: env(safe-area-inset-top, 0px)");
     expect(connect).toContain("html.ab-native-shell");
+    expect(connect).toContain("--ab-safe-left");
     expect(connect).toContain("@media (max-width: 420px)");
+    expect(connect).toContain("@media (max-width: 480px)");
   });
 
   it("keeps clipboard sharing alive without open app UIs", () => {
@@ -55,6 +64,16 @@ describe("Android shell layout", () => {
 
     const prefs = read("android/app/src/main/kotlin/com/airbridge/app/Prefs.kt");
     expect(prefs).toContain('getBoolean("connectionContinuity", true)');
+  });
+
+  it("reads system-bar, cutout and IME insets from the decor view", () => {
+    const helper = read(
+      "android/app/src/main/kotlin/com/airbridge/app/SystemBarInsets.kt",
+    );
+    expect(helper).toContain("data class SystemBarInsets");
+    expect(helper).toContain("WindowInsets.Type.systemBars()");
+    expect(helper).toContain("WindowInsets.Type.displayCutout()");
+    expect(helper).toContain("WindowInsets.Type.ime()");
   });
 
   it("requires an explicit, user-enabled Accessibility Service opt-in", () => {

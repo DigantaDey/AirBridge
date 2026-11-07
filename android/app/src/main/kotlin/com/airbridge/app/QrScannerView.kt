@@ -15,7 +15,6 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.media.Image
 import android.media.ImageReader
-import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -26,7 +25,6 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.View.MeasureSpec
-import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -231,25 +229,31 @@ class QrScannerView(context: Context) : FrameLayout(context) {
     /** Keep scanner chrome clear of the status and navigation bars. */
     private fun installChromeInsets() {
         setOnApplyWindowInsetsListener { _, insets ->
-            val (top, bottom) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val bars = insets.getInsets(WindowInsets.Type.systemBars())
-                bars.top to bars.bottom
-            } else {
-                legacySystemBarInsets(insets)
-            }
-            headerChrome?.let {
-                it.setPadding(it.paddingLeft, dp(28) + top, it.paddingRight, it.paddingBottom)
-            }
-            footerChrome?.let {
-                it.setPadding(it.paddingLeft, it.paddingTop, it.paddingRight, dp(36) + bottom)
+            val bars = insets.systemBarInsets()
+            // Android 15+ can dispatch zero insets to child views; ignore them
+            // so MainActivity's decor-view listener supplies the real values.
+            if (bars.left != 0 || bars.top != 0 || bars.right != 0 || bars.bottom != 0) {
+                applyChromeInsets(bars)
             }
             insets
         }
     }
 
-    @Suppress("DEPRECATION")
-    private fun legacySystemBarInsets(insets: WindowInsets): Pair<Int, Int> =
-        insets.systemWindowInsetTop to insets.systemWindowInsetBottom
+    /** Applies decor-view insets to the scanner chrome without accumulating padding. */
+    fun applyChromeInsets(insets: SystemBarInsets) {
+        headerChrome?.setPadding(
+            dp(20) + insets.left,
+            dp(28) + insets.top,
+            dp(12) + insets.right,
+            0,
+        )
+        footerChrome?.setPadding(
+            dp(24) + insets.left,
+            0,
+            dp(24) + insets.right,
+            dp(36) + insets.bottom,
+        )
+    }
 
     /** A SurfaceView that centre-crops the camera stream instead of stretching it. */
     private inner class AspectPreview(context: Context) : SurfaceView(context) {

@@ -697,19 +697,19 @@ export function App() {
       <header className="utility-header">
         <div className="brand"><span className="brand-mark">A</span><span>AirBridge</span></div>
         <div className="header-actions">
-          <button className="quiet-button" aria-label="Clipboard" onClick={() => { setClipboardPeerId(null); setClipboardPrefill(""); setClipboardOpen(true); }}>
+          <button type="button" className="quiet-button" aria-label="Clipboard" onClick={() => { setClipboardPeerId(null); setClipboardPrefill(""); setClipboardOpen(true); }}>
             Clipboard{snap.clipboardItems.length > 0 && <span className="header-count"> ({snap.clipboardItems.length})</span>}
           </button>
-          <button className="quiet-button" aria-label="Recent transfers" onClick={() => setRecentOpen(true)}>
+          <button type="button" className="quiet-button" aria-label="Recent transfers" onClick={() => setRecentOpen(true)}>
             Recent{recentTransfers.length > 0 && <span className="header-count"> ({recentTransfers.length})</span>}
           </button>
           {receivedFolder && (
-            <button className="icon-button folder-locate-button" aria-label="Open received files folder" title={`Open received files folder (${receivedFolder})`} onClick={() => openReceivedFolder()}>
+            <button type="button" className="icon-button folder-locate-button" aria-label="Open received files folder" title={`Open received files folder (${receivedFolder})`} onClick={() => openReceivedFolder()}>
               <FolderOpen size={16} aria-hidden="true" />
             </button>
           )}
-          <button className="icon-button" aria-label="Downloads" title="Download AirBridge for another device" onClick={() => setDownloadsOpen(true)}>Downloads</button>
-            <button className="icon-button" aria-label="Settings" title="Settings" onClick={() => setSettingsOpen(true)}>Settings</button>
+          <button type="button" className="icon-button" aria-label="Downloads" title="Download AirBridge for another device" onClick={() => setDownloadsOpen(true)}>Downloads</button>
+          <button type="button" className="icon-button" aria-label="Settings" title="Settings" onClick={() => setSettingsOpen(true)}>Settings</button>
         </div>
       </header>
       <main className="utility-main">
