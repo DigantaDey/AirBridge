@@ -6,7 +6,38 @@ import {
   encryptBinaryChunk,
   encryptControlPayload,
   generateIdentityKeyPair,
+  sha256Hex,
 } from '../src/client/engine/crypto.js';
+
+describe('incremental SHA-256', () => {
+  it('matches WebCrypto across empty, boundary-sized, and arbitrarily split input', async () => {
+    for (const size of [0, 1, 55, 56, 63, 64, 65, 1025, 1024 * 1024 + 13]) {
+      const raw = new Uint8Array(size);
+      for (let i = 0; i < raw.length; i++) raw[i] = (i * 37 + 11) & 0xff;
+      const chunks: Uint8Array[] = [];
+      for (let offset = 0; offset < raw.length;) {
+        const next = Math.min(raw.length, offset + 1 + (offset % 79));
+        chunks.push(raw.slice(offset, next));
+        offset = next;
+      }
+      const expected = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', raw));
+      const expectedHex = Array.from(expected).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+      expect(await sha256Hex(chunks)).toBe(expectedHex);
+    }
+  });
+
+  it('uses the incremental path for files larger than the bounded native-digest buffer', async () => {
+    const raw = new Uint8Array(9 * 1024 * 1024 + 13);
+    for (let i = 0; i < raw.length; i++) raw[i] = (i * 23 + 5) & 0xff;
+    const chunks: Uint8Array[] = [];
+    for (let offset = 0; offset < raw.length; offset += 256 * 1024) {
+      chunks.push(raw.slice(offset, Math.min(raw.length, offset + 256 * 1024)));
+    }
+    const expected = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', raw));
+    const expectedHex = Array.from(expected).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    expect(await sha256Hex(chunks)).toBe(expectedHex);
+  });
+});
 
 describe('E2EE WebCrypto ECDH P-256 + AES-256-GCM', () => {
   it('derives identical AES-256-GCM keys and 6-digit SAS codes on Android & MacBook', async () => {

@@ -49,6 +49,7 @@ class MainActivity : Activity() {
     private var scanner: QrScannerView? = null
     private var pendingChooser: ValueCallback<Array<Uri>>? = null
     private var pendingScanAfterPermission = false
+    @Volatile private var transferActive = false
     private var connectedLink: PairingLink? = null
     private lateinit var bridge: ShellBridge
 
@@ -83,6 +84,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        if (transferActive) setTransferActive(false)
         closeScanner()
         relay?.stop()
         relay = null
@@ -409,20 +411,47 @@ class MainActivity : Activity() {
                 return false
             }
             startConnectionService()
+        } else if (transferActive) {
+            startConnectionService(ConnectionService.ACTION_TRANSFER_START)
         } else {
             stopService(Intent(this, ConnectionService::class.java).setAction(ConnectionService.ACTION_STOP))
         }
         return true
     }
 
-    private fun startConnectionService() {
-        val intent = Intent(this, ConnectionService::class.java).setAction(ConnectionService.ACTION_START)
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+    /** Starts a foreground service and CPU wake lock for the active WebView transfer. */
+    fun setTransferActive(active: Boolean): Boolean {
+        if (transferActive == active) return true
+        transferActive = active
+        if (active) {
+            return startConnectionService(ConnectionService.ACTION_TRANSFER_START)
+        }
+        if (prefs.connectionContinuity) {
+            return startConnectionService(ConnectionService.ACTION_TRANSFER_STOP)
+        }
+        stopService(Intent(this, ConnectionService::class.java).setAction(ConnectionService.ACTION_STOP))
+        return true
+    }
+
+    private fun startConnectionService(action: String = ConnectionService.ACTION_START): Boolean {
+        val intent = Intent(this, ConnectionService::class.java).setAction(action)
+        return try {
+            if (action == ConnectionService.ACTION_TRANSFER_STOP) {
+                // The foreground service is already running; use a regular
+                // start so Android does not treat this background stop/update
+                // as a fresh foreground-service launch.
+                startService(intent)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            true
         } catch (e: Exception) {
-            prefs.connectionContinuity = false
-            Log.w(TAG, "could not start connection continuity: ${e.message}")
-            toast("Could not enable background connection")
+            if (action == ConnectionService.ACTION_START) prefs.connectionContinuity = false
+            Log.w(TAG, "could not start connection/transfer service: ${e.message}")
+            if (action == ConnectionService.ACTION_START) toast("Could not enable background connection")
+            false
         }
     }
 
@@ -436,6 +465,7 @@ class MainActivity : Activity() {
 
     fun forgetComputer() {
         prefs.connectionContinuity = false
+        transferActive = false
         stopService(Intent(this, ConnectionService::class.java).setAction(ConnectionService.ACTION_STOP))
         prefs.forget()
         relay?.stop()

@@ -6,6 +6,7 @@ import {
   bytesToUtf8,
   utf8ToBytes,
 } from '../../shared/protocol.js';
+import { Sha256Stream } from './sha256Stream.js';
 
 export interface IdentityKeys {
   privateKey: CryptoKey;
@@ -208,42 +209,55 @@ export async function decryptBinaryChunk(
 }
 
 export async function sha256Hex(chunks: Array<Uint8Array | undefined>): Promise<string> {
-  // Fast path: a single present chunk can be digested in place — no merge copy.
-  let onlyChunk: Uint8Array | null = null;
+  // Keep ordinary files on WebCrypto's native implementation. The merge is
+  // capped at 8 MiB; larger receives use the incremental path below and never
+  // allocate another whole-file buffer.
+  const NATIVE_DIGEST_LIMIT = 8 * 1024 * 1024;
+  let totalBytes = 0;
+  let onlyChunk: Uint8Array | undefined;
   let presentCount = 0;
-  for (let i = 0; i < chunks.length; i++) {
-    const c = chunks[i];
-    if (c) {
+  for (const chunk of chunks) {
+    if (chunk) {
+      totalBytes += chunk.byteLength;
+      onlyChunk = chunk;
       presentCount++;
-      onlyChunk = c;
-      if (presentCount > 1) break;
     }
   }
-  if (presentCount === 1 && onlyChunk) {
-    const single = new Uint8Array(
-      await globalThis.crypto.subtle.digest('SHA-256', asBufferSource(onlyChunk))
+  if (totalBytes <= NATIVE_DIGEST_LIMIT) {
+    let data: Uint8Array;
+    if (presentCount === 1 && onlyChunk) {
+      data = onlyChunk;
+    } else {
+      data = new Uint8Array(totalBytes);
+      let offset = 0;
+      for (const chunk of chunks) {
+        if (!chunk) continue;
+        data.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+    }
+    const digest = new Uint8Array(
+      await globalThis.crypto.subtle.digest('SHA-256', asBufferSource(data)),
     );
-    return Array.from(single)
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
+    return Array.from(digest).map((byte) => byte.toString(16).padStart(2, '0')).join('');
   }
-  let totalLen = 0;
-  for (let i = 0; i < chunks.length; i++) {
-    const c = chunks[i];
-    if (c) totalLen += c.byteLength;
+
+  // Missing slots represent absent chunks in an incomplete receive and are
+  // intentionally skipped; completion verification separately requires every
+  // chunk to exist. Incremental hashing avoids a second full-file allocation.
+  const hash = new Sha256Stream();
+  let bytesSinceYield = 0;
+  for (const chunk of chunks) {
+    if (chunk) {
+      hash.update(chunk);
+      bytesSinceYield += chunk.byteLength;
+    }
+    // Yield after a bounded amount of hashing rather than a fixed number of
+    // array slots: callers may provide very small or sparse chunks.
+    if (bytesSinceYield >= 4 * 1024 * 1024) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      bytesSinceYield = 0;
+    }
   }
-  const merged = new Uint8Array(totalLen);
-  let offset = 0;
-  for (let i = 0; i < chunks.length; i++) {
-    const c = chunks[i];
-    if (!c) continue;
-    merged.set(c, offset);
-    offset += c.byteLength;
-  }
-  const digest = new Uint8Array(
-    await globalThis.crypto.subtle.digest('SHA-256', toArrayBuffer(merged))
-  );
-  return Array.from(digest)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
+  return hash.hex();
 }

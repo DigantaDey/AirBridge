@@ -296,11 +296,14 @@ browser works over the LAN IP too). From anywhere else they return 403.
   the File System Access API. Only when that API is unavailable does the browser fall back
   to reassembling the file in memory first — try smaller batches, or send from the CLI
   where no per-chunk browser buffer is involved.
-- **Both pages still have to stay open.** The host daemon writes chunks to disk in the
-  background as they arrive and a re-established transfer resumes from its partial, but
-  the receiving browser must stay connected to decrypt and forward chunks. A backgrounded
-  mobile tab can have its socket throttled, and there is no cross-reload recovery of an
-  in-flight offer.
+- **Keep AirBridge open during a transfer.** The Android app shell requests a foreground
+  service and holds a partial CPU wake lock while a transfer is active, which helps the
+  WebView continue when the screen turns off. Android vendors can still throttle or stop
+  WebView/network work, so this is best-effort rather than a guarantee. The sender retries
+  transient connection interruptions and resumes from receiver-confirmed chunks; the Mac
+  daemon's durable partials survive reconnects. A page reload or process death still loses
+  the in-memory sender/receiver session, so this is not cross-reload recovery. Browser/PWA
+  use outside the Android shell remains subject to background-tab throttling.
 
 ## How transfers actually work
 

@@ -28,6 +28,10 @@ export class Sha256Stream {
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
   ]);
   private readonly block = new Uint8Array(64);
+  // Reuse the message schedule for each 64-byte compression block. Allocating
+  // a new 64-word array in every compress() call produced millions of short-
+  // lived objects when hashing large transfers, creating GC pauses on phones.
+  private readonly schedule = new Uint32Array(64);
   private blockLen = 0;
   private totalBytes = 0;
 
@@ -85,7 +89,7 @@ export class Sha256Stream {
   }
 
   private compress(view: DataView, offset: number): void {
-    const w = new Uint32Array(64);
+    const w = this.schedule;
     for (let i = 0; i < 16; i++) {
       w[i] = view.getUint32(offset + i * 4);
     }

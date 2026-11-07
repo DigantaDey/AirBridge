@@ -80,6 +80,13 @@ describe('append-only resume journal', () => {
       for (let i = 0; i < 40; i++) {
         await firstProcess.writeChunk(meta, i, raw.slice(i * chunkSize, (i + 1) * chunkSize));
       }
+      await expect(
+        firstProcess.writeChunk(
+          { ...meta, name: 'different.bin' },
+          0,
+          raw.slice(0, chunkSize),
+        ),
+      ).rejects.toThrow('different receive manifest');
       const partialDir = path.join(downloadDir, '.airbridge-partial');
       const snapshot = JSON.parse(
         await fs.promises.readFile(path.join(partialDir, `${transferId}-0.json`), 'utf8'),

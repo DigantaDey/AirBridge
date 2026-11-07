@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import { act } from "react";
 import { webcrypto } from "node:crypto";
 import { bytesToBase64Url, type ControlPayload } from "../src/shared/protocol.js";
-import { derivePeerSession, encryptControlPayload } from "../src/client/engine/crypto.js";
+import { decryptControlPayload, derivePeerSession, encryptControlPayload } from "../src/client/engine/crypto.js";
 
 // Tell React its act() helpers are available in this jsdom test file.
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean })
@@ -60,6 +60,7 @@ class FakeSocket {
   onclose: ((ev: CloseEvent) => void) | null = null;
   onerror: ((ev: Event) => void) | null = null;
   sentMessages: SentMessage[] = [];
+  sentBinaryCount = 0;
   url: string;
 
   constructor(url: string) {
@@ -69,7 +70,11 @@ class FakeSocket {
     setTimeout(() => this.onopen?.(new Event("open")), 0);
   }
 
-  send(data: string) {
+  send(data: string | ArrayBuffer | ArrayBufferView | Blob) {
+    if (typeof data !== "string") {
+      this.sentBinaryCount++;
+      return;
+    }
     const msg = JSON.parse(data) as SentMessage;
     this.sentMessages.push(msg);
     if (msg.type === "hello") {
@@ -264,6 +269,73 @@ describe("AirBridge app UI", () => {
     expect(staged.length).toBe(1);
     expect(staged[0].textContent).toContain("notes.txt");
     expect(sendButton.disabled).toBe(false);
+  });
+
+  it("shows a live Upload speed in the main active-transfer row", async () => {
+    const { container } = await renderApp();
+    const socket = FakeSocket.lastInstance!;
+    const chunkSize = 256 * 1024;
+    const raw = new Uint8Array(chunkSize * 16).fill(23);
+    const file = new File([raw], "speed.bin", { type: "application/octet-stream" });
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const fileList: { length: number; item: (i: number) => File | null } & Record<number, File> = {
+      0: file,
+      length: 1,
+      item: (i) => i === 0 ? file : null,
+    };
+    Object.defineProperty(input, "files", { get: () => fileList, configurable: true });
+    await act(async () => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    await act(async () => {
+      (container.querySelector(".send-device-button") as HTMLButtonElement).click();
+    });
+
+    await waitFor(() => socket.sentMessages.some((message) => message.type === "transfer-control"));
+    const hello = socket.sentMessages.find((message) => message.type === "hello") as unknown as {
+      device: { publicKey: string };
+    };
+    const peerSession = await derivePeerSession(
+      peerPrivateKey!,
+      peerPublicKeyB64,
+      hello.device.publicKey,
+    );
+    let transferId = "";
+    for (const message of socket.sentMessages.filter((item) => item.type === "transfer-control").reverse()) {
+      const envelope = message.envelope as Parameters<typeof decryptControlPayload>[1] | undefined;
+      if (!envelope?.encrypted) continue;
+      const payload = await decryptControlPayload(peerSession.aesKey, envelope);
+      if (payload.kind === "transfer-offer") {
+        transferId = payload.transferId;
+        break;
+      }
+    }
+    expect(transferId).not.toBe("");
+
+    await act(async () => {
+      await pushEncrypted(socket, {
+        kind: "transfer-accept",
+        transferId,
+        preferredTransport: "ws-relay",
+      });
+    });
+    await waitFor(() => socket.sentBinaryCount >= 8);
+    expect(container.querySelector(".transfer-row")?.textContent).toContain("0 B of 4.00 MB");
+    await act(async () => {
+      await pushEncrypted(socket, {
+        kind: "chunk-ack",
+        transferId,
+        fileIndex: 0,
+        ackedChunkIndex: 7,
+        bytesReceivedTotal: chunkSize * 8,
+      });
+    });
+    await waitFor(() => {
+      const row = container.querySelector(".transfer-row");
+      return Boolean(row?.textContent?.includes("Upload") && row.textContent.includes("/s"));
+    });
+    expect(container.querySelector(".transfer-row")?.textContent).toMatch(/Upload .*\/s/);
   });
 
   it("beams clipboard text to a peer through the encrypted control channel", async () => {

@@ -7,6 +7,7 @@ import {
   isNativeShell,
   saveBlobToDevice,
   scanPairingCode,
+  setNativeTransferActive,
   toBase64,
 } from "../src/client/engine/nativeShell.js";
 import {
@@ -22,6 +23,11 @@ class FakeBridge implements AirBridgeNativeBridge {
   failAppendAfter = Number.POSITIVE_INFINITY;
   scanQr: () => boolean = () => true;
   forgetComputer: () => boolean = () => true;
+  transferStates: boolean[] = [];
+  setTransferActive(active: boolean): boolean {
+    this.transferStates.push(active);
+    return true;
+  }
   private open = new Map<number, { name: string; mimeType: string; chunks: Uint8Array[] }>();
   private nextHandle = 1;
 
@@ -121,6 +127,14 @@ describe("native shell detection", () => {
     expect(forgetNativeComputer()).toBe(true);
     expect(scanQr).toHaveBeenCalledTimes(1);
     expect(forgetComputer).toHaveBeenCalledTimes(1);
+  });
+
+  it("notifies the Android shell when an active transfer starts and ends", () => {
+    const bridge = new FakeBridge();
+    (window as { AirBridgeAndroid?: unknown }).AirBridgeAndroid = bridge;
+    expect(setNativeTransferActive(true)).toBe(true);
+    expect(setNativeTransferActive(false)).toBe(true);
+    expect(bridge.transferStates).toEqual([true, false]);
   });
 
   it("reports a camera-less phone as unable to scan", () => {
