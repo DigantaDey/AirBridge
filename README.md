@@ -510,6 +510,9 @@ install over the previous version). Releases are integrity-checked with
 `SHA256SUMS.txt`; the installer verifies the checksum before it writes the
 binary.
 
+If Play Protect blocks the APK install, see [Play Protect and sideloaded
+APKs](#play-protect-and-sideloaded-apks) below.
+
 Asset names are `AirBridge-<os>-<arch>` with `darwin`, `linux`, `windows` as
 `<os>` (`macOS` used to be called `macos`, which is why the old installer
 404'd), plus `AirBridge-linux-<arch>-musl` for static Linux builds.
@@ -568,6 +571,38 @@ Practical notes:
   running when the screen is off only as long as Android keeps the WebView alive.
 - Build it with `gradle -p android :app:assembleDebug` (or `:app:assembleRelease`), and
   run `npm run verify:android` for a no-Gradle preflight of the engine and app sources.
+
+#### Play Protect and sideloaded APKs
+
+Builds that include the optional Accessibility Service declare
+`android.permission.BIND_ACCESSIBILITY_SERVICE`. Google Play Protect's enhanced fraud
+protection can block installing `AirBridge.apk` when it is opened from a browser, file
+manager or messaging app, with: “App blocked to protect your device — This app can
+request access to sensitive data. This can increase the risk of identity theft or
+financial fraud.” That is a manifest-policy block for internet-sideloaded APKs declaring
+accessibility, SMS or notification-listener permissions, not a malware verdict and not a
+signing-key problem. The service is off by default and is never enabled by the app itself.
+See [Google's Play Protect warning
+guidance](https://developers.google.com/android/play-protect/warning-dev-guidance) and
+the [enhanced fraud protection rollout
+notes](https://www.forbes.com/sites/zakdoffman/2024/10/11/google-play-store-new-app-warning-for-samsung-galaxy-s24-pixel-9-pro-android/);
+it is most often seen in India and other rollout regions.
+
+If you trust this build, install it from a computer with USB debugging enabled:
+
+```sh
+adb install -r /path/to/AirBridge.apk
+```
+
+ADB is not an internet-sideloading source, so Play Protect stays enabled. On Android 13+
+you may also need **App info → ⋮ → Allow restricted settings** before Android lets you
+enable the Accessibility Service. Do **not** turn off “Scan apps with Play Protect” to get
+past the prompt. If you believe the classification is wrong, you can
+[appeal the Play Protect
+warning](https://developers.google.com/android/play-protect/warning-dev-guidance#request-appeal).
+Publishing through the Play Store also avoids this specific block. A permission-minimized
+APK without the accessibility declaration would install normally from a browser; this
+release ships one APK that includes it.
 
 ### Cutting a release
 
