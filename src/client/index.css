@@ -181,6 +181,50 @@ html.dark .clipboard-error { color: #f87171; }
 .clipboard-badge { border: 1px solid var(--ab-border); border-radius: 999px; padding: 1px 8px; text-transform: uppercase; letter-spacing: .06em; flex-shrink: 0; }
 .clipboard-item pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; background: var(--ab-subtle); border: 1px solid var(--ab-border); padding: 8px 9px; border-radius: 6px; max-height: 128px; overflow: auto; }
 .clipboard-item-actions { display: flex; gap: 14px; justify-content: flex-end; }
+
+/* Premium Header Action Buttons */
+.header-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  position: relative;
+  border: 1px solid var(--ab-border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  background: var(--ab-subtle);
+  color: var(--ab-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+.header-action-button:hover {
+  background: var(--ab-surface);
+  color: var(--ab-text);
+  border-color: var(--ab-border-strong);
+}
+.header-action-icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+.header-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--ab-text);
+  color: var(--ab-bg);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+
 @media (max-width: 920px) {
   /* Compact header: brand on its own row, actions in a tappable grid. */
   .utility-header {
@@ -198,17 +242,18 @@ html.dark .clipboard-error { color: #f87171; }
     width: 100%;
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 8px;
     align-items: center;
+    justify-content: flex-start;
   }
-  .header-actions > * {
-    min-width: 0;
-    min-height: 38px;
-    padding: 6px 10px;
-    font-size: 12px;
-    line-height: 1.2;
-    text-align: center;
-    white-space: nowrap;
+  .header-action-label {
+    display: none;
+  }
+  .header-action-button {
+    min-width: 40px;
+    height: 40px;
+    padding: 0 12px;
+    border-radius: 10px;
   }
   .header-count { display: none; }
   .utility-main { width: calc(100% - var(--ab-gutter) - var(--ab-gutter)); padding-top: 30px; }

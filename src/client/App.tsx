@@ -41,7 +41,7 @@ import {
   setNativeTransferActive,
   scanPairingCode,
 } from "./engine/nativeShell.js";
-import { FolderOpen } from "lucide-react";
+import { ClipboardList, Clock, Download, FolderOpen, Settings } from "lucide-react";
 
 interface ToastNotice {
   id: string;
@@ -728,19 +728,64 @@ export function App() {
       <header className="utility-header">
         <div className="brand"><span className="brand-mark">A</span><span>AirBridge</span></div>
         <div className="header-actions">
-          <button type="button" className="quiet-button" aria-label="Clipboard" onClick={() => { setClipboardPeerId(null); setClipboardPrefill(""); setClipboardOpen(true); }}>
-            Clipboard{snap.clipboardItems.length > 0 && <span className="header-count"> ({snap.clipboardItems.length})</span>}
+          <button
+            type="button"
+            className="header-action-button"
+            aria-label="Clipboard"
+            title="Clipboard"
+            onClick={() => { setClipboardPeerId(null); setClipboardPrefill(""); setClipboardOpen(true); }}
+          >
+            <ClipboardList className="header-action-icon" size={16} aria-hidden="true" />
+            <span className="header-action-label">Clipboard</span>
+            {snap.clipboardItems.length > 0 && (
+              <span className="header-count-badge"> ({snap.clipboardItems.length})</span>
+            )}
           </button>
-          <button type="button" className="quiet-button" aria-label="Recent transfers" onClick={() => setRecentOpen(true)}>
-            Recent{recentTransfers.length > 0 && <span className="header-count"> ({recentTransfers.length})</span>}
+          <button
+            type="button"
+            className="header-action-button"
+            aria-label="Recent transfers"
+            title="Recent transfers"
+            onClick={() => setRecentOpen(true)}
+          >
+            <Clock className="header-action-icon" size={16} aria-hidden="true" />
+            <span className="header-action-label">Recent</span>
+            {recentTransfers.length > 0 && (
+              <span className="header-count-badge"> ({recentTransfers.length})</span>
+            )}
           </button>
           {receivedFolder && (
-            <button type="button" className="icon-button folder-locate-button" aria-label="Open received files folder" title={`Open received files folder (${receivedFolder})`} onClick={() => openReceivedFolder()}>
-              <FolderOpen size={16} aria-hidden="true" />
+            <button
+              type="button"
+              className="header-action-button folder-locate-button"
+              aria-label="Open received files folder"
+              title={`Open received files folder (${receivedFolder})`}
+              onClick={() => openReceivedFolder()}
+            >
+              <FolderOpen className="header-action-icon" size={16} aria-hidden="true" />
+              <span className="header-action-label">Folder</span>
             </button>
           )}
-          <button type="button" className="icon-button" aria-label="Downloads" title="Download AirBridge for another device" onClick={() => setDownloadsOpen(true)}>Downloads</button>
-          <button type="button" className="icon-button" aria-label="Settings" title="Settings" onClick={() => setSettingsOpen(true)}>Settings</button>
+          <button
+            type="button"
+            className="header-action-button"
+            aria-label="Downloads"
+            title="Download AirBridge for another device"
+            onClick={() => setDownloadsOpen(true)}
+          >
+            <Download className="header-action-icon" size={16} aria-hidden="true" />
+            <span className="header-action-label">Downloads</span>
+          </button>
+          <button
+            type="button"
+            className="header-action-button"
+            aria-label="Settings"
+            title="Settings"
+            onClick={() => setSettingsOpen(true)}
+          >
+            <Settings className="header-action-icon" size={16} aria-hidden="true" />
+            <span className="header-action-label">Settings</span>
+          </button>
         </div>
       </header>
       <main className="utility-main">
