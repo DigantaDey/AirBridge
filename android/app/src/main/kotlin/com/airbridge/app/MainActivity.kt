@@ -489,8 +489,8 @@ class MainActivity : Activity() {
                 dp(fallbackDp)
             }
         }
-        val top = dimension("status_bar_height", 24)
-        val bottom = dimension("navigation_bar_height", 0)
+        val top = dimension("status_bar_height", 36)
+        val bottom = dimension("navigation_bar_height", 16)
         return SystemBarInsets(0, top, 0, bottom)
     }
 
@@ -511,12 +511,6 @@ class MainActivity : Activity() {
             lastChromeInsets = bars
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             scanner?.applyChromeInsets(bars)
-
-            val topDp = (top / resources.displayMetrics.density).toInt()
-            val script = "document.documentElement.style.setProperty('--ab-safe-top', '${topDp}px');"
-            if (::webView.isInitialized) {
-                webView.evaluateJavascript(script, null)
-            }
             WindowInsets.CONSUMED
         }
         window.decorView.setOnApplyWindowInsetsListener(listener)
