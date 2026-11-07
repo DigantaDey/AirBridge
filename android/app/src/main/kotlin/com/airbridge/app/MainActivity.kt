@@ -499,14 +499,23 @@ class MainActivity : Activity() {
      * adding a second copy of the same space.
      */
     private fun installSystemBarInsets(view: FrameLayout) {
-        window.decorView.setOnApplyWindowInsetsListener { _, insets ->
-            val bars = insets.systemBarInsets()
+        val fallback = fallbackSystemBarInsets()
+        val listener = View.OnApplyWindowInsetsListener { _, insets ->
+            val raw = insets.systemBarInsets()
+            val top = maxOf(raw.top, fallback.top)
+            val bottom = maxOf(raw.bottom, fallback.bottom)
+            val bars = SystemBarInsets(raw.left, top, raw.right, bottom)
             lastChromeInsets = bars
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             scanner?.applyChromeInsets(bars)
             WindowInsets.CONSUMED
         }
-        view.post { window.decorView.requestApplyInsets() }
+        window.decorView.setOnApplyWindowInsetsListener(listener)
+        view.setOnApplyWindowInsetsListener(listener)
+        view.post {
+            window.decorView.requestApplyInsets()
+            view.requestApplyInsets()
+        }
     }
 
     /**
