@@ -273,16 +273,12 @@ class QrScannerView(context: Context) : FrameLayout(context) {
                 super.onMeasure(widthMeasureSpec, heightMeasureSpec)
                 return
             }
-            val targetWidth: Int
-            val targetHeight: Int
-            if (width < height) {
-                targetWidth = width
-                targetHeight = (width / aspectRatio).toInt()
+            val viewAspect = width.toFloat() / height.toFloat()
+            if (viewAspect < aspectRatio) {
+                setMeasuredDimension((height * aspectRatio).toInt(), height)
             } else {
-                targetWidth = (height * aspectRatio).toInt()
-                targetHeight = height
+                setMeasuredDimension(width, (width / aspectRatio).toInt())
             }
-            setMeasuredDimension(targetWidth, targetHeight)
         }
     }
 
