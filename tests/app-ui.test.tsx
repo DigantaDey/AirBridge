@@ -183,7 +183,8 @@ function setNativeValue(
 
 describe("AirBridge app UI", () => {
   beforeEach(async () => {
-    localStorage.clear();
+    try { window.localStorage?.clear(); } catch (_e) { /* ignore */ }
+    try { localStorage?.clear(); } catch (_e) { /* ignore */ }
     FakeSocket.instances = [];
     FakeSocket.lastInstance = null;
     const peerKeys = await webcrypto.subtle.generateKey(

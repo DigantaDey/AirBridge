@@ -20,7 +20,8 @@
     style.id = styleId;
     style.textContent =
       'html.ab-native-shell[data-airbridge-native-shell]{' +
-      '--ab-gutter:clamp(12px,4vw,24px);}' +
+      '--ab-gutter:clamp(12px,4vw,24px);' +
+      '--ab-safe-top:0px;--ab-safe-right:0px;--ab-safe-bottom:0px;--ab-safe-left:0px;}' +
       'html,body{width:100%!important;max-width:100vw!important;overflow-x:hidden!important;' +
       'overscroll-behavior-x:none!important;touch-action:pan-y!important;' +
       '-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;}' +
