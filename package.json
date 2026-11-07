@@ -1,6 +1,6 @@
 {
   "name": "airbridge-drop",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "AirBridge — Fast, E2EE, open-source AirDrop & Universal Clipboard alternative for Android and MacBook.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",

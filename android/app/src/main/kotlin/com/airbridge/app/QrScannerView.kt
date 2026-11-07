@@ -297,8 +297,11 @@ class QrScannerView(context: Context) : FrameLayout(context) {
             mainHandler.post { onCameraUnavailable?.invoke() }
             return
         }
+        val rotation = (info.sensorOrientation - info.displayDegrees + 360) % 360
+        val previewWidth = if (rotation == 90 || rotation == 270) info.size.height else info.size.width
+        val previewHeight = if (rotation == 90 || rotation == 270) info.size.width else info.size.height
         preview.aspectRatio = previewAspect(info)
-        preview.holder.setFixedSize(info.size.width, info.size.height)
+        preview.holder.setFixedSize(previewWidth, previewHeight)
         preview.requestLayout()
         val thread = HandlerThread("airbridge-qr").also { it.start() }
         cameraThread = thread

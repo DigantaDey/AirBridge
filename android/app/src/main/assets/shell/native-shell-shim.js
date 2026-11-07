@@ -31,19 +31,21 @@
       '.utility-modal{max-width:calc(100% - 40px)!important;}' +
       '.modal-backdrop{padding:12px var(--ab-gutter)!important;}' +
       '.text-button{white-space:normal!important;overflow-wrap:anywhere!important;}' +
+      'html.ab-native-shell .header-action-label{display:none!important;}' +
+      'html.ab-native-shell .header-count{display:none!important;}' +
+      'html.ab-native-shell .header-action-button,html.ab-native-shell .header-actions>*{' +
+      'min-width:38px!important;width:38px!important;height:38px!important;min-height:38px!important;' +
+      'padding:0!important;border-radius:10px!important;display:inline-flex!important;align-items:center!important;' +
+      'justify-content:center!important;position:relative!important;white-space:nowrap!important;overflow:visible!important;}' +
+      'html.ab-native-shell .header-action-icon{width:18px!important;height:18px!important;}' +
+      'html.ab-native-shell .header-count-badge{position:absolute!important;top:-4px!important;right:-4px!important;}' +
       '.utility-header{height:auto!important;min-height:calc(56px + var(--ab-safe-top,0px))!important;' +
-      'padding-top:max(var(--ab-safe-top,0px),env(safe-area-inset-top,0px),12px)!important;' +
+      'padding-top:max(var(--ab-safe-top,0px),env(safe-area-inset-top,0px),28px)!important;' +
       'padding-bottom:10px!important;padding-left:var(--ab-gutter)!important;padding-right:var(--ab-gutter)!important;}' +
       '@media(max-width:920px){' +
       '.utility-header{flex-direction:column!important;align-items:stretch!important;gap:8px!important;}' +
       '.header-actions{display:flex!important;flex-wrap:wrap!important;width:100%!important;' +
       'gap:8px!important;justify-content:flex-start!important;align-items:center!important;}' +
-      '.header-action-label{display:none!important;}' +
-      '.header-action-button,.header-actions>*{min-width:40px!important;width:40px!important;height:40px!important;min-height:40px!important;' +
-      'padding:0!important;border-radius:10px!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;position:relative!important;}' +
-      '.header-action-icon{width:18px!important;height:18px!important;}' +
-      '.header-count-badge{position:absolute!important;top:-4px!important;right:-4px!important;}' +
-      '.header-count{display:none!important;}' +
       '.utility-main{width:calc(100% - var(--ab-gutter) - var(--ab-gutter))!important;' +
       'max-width:680px!important;}' +
       '.device-heading h1,.device-copy strong,.device-copy small,.utility-footer{' +
