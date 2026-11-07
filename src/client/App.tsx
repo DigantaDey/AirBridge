@@ -132,8 +132,9 @@ export function App() {
   const [toast, setToast] = useState<ToastNotice | null>(null);
 
   useEffect(() => {
-    // The Android shell pads its WebView with the real status/nav bar insets;
-    // telling CSS prevents those safe areas from being applied twice.
+    // The Android shell reserves the real status/nav bar insets in a native
+    // parent container and injects a shim; this class keeps CSS from doubling
+    // them even before that shim runs.
     document.documentElement.classList.toggle("ab-native-shell", isNativeShell());
   }, []);
 

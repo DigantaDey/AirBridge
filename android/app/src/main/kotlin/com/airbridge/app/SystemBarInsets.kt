@@ -4,22 +4,23 @@ import android.os.Build
 import android.view.WindowInsets
 
 /**
- * System-bar, display-cutout and IME insets in pixels.
+ * System-bar and display-cutout insets in pixels.
  *
  * Android 15 (API 35) enforces edge-to-edge display for apps targeting SDK 35,
  * and WebView children can receive all-zero insets even though the window decor
- * view has the real values. Both the WebView and the QR scanner therefore read
- * insets from the decor view and apply them manually; CSS safe-area variables
- * are zeroed inside the native shell so the padding is never doubled.
+ * view has the real values. The shell therefore reads insets from the decor view
+ * and pads a plain parent FrameLayout around the WebView. On modern APIs the IME
+ * is left to the manifest's adjustResize, otherwise the keyboard would be
+ * reserved twice; legacy values are only used to position scanner chrome. CSS
+ * safe-area variables are zeroed inside the native shell.
  */
 data class SystemBarInsets(val left: Int, val top: Int, val right: Int, val bottom: Int)
 
-/** Reads the insets that keep content clear of status/navigation bars, cutouts and the keyboard. */
+/** Reads the insets that keep content clear of status/navigation bars and cutouts. */
 fun WindowInsets.systemBarInsets(): SystemBarInsets {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
         val mask = WindowInsets.Type.systemBars() or
-            WindowInsets.Type.displayCutout() or
-            WindowInsets.Type.ime()
+            WindowInsets.Type.displayCutout()
         val bars = getInsets(mask)
         return SystemBarInsets(bars.left, bars.top, bars.right, bars.bottom)
     }

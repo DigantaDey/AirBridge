@@ -4,8 +4,9 @@
   color-scheme: light;
   --ab-gutter: 16px;
   --ab-gutter: clamp(12px, 4vw, 24px);
-  /* Plain browsers get display-cutout insets; the Android shell applies the
-     same insets natively to its WebView, so it zeroes these to avoid doubling. */
+  /* Plain browsers get display-cutout insets; the Android shell reserves the
+     same space in a native parent container and injects a shim that zeroes
+     these variables, so the padding is never doubled. */
   --ab-safe-top: env(safe-area-inset-top, 0px);
   --ab-safe-right: env(safe-area-inset-right, 0px);
   --ab-safe-bottom: env(safe-area-inset-bottom, 0px);

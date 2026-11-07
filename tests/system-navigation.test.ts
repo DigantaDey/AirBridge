@@ -31,6 +31,29 @@ describe("Android system navigation", () => {
     expect(activity).toContain("webView.canGoBack()");
     expect(activity).toContain("webView.goBack()");
     expect(activity).toContain("view.clearHistory()");
+    expect(activity).toContain("BACK_CALLBACK_TIMEOUT_MS");
+    expect(activity).toContain("mainHandler.postDelayed(fallback");
+    expect(activity).toContain("goBackOrFinish()");
+    expect(activity).toContain("isFinishing || isDestroyed");
+  });
+
+  it("injects a Back/safe-area shim so an older desktop UI still works", () => {
+    const activity = read(
+      "android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt",
+    );
+    expect(activity).toContain("NATIVE_SHELL_ASSET");
+    expect(activity).toContain("injectNativeShellShim(view)");
+    expect(activity).toContain("onPageCommitVisible(view: WebView, url: String)");
+
+    const shim = read(
+      "android/app/src/main/assets/shell/native-shell-shim.js",
+    );
+    expect(shim).toContain("__airbridgeNativeShellShimInstalled");
+    expect(shim).toContain("window.__airbridgeSystemBack = function ()");
+    expect(shim).toContain(".modal-backdrop");
+    expect(shim).toContain("KeyboardEvent");
+    expect(shim).toContain("--ab-safe-top:0px!important");
+    expect(shim).toContain("var existing = window.__airbridgeSystemBack");
   });
 
   it("lets the web UI close its topmost layer on Back or Escape", () => {

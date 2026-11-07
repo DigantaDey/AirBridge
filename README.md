@@ -508,7 +508,8 @@ Android 8.0+: sideload `AirBridge.apk` from the [latest
 release](https://github.com/DigantaDey/AirBridge/releases/latest) (updates
 install over the previous version). Releases are integrity-checked with
 `SHA256SUMS.txt`; the installer verifies the checksum before it writes the
-binary.
+binary. Update the computer-side AirBridge binary at the same time: the APK is a
+shell that renders the UI served by that binary, not a standalone second app.
 
 If Play Protect blocks the APK install, see [Play Protect and sideloaded
 APKs](#play-protect-and-sideloaded-apks) below.
@@ -561,9 +562,14 @@ Practical notes:
 - Re-pair with a different computer from the phone's *Settings → Change computer*, or by
   scanning again from the pairing dialog. `airbridge://<host>:<port>?pair=<code>` links
   do the same thing, which is handy with `adb shell am start -a android.intent.action.VIEW`.
-- The shell applies system-bar insets to the WebView and scanner chrome, wraps the
-  header actions into tappable rows on narrow screens, and centre-crops the camera
-  preview so the QR frame stays square instead of stretching.
+- The shell reserves status/navigation-bar space in a native container *around* the
+  WebView (Chromium ignores `WebView.setPadding()`), injects a small shim into every
+  page for safe-area/Back parity with older desktop builds, wraps the header actions
+  into tappable rows on narrow screens, and centre-crops the camera preview so the QR
+  frame stays square instead of stretching.
+- Update the desktop binary and `AirBridge.apk` from the same release. The phone
+  renders the UI served by the desktop, so an old desktop binary can keep serving old
+  page assets after the APK has been updated.
 - Background clipboard is enabled by default after pairing. The foreground service
   keeps the encrypted session and native clipboard watcher alive when you leave the
   app; Android can still pause clipboard reads while the app is hidden.
