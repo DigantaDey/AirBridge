@@ -8,8 +8,12 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.RenderProcessGoneDetail
@@ -21,6 +25,8 @@ import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.Toast
 import com.airbridge.engine.PairingLink
+import org.json.JSONObject
+import java.lang.ref.WeakReference
 
 /** A computer that announced itself over mDNS. */
 data class NearbyHost(val name: String, val address: String)
@@ -83,6 +89,12 @@ class MainActivity : Activity() {
         pairingLinkFromIntent(intent)?.let { applyPairing(it) }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // The user may have just returned from Android's Accessibility settings.
+        if (::webView.isInitialized) publishAccessibilityServiceState()
+    }
+
     override fun onDestroy() {
         if (transferActive) setTransferActive(false)
         closeScanner()
@@ -91,6 +103,7 @@ class MainActivity : Activity() {
         discovery?.stop()
         discovery = null
         if (::webView.isInitialized) {
+            attachWebView(null)
             (webView.parent as? ViewGroup)?.removeView(webView)
             webView.destroy()
         }
@@ -116,7 +129,9 @@ class MainActivity : Activity() {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.useWideViewPort = true
-            settings.loadWithOverviewMode = true
+            // An overflowing header used to make WebView zoom the whole page
+            // out to fit its wider layout, shrinking/clipping every control.
+            settings.loadWithOverviewMode = false
             settings.setSupportZoom(false)
             settings.builtInZoomControls = false
             settings.displayZoomControls = false
@@ -141,6 +156,8 @@ class MainActivity : Activity() {
                 }
             }
         }
+        installSystemBarInsets(webView)
+        attachWebView(webView)
         root.addView(
             webView,
             FrameLayout.LayoutParams(
@@ -152,6 +169,11 @@ class MainActivity : Activity() {
     }
 
     private inner class ShellWebViewClient : WebViewClient() {
+        override fun onPageFinished(view: WebView, url: String) {
+            super.onPageFinished(view, url)
+            publishAccessibilityServiceState()
+        }
+
         /** A crashed renderer leaves the WebView blank and unusable; rebuild it. */
         override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
             Log.w(TAG, "web renderer gone (crashed=${detail.didCrash()})")
@@ -322,7 +344,67 @@ class MainActivity : Activity() {
         prefs.pendingPairCode = link.pairCode.orEmpty()
         closeScanner()
         openApp(link)
+        if (prefs.connectionContinuity) startConnectionService()
         toast("Connecting to ${link.host}")
+    }
+
+    /** Keep WebView content below the status bar and above the navigation bar. */
+    private fun installSystemBarInsets(view: View) {
+        view.setOnApplyWindowInsetsListener { target, insets ->
+            val (top, bottom) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                bars.top to bars.bottom
+            } else {
+                legacySystemBarInsets(insets)
+            }
+            target.setPadding(target.paddingLeft, top, target.paddingRight, bottom)
+            insets
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun legacySystemBarInsets(insets: WindowInsets): Pair<Int, Int> =
+        insets.systemWindowInsetTop to insets.systemWindowInsetBottom
+
+    /** Push the OS accessibility-service state to the settings UI. */
+    private fun publishAccessibilityServiceState() {
+        val enabled = try {
+            ClipboardAccessibilityService.isEnabled(this)
+        } catch (e: Exception) {
+            Log.w(TAG, "could not read accessibility service state: ${e.message}")
+            false
+        }
+        webView.evaluateJavascript(
+            "window.__airbridgeNativeAccessibilityState && window.__airbridgeNativeAccessibilityState($enabled)",
+            null,
+        )
+    }
+
+    /** Match the system bars to the web app's light/dark theme. */
+    fun setDarkTheme(enabled: Boolean): Boolean {
+        runOnUiThread {
+            val color = if (enabled) 0xFF111111.toInt() else 0xFFFFFFFF.toInt()
+            window.statusBarColor = color
+            window.navigationBarColor = color
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                @Suppress("DEPRECATION")
+                val lightFlags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
+                    View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+                val decor = window.decorView
+                val flags = decor.systemUiVisibility and lightFlags.inv()
+                decor.systemUiVisibility = if (enabled) flags else flags or lightFlags
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val controller = window.insetsController
+                val appearance = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                    android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+                controller?.setSystemBarsAppearance(
+                    if (enabled) 0 else appearance,
+                    appearance,
+                )
+            }
+        }
+        return true
     }
 
     // ------------------------------------------------------------------ scanner
@@ -518,6 +600,25 @@ class MainActivity : Activity() {
         private const val CONNECT_ORIGIN = "https://$CONNECT_HOST/"
         private const val REQ_PICK = 41
         private const val REQ_CAMERA = 42
+
+        @Volatile
+        private var webViewRef: WeakReference<WebView>? = null
+
+        fun attachWebView(view: WebView?) {
+            webViewRef = view?.let { WeakReference(it) }
+        }
+
+        /** Push a system-clipboard change from the foreground service into the WebView. */
+        fun publishLocalClipboard(text: String) {
+            Handler(Looper.getMainLooper()).post {
+                val view = webViewRef?.get() ?: return@post
+                val safe = JSONObject.quote(text)
+                view.evaluateJavascript(
+                    "window.__airbridgeNativeClipboard && window.__airbridgeNativeClipboard($safe)",
+                    null,
+                )
+            }
+        }
 
         private val FALLBACK_HTML = """
             <!doctype html><html><body style="font:14px/1.5 sans-serif;padding:24px">

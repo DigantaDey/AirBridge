@@ -37,8 +37,9 @@ row and the transfers dock: **Upload** on the sender and **Download** on the rec
 alongside progress and an ETA. On Android the foreground notification mirrors the rate
 while the screen is off. If bytes stop moving, the reading decays to 0 B/s rather than
 freezing at the last value. Either side can cancel. Every file is hashed with SHA-256 as
-it streams and the receiver compares that against the hash the sender declared, so a
-corrupted file shows up as unverified rather than passing quietly.
+it streams and the receiver compares that against the hash the sender declared **before**
+anything is saved: a mismatched or incomplete file is rejected and its partial discarded,
+rather than appearing in Downloads as a corrupted video.
 
 Transfer history (last 50) lives in the browser's local storage and is reconciled
 between paired devices over the encrypted channel when they reconnect, so a reload on
@@ -58,9 +59,10 @@ file anchors an append-only, fixed-width resume journal, checkpointed in bounded
 instead of rewriting the full manifest for every chunk. A transfer that is interrupted
 (tab closed, network dropped) can therefore resume from the highest contiguous chunk
 already on disk without quadratic metadata I/O; at most one 32-chunk batch needs to be
-re-sent after an unclean shutdown. A re-delivered chunk is a no-op, and a transfer that
-is cancelled or declines leaves its partial behind under
-`~/Downloads/AirBridge/.airbridge-partial/` rather than a corrupt file.
+re-sent after an unclean shutdown. A re-delivered chunk is a no-op. The daemon verifies
+the sender's SHA-256 before renaming the `.part` file, and a cancelled, declined or
+failed verification leaves no finished file behind; a mismatch removes the partial under
+`~/Downloads/AirBridge/.airbridge-partial/` instead of publishing corrupt bytes.
 
 The folder icon in the header (and next to saved items in **Recent transfers**) opens
 that folder in Finder, Explorer, or your Linux file manager. Folder browsing for the
@@ -83,9 +85,27 @@ at roughly 5 MB.
 *Auto-beam copied text* is on by default. On the machine running the server it watches
 the OS clipboard in the background through `pbpaste`/`pbcopy` on macOS, PowerShell's
 `Get-Clipboard`/`Set-Clipboard` on Windows, or `wl-paste`/`xclip`/`xsel` on Linux, so
-copying on the Mac beams without switching back to the tab. On Android it hooks the
-page's copy event, the Android share sheet (when installed as a PWA), and, if the
-browser grants clipboard read, a check when you return to the tab.
+copying on the Mac beams without switching back to the tab. The desktop daemon also
+keeps a small **headless encrypted peer** alive: it joins the same pair code and holds
+the ECDH session, so clipboard sharing continues even when every AirBridge browser tab
+is closed. Set `AIRBRIDGE_BACKGROUND_CLIPBOARD=0` to disable that peer.
+
+On Android, *Background clipboard & connection* is on by default after pairing. A
+foreground service keeps the WebView and its encrypted session alive, watches the
+system clipboard natively, and writes incoming beams to the system clipboard. It still
+uses the page's copy event and the PWA share sheet when available. Android 10+ can
+suppress clipboard reads while an app is hidden, so background capture is best effort
+on those devices; returning to the app flushes anything it missed.
+
+For stronger hidden capture, **Settings → Accessibility-assisted clipboard capture**
+offers an explicit Accessibility Service opt-in. It is off by default. Opting in persists
+the choice, and the app then asks you to enable *AirBridge clipboard bridge* in Android's
+Accessibility settings; the service cannot be enabled silently by the app. Once both are
+on, copy and selection events trigger a plain-text clipboard read that is forwarded to the
+paired computer. The service does not retrieve window content, read text fields, record
+keystrokes or perform gestures, and Android/OEM builds may still deny background
+clipboard reads. It improves best-effort capture; it is not an OS guarantee, and the
+Mac daemon and Android foreground service still need to be alive for a fully closed app.
 
 Incoming beams are written to the host OS clipboard on the Mac and to the browser
 clipboard elsewhere, with a **Copy** toast for browsers that refuse the write. The last
@@ -277,6 +297,7 @@ Environment variables, all optional:
 | `AIRBRIDGE_DOWNLOAD_DIR` | `~/Downloads/AirBridge` | Received-files folder |
 | `AIRBRIDGE_LOCAL_DAEMON` | on outside tests | `0` disables direct-to-disk saving |
 | `AIRBRIDGE_CLIPBOARD_WATCH` | on outside tests | `0` disables the host OS clipboard bridge |
+| `AIRBRIDGE_BACKGROUND_CLIPBOARD` | on outside tests | `0` disables the daemon's headless clipboard peer |
 | `NODE_ENV` | unset | `production` serves the built client from `dist/client` |
 
 The server's own endpoints, for debugging or scripting: `GET /api/health`,
@@ -420,7 +441,7 @@ These are real gaps, not TODO padding:
 
 ```sh
 npm run typecheck   # tsc --noEmit
-npm test            # vitest: 9 files, 47 tests
+npm test            # vitest: 19 files, 125 tests
 npm run build       # vite client + tsc server
 ```
 
@@ -433,7 +454,9 @@ Layout:
 - `src/shared` — protocol types, frame codecs, pair codes, ZIP writer.
 - `bin/airbridge.mjs` — CLI entry point (daemon and one-shot send).
 - `tests/` — protocol, crypto, end-to-end relay transfers, TLS/HTTPS, security and
-  received-folder behaviour, CLI/daemon, transfer speed, ZIP, and UI tests.
+  received-folder behaviour, CLI/daemon, background clipboard, hash-before-save and
+  stale-partial-truncation file integrity, explicit Accessibility Service opt-in,
+  transfer speed, ZIP, and UI tests.
 - `public/` — PWA manifest with the share target, service worker, icon.
 
 `npm run build` writes `dist/client` and `dist/server`; those are build outputs, not
@@ -521,11 +544,12 @@ browser UI. Three things make that possible:
   the pairing QR the computer prints (`https://<host>/?pair=ABC-DEF`). Closing it (×)
   leaves a connect screen styled like the rest of the app: computers found over mDNS,
   or a typed address, plus the same scanner again.
-- **A small bridge** (`window.AirBridgeAndroid`) for the four things a WebView cannot do:
+- **A small bridge** (`window.AirBridgeAndroid`) for the things a WebView cannot do:
   clipboard read/write, saving received files to Downloads (a `blob:` download link is
-  a no-op inside a WebView), starting the scanner, and switching computers from
-  *Settings → Change computer*. Everything else in the page is untouched, so a browser
-  sees no difference.
+  a no-op inside a WebView), starting the scanner, switching computers from
+  *Settings → Change computer*, publishing live transfer speed to the foreground
+  notification, and matching the system bars to the UI's light/dark theme. Everything
+  else in the page is untouched, so a browser sees no difference.
 
 Practical notes:
 
@@ -534,6 +558,12 @@ Practical notes:
 - Re-pair with a different computer from the phone's *Settings → Change computer*, or by
   scanning again from the pairing dialog. `airbridge://<host>:<port>?pair=<code>` links
   do the same thing, which is handy with `adb shell am start -a android.intent.action.VIEW`.
+- The shell applies system-bar insets to the WebView and scanner chrome, wraps the
+  header actions into tappable rows on narrow screens, and centre-crops the camera
+  preview so the QR frame stays square instead of stretching.
+- Background clipboard is enabled by default after pairing. The foreground service
+  keeps the encrypted session and native clipboard watcher alive when you leave the
+  app; Android can still pause clipboard reads while the app is hidden.
 - Transfers run while the app is in the foreground; unlike a browser tab, the page keeps
   running when the screen is off only as long as Android keeps the WebView alive.
 - Build it with `gradle -p android :app:assembleDebug` (or `:app:assembleRelease`), and

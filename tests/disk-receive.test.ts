@@ -121,6 +121,91 @@ describe('append-only resume journal', () => {
       await fs.promises.rm(downloadDir, { recursive: true, force: true });
     }
   });
+
+  it('truncates a stale longer .part file before writing a fresh receive', async () => {
+    const downloadDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'airbridge-stale-'));
+    const config = {
+      enabled: true,
+      downloadDir,
+      autoSaveToDownloads: true,
+      notifyOnReceive: false,
+      revealInFinder: false,
+    };
+    const transferId = 'cafebabecafebabe';
+    const chunkSize = 64;
+    const totalChunks = 2;
+    const raw = new Uint8Array(chunkSize * totalChunks);
+    for (let i = 0; i < raw.length; i++) raw[i] = (i * 23 + 9) & 0xff;
+    const meta = {
+      transferId,
+      fileIndex: 0,
+      name: 'stale-part.bin',
+      size: raw.length,
+      chunkSize,
+      totalChunks,
+    };
+    const partialDir = path.join(downloadDir, '.airbridge-partial');
+    await fs.promises.mkdir(partialDir, { recursive: true });
+    // Orphaned .part from an earlier, longer receive: without truncation the
+    // trailing junk would survive the rename and become a corrupt file.
+    const stale = Buffer.alloc(raw.length + 512, 0x5a);
+    await fs.promises.writeFile(path.join(partialDir, `${transferId}-0.part`), stale);
+
+    const store = new PartialReceiveStore(config);
+    try {
+      for (let i = 0; i < totalChunks; i++) {
+        await store.writeChunk(meta, i, raw.slice(i * chunkSize, (i + 1) * chunkSize));
+      }
+      const done = await store.finalize(transferId, 0);
+      expect(done.bytes).toBe(raw.length);
+      expect(Buffer.compare(await fs.promises.readFile(done.savedPath), Buffer.from(raw))).toBe(0);
+      const stat = await fs.promises.stat(done.savedPath);
+      expect(stat.size).toBe(raw.length);
+    } finally {
+      await store.dispose();
+      await fs.promises.rm(downloadDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a hash mismatch before the .part file is renamed into Downloads', async () => {
+    const downloadDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'airbridge-hash-'));
+    const config = {
+      enabled: true,
+      downloadDir,
+      autoSaveToDownloads: true,
+      notifyOnReceive: false,
+      revealInFinder: false,
+    };
+    const transferId = 'ababababcdcdcdcd';
+    const chunkSize = 64;
+    const totalChunks = 2;
+    const raw = new Uint8Array(chunkSize * totalChunks);
+    for (let i = 0; i < raw.length; i++) raw[i] = (i * 29 + 11) & 0xff;
+    const meta = {
+      transferId,
+      fileIndex: 0,
+      name: 'hash-guard.bin',
+      size: raw.length,
+      chunkSize,
+      totalChunks,
+    };
+    const store = new PartialReceiveStore(config);
+    try {
+      for (let i = 0; i < totalChunks; i++) {
+        await store.writeChunk(meta, i, raw.slice(i * chunkSize, (i + 1) * chunkSize));
+      }
+      await expect(store.finalize(transferId, 0, '0'.repeat(64))).rejects.toThrow(
+        'SHA-256 verification failed',
+      );
+      const finalFiles = await fs.promises.readdir(downloadDir);
+      expect(finalFiles).not.toContain('hash-guard.bin');
+      const partialDir = path.join(downloadDir, '.airbridge-partial');
+      expect(await fs.promises.readdir(partialDir).catch(() => [])).toEqual([]);
+    } finally {
+      await store.dispose();
+      await fs.promises.rm(downloadDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('disk-backed receive endpoints', () => {

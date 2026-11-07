@@ -415,7 +415,9 @@ export interface DiskFinalizeResult {
 // them, and tests can supply in-memory mocks.
 
 interface FsWritableStream {
-  write(data: Uint8Array, options?: { at?: number }): Promise<void>;
+  /** File System Access API: WriteParams with an absolute position for sparse writes. */
+  write(chunk: FileSystemWriteChunkType): Promise<void>;
+  truncate(size: number): Promise<void>;
   close(): Promise<void>;
 }
 interface FsFileHandle {
@@ -453,6 +455,7 @@ abstract class ChunkStreamReceiver {
   protected finalized = false;
   protected result?: DiskFinalizeResult;
   protected error?: string;
+  protected expectedSha256?: string;
   protected finalizePromise?: Promise<DiskFinalizeResult | null>;
   private idleResolvers: Array<() => void> = [];
 
@@ -495,6 +498,11 @@ abstract class ChunkStreamReceiver {
     this.complete = true;
   }
 
+  /** Sender-declared full-file digest, checked before any file is saved. */
+  setExpectedSha256(sha256: string | undefined): void {
+    this.expectedSha256 = sha256;
+  }
+
   getError(): string | undefined {
     return this.error;
   }
@@ -508,6 +516,8 @@ abstract class ChunkStreamReceiver {
 
   protected abstract writeChunk(chunkIndex: number, data: Uint8Array): Promise<void>;
   protected abstract finalize(): Promise<DiskFinalizeResult | null>;
+  /** Remove any partial/final file when verification fails or the transfer is dropped. */
+  abstract discard(): Promise<void>;
   /** Close any open resources (streams/handles). Safe to call multiple times. */
   async dispose(): Promise<void> {}
 
@@ -519,6 +529,8 @@ abstract class ChunkStreamReceiver {
         .then(() => {
           this.stored.add(item.chunkIndex);
           this.notifyStored(item.chunkIndex, true);
+          // A later successful re-delivery heals an earlier write failure.
+          if (this.received.size === this.meta.totalChunks) this.error = undefined;
         })
         .catch((err) => {
           // A chunk that never landed on disk must not count as received,
@@ -559,6 +571,7 @@ abstract class ChunkStreamReceiver {
       if (forceFallback) this.error = 'Transfer incomplete: some chunks never arrived.';
       return null;
     }
+    if (this.error) return null;
     const result = await this.finalize();
     if (result) {
       this.finalized = true;
@@ -613,6 +626,7 @@ class DaemonReceiver extends ChunkStreamReceiver {
           body: JSON.stringify({
             transferId: this.meta.transferId,
             fileIndex: this.meta.fileIndex,
+            ...(this.expectedSha256 ? { expectedSha256: this.expectedSha256 } : {}),
           }),
         });
         if (!resp.ok) {
@@ -632,6 +646,21 @@ class DaemonReceiver extends ChunkStreamReceiver {
       }
     })();
     return this.finalizePromise;
+  }
+
+  async discard(): Promise<void> {
+    try {
+      await fetch(`${this.apiBase}/api/daemon/discard`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          transferId: this.meta.transferId,
+          fileIndex: this.meta.fileIndex,
+        }),
+      });
+    } catch {
+      // best effort; the daemon also expires stale partials on restart
+    }
   }
 }
 
@@ -655,10 +684,18 @@ class FileSystemReceiver extends ChunkStreamReceiver {
   async open(): Promise<void> {
     this.fileHandle = await this.directoryHandle.getFileHandle(this.meta.name, { create: true });
     this.stream = await this.fileHandle.createWritable();
+    // createWritable() starts with an empty temp file; sizing it up front makes
+    // every declared chunk offset valid and removes any stale trailing bytes
+    // from a previous file with the same name.
+    await this.stream.truncate(this.meta.size);
   }
 
   protected async writeChunk(chunkIndex: number, data: Uint8Array): Promise<void> {
-    await this.stream!.write(data, { at: chunkIndex * this.meta.chunkSize });
+    await this.stream!.write({
+      type: 'write',
+      position: chunkIndex * this.meta.chunkSize,
+      data,
+    } as WriteParams);
   }
 
   protected async finalize(): Promise<DiskFinalizeResult | null> {
@@ -670,6 +707,11 @@ class FileSystemReceiver extends ChunkStreamReceiver {
         const file = await this.fileHandle!.getFile();
         const sha256 = await hashStream(file.stream());
         const finalName = this.fileHandle!.name || this.meta.name;
+        if (this.expectedSha256 && sha256 !== this.expectedSha256) {
+          await this.discard();
+          this.error = 'SHA-256 verification failed; the partial file was discarded.';
+          return null;
+        }
         return {
           savedPath: `${this.directoryHandle.name}/${finalName}`,
           finalName,
@@ -2959,25 +3001,48 @@ export class WarpClient {
 
       const allChunksArrived =
         meta.size === 0 || recvState.receivedChunkCounts[fileIndex] >= meta.totalChunks;
-      if (!allChunksArrived && !forceFallback) continue;
+      if (!allChunksArrived) {
+        // A lost file-complete message may justify a fallback attempt, but
+        // never invent missing chunks: that used to save a truncated video.
+        if (forceFallback) {
+          hadDiskError = true;
+          recvState.session.errorMessage = `Transfer incomplete: ${meta.name} is missing chunks.`;
+        }
+        continue;
+      }
 
       const diskReceiver = recvState.diskReceivers?.get(fileIndex);
       const fsReceiver = recvState.fileSystemReceivers?.get(fileIndex);
       if (diskReceiver || fsReceiver) {
         const receiver = diskReceiver ?? fsReceiver!;
+        // Verify before the daemon renames the .part file or the File System
+        // stream closes a final file into the user's picked directory.
+        receiver.setExpectedSha256(completeMeta?.sha256);
         const diskResult = await receiver.finalizeIfReady(forceFallback);
         if (!this.incomingStates.has(transferId)) return;
         if (!diskResult) {
-          if (forceFallback) {
+          const receiverError = receiver.getError();
+          // A null result can simply mean "chunks are still in flight" on the
+          // normal path. Only a real write/verification error (or the final
+          // fallback attempt) is allowed to throw the partial away.
+          if (receiverError || forceFallback) {
+            await receiver.discard().catch(() => {});
             hadDiskError = true;
             recvState.session.errorMessage =
-              receiver.getError() || 'Transfer incomplete: some chunks never arrived.';
+              receiverError || 'The receiver could not finalize this file.';
           }
           continue;
         }
         const verified = completeMeta?.sha256
           ? diskResult.sha256 === completeMeta.sha256
           : allChunksArrived;
+        if (!verified) {
+          await receiver.discard().catch(() => {});
+          hadDiskError = true;
+          recvState.session.errorMessage =
+            `SHA-256 verification failed for ${meta.name}. The file was not saved.`;
+          continue;
+        }
         recvState.session.receivedFiles.push({
           index: fileIndex,
           name: meta.name,
@@ -2987,7 +3052,7 @@ export class WarpClient {
           chunks: [],
           blobUrl: undefined,
           sha256: diskResult.sha256,
-          verified,
+          verified: true,
           savedToMacPath: diskReceiver ? diskResult.savedPath : undefined,
           savedToDiskPath: fsReceiver ? diskResult.savedPath : undefined,
         });
@@ -3009,6 +3074,14 @@ export class WarpClient {
       const verified = completeMeta?.sha256
         ? computedHash === completeMeta.sha256
         : allChunksArrived;
+      if (!verified) {
+        // Do not create a Blob, auto-save to Downloads, or expose a record:
+        // a hash mismatch means these bytes are not the sender's file.
+        hadDiskError = true;
+        recvState.session.errorMessage =
+          `SHA-256 verification failed for ${meta.name}. The file was not saved.`;
+        continue;
+      }
 
       let blobUrl: string | undefined;
       if (
@@ -3057,7 +3130,7 @@ export class WarpClient {
         chunks: cleanChunks,
         blobUrl,
         sha256: computedHash,
-        verified,
+        verified: true,
         savedToMacPath,
       });
       recvState.session.receivedFiles.sort((a, b) => a.index - b.index);

@@ -4,10 +4,12 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.Settings
 import android.util.Base64
 import android.util.Log
 import android.webkit.JavascriptInterface
@@ -30,7 +32,8 @@ import java.net.URL
  *   2. saving received files (`<a download>` of a `blob:` URL is a no-op),
  *   3. scanning a pairing QR with the camera,
  *   4. leaving/joining a computer from the unpaired connect screen,
- *   5. showing live transfer speed in the foreground notification.
+ *   5. showing live transfer speed in the foreground notification,
+ *   6. keeping the system bars in sync with the web UI's light/dark theme.
  *
  * Everything here is called from a WebView Javascript thread, so it must not
  * touch Android UI directly; UI work is posted to the main thread.
@@ -47,6 +50,9 @@ class ShellBridge(private val activity: MainActivity) {
     fun copyText(text: String): Boolean {
         return try {
             val manager = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            // Suppress the foreground service's own clipboard listener so an
+            // incoming beam is not echoed straight back to the sender.
+            ConnectionService.markOwnClipboardWrite(text)
             manager.setPrimaryClip(ClipData.newPlainText("AirBridge", text))
             true
         } catch (e: Exception) {
@@ -256,12 +262,44 @@ class ShellBridge(private val activity: MainActivity) {
 
     @JavascriptInterface
     fun connectionContinuityEnabled(): Boolean =
-        activity.getSharedPreferences("airbridge", Context.MODE_PRIVATE)
-            .getBoolean("connectionContinuity", false)
+        Prefs(activity).connectionContinuity
 
     @JavascriptInterface
     fun setConnectionContinuityEnabled(enabled: Boolean): Boolean =
         activity.setConnectionContinuity(enabled)
+
+    // ------------------------------------------- accessibility-service opt-in
+    // These only persist the user's choice and open Android's settings. The OS
+    // deliberately provides no API to enable an accessibility service silently.
+
+    @JavascriptInterface
+    fun accessibilityOptInEnabled(): Boolean =
+        Prefs(activity).accessibilityClipboardOptIn
+
+    @JavascriptInterface
+    fun setAccessibilityOptInEnabled(enabled: Boolean): Boolean {
+        Prefs(activity).accessibilityClipboardOptIn = enabled
+        return true
+    }
+
+    @JavascriptInterface
+    fun accessibilityServiceEnabled(): Boolean =
+        ClipboardAccessibilityService.isEnabled(activity)
+
+    @JavascriptInterface
+    fun openAccessibilitySettings(): Boolean {
+        return try {
+            activity.runOnUiThread {
+                val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                activity.startActivity(intent)
+            }
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "could not open accessibility settings: ${e.message}")
+            false
+        }
+    }
 
     @JavascriptInterface
     fun setTransferActive(active: Boolean): Boolean =
@@ -270,6 +308,10 @@ class ShellBridge(private val activity: MainActivity) {
     @JavascriptInterface
     fun updateTransferSpeed(payloadJson: String): Boolean =
         activity.updateTransferSpeed(payloadJson)
+
+    @JavascriptInterface
+    fun setDarkTheme(enabled: Boolean): Boolean =
+        activity.setDarkTheme(enabled)
 
     // ------------------------------------------------------------------ helpers
 

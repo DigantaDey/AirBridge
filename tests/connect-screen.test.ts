@@ -22,6 +22,7 @@ interface FakeBridge {
   scanQr: () => boolean;
   forgetComputer: () => boolean;
   copyText?: (text: string) => boolean;
+  setDarkTheme?: (enabled: boolean) => boolean;
 }
 
 interface Mounted {
@@ -137,6 +138,21 @@ describe("unpaired connect screen", () => {
     (document.getElementById("scan") as HTMLButtonElement).click();
     (document.getElementById("scan-header") as HTMLButtonElement).click();
     expect(scanQr).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the Android system bars in sync with the connect screen theme", () => {
+    const setDarkTheme = vi.fn((_enabled: boolean) => true);
+    const bridge: FakeBridge = {
+      state: () => JSON.stringify({ paired: false, address: "", pairCode: "", camera: true }),
+      nearbyHosts: () => "[]",
+      connect: () => "",
+      scanQr: () => true,
+      forgetComputer: () => true,
+      setDarkTheme,
+    };
+    mount(bridge);
+    expect(setDarkTheme).toHaveBeenCalledTimes(1);
+    expect(typeof setDarkTheme.mock.calls[0][0]).toBe("boolean");
   });
 
   it("explains itself when the camera is missing", () => {

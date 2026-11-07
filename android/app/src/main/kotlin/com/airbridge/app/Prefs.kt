@@ -51,9 +51,23 @@ class Prefs(context: Context) {
         return code
     }
 
+    /**
+     * Background clipboard/connection is on by default after pairing. An
+     * explicit opt-out is persisted, so reopening Settings cannot silently
+     * re-enable it. Android may still pause clipboard reads while hidden.
+     */
     var connectionContinuity: Boolean
-        get() = sp.getBoolean("connectionContinuity", false)
+        get() = sp.getBoolean("connectionContinuity", true)
         set(value) = sp.edit().putBoolean("connectionContinuity", value).apply()
+
+    /**
+     * Accessibility-assisted hidden clipboard capture is OFF by default. The
+     * user must explicitly opt in, then enable the AirBridge service in
+     * Android's Accessibility settings; the app cannot enable it silently.
+     */
+    var accessibilityClipboardOptIn: Boolean
+        get() = sp.getBoolean("accessibilityClipboardOptIn", false)
+        set(value) = sp.edit().putBoolean("accessibilityClipboardOptIn", value).apply()
 
     /** Last working loopback port; 0 until the relay has run once. */
     var relayPort: Int
@@ -64,6 +78,12 @@ class Prefs(context: Context) {
     fun pairingLink(): PairingLink? = PairingLink.parse(target)
 
     fun forget() {
-        sp.edit().remove("target").remove("serverUrl").remove("pairCode").remove("pendingPairCode").apply()
+        sp.edit()
+            .remove("target")
+            .remove("serverUrl")
+            .remove("pairCode")
+            .remove("pendingPairCode")
+            .remove("accessibilityClipboardOptIn")
+            .apply()
     }
 }

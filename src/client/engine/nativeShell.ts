@@ -41,10 +41,19 @@ export interface AirBridgeNativeBridge {
   forgetComputer?(): boolean;
   connectionContinuityEnabled?(): boolean;
   setConnectionContinuityEnabled?(enabled: boolean): boolean;
+  /** Explicit, persisted opt-in for Accessibility-assisted hidden clipboard capture. */
+  accessibilityOptInEnabled?(): boolean;
+  setAccessibilityOptInEnabled?(enabled: boolean): boolean;
+  /** Whether the user has enabled the AirBridge service in Android Settings. */
+  accessibilityServiceEnabled?(): boolean;
+  /** Opens Android's Accessibility settings; cannot enable the service itself. */
+  openAccessibilitySettings?(): boolean;
   /** Holds a native foreground service / partial wake lock only while a transfer is active. */
   setTransferActive?(active: boolean): boolean;
   /** Updates the foreground notification with the live Upload/Download rate. */
   updateTransferSpeed?(payloadJson: string): boolean;
+  /** Keeps the Android status/navigation bars legible in light or dark mode. */
+  setDarkTheme?(enabled: boolean): boolean;
 }
 
 /** Minimal live-transfer shape the Android notification needs. */
@@ -60,6 +69,10 @@ export interface NativeTransferSpeedSnapshot {
 declare global {
   interface Window {
     AirBridgeAndroid?: AirBridgeNativeBridge;
+    /** The Android foreground service pushes system-clipboard changes here. */
+    __airbridgeNativeClipboard?: (text: string) => void;
+    /** Android reports whether the Accessibility Service is enabled in OS settings. */
+    __airbridgeNativeAccessibilityState?: (enabled: boolean) => void;
   }
 }
 
@@ -112,6 +125,29 @@ export function getNativeConnectionContinuity(): boolean {
 
 export function setNativeConnectionContinuity(enabled: boolean): boolean {
   try { return nativeBridge()?.setConnectionContinuityEnabled?.(enabled) === true; } catch { return false; }
+}
+
+/** Off by default; the user must opt in and enable the OS service separately. */
+export function getNativeAccessibilityOptIn(): boolean {
+  try { return nativeBridge()?.accessibilityOptInEnabled?.() === true; } catch { return false; }
+}
+
+export function setNativeAccessibilityOptIn(enabled: boolean): boolean {
+  try { return nativeBridge()?.setAccessibilityOptInEnabled?.(enabled) === true; } catch { return false; }
+}
+
+export function isNativeAccessibilityServiceEnabled(): boolean {
+  try { return nativeBridge()?.accessibilityServiceEnabled?.() === true; } catch { return false; }
+}
+
+/** Opens Android Settings; the app cannot grant this permission itself. */
+export function openNativeAccessibilitySettings(): boolean {
+  try { return nativeBridge()?.openAccessibilitySettings?.() === true; } catch { return false; }
+}
+
+/** Sync Android's system bars with the web app's light/dark appearance. */
+export function setNativeDarkTheme(enabled: boolean): boolean {
+  try { return nativeBridge()?.setDarkTheme?.(enabled) === true; } catch { return false; }
 }
 
 /** Keep the Android CPU awake while the WebView is actively sending or receiving a transfer. */

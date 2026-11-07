@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_label">AirBridge clipboard bridge</string>
+    <string name="accessibility_service_description">Optional clipboard bridge. After you opt in inside AirBridge and enable this service here, AirBridge watches for copy and selection events so plain text you copy can reach your paired computer while the AirBridge screen is hidden. AirBridge cannot enable this service itself, does not read other apps\' text fields or keystrokes, and Android 10+ may still restrict background clipboard access on some devices.</string>
+</resources>
