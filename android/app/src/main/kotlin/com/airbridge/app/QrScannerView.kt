@@ -274,10 +274,10 @@ class QrScannerView(context: Context) : FrameLayout(context) {
                 return
             }
             val viewAspect = width.toFloat() / height.toFloat()
-            if (viewAspect > aspectRatio) {
-                setMeasuredDimension(width, (width / aspectRatio).toInt())
-            } else {
+            if (viewAspect < aspectRatio) {
                 setMeasuredDimension((height * aspectRatio).toInt(), height)
+            } else {
+                setMeasuredDimension(width, (width / aspectRatio).toInt())
             }
         }
     }
@@ -298,6 +298,7 @@ class QrScannerView(context: Context) : FrameLayout(context) {
             return
         }
         preview.aspectRatio = previewAspect(info)
+        preview.holder.setFixedSize(info.size.width, info.size.height)
         preview.requestLayout()
         val thread = HandlerThread("airbridge-qr").also { it.start() }
         cameraThread = thread
