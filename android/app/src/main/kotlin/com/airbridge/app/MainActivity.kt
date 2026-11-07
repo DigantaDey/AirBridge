@@ -227,6 +227,9 @@ class MainActivity : Activity() {
 
         webView = WebView(this).apply {
             setBackgroundColor(0xFFFFFFFF.toInt())
+            overScrollMode = View.OVER_SCROLL_NEVER
+            isVerticalScrollBarEnabled = false
+            isHorizontalScrollBarEnabled = false
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.useWideViewPort = false
@@ -508,6 +511,12 @@ class MainActivity : Activity() {
             lastChromeInsets = bars
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             scanner?.applyChromeInsets(bars)
+
+            val topDp = (top / resources.displayMetrics.density).toInt()
+            val script = "document.documentElement.style.setProperty('--ab-safe-top', '${topDp}px');"
+            if (::webView.isInitialized) {
+                webView.evaluateJavascript(script, null)
+            }
             WindowInsets.CONSUMED
         }
         window.decorView.setOnApplyWindowInsetsListener(listener)
@@ -534,7 +543,13 @@ class MainActivity : Activity() {
         }
         val script = nativeShellScript.orEmpty()
         if (script.isBlank()) return
-        view.evaluateJavascript(script, null)
+        view.evaluateJavascript(script) {
+            val topDp = (lastChromeInsets.top / resources.displayMetrics.density).toInt()
+            if (topDp > 0) {
+                val insetScript = "document.documentElement.style.setProperty('--ab-safe-top', '${topDp}px');"
+                view.evaluateJavascript(insetScript, null)
+            }
+        }
     }
 
     /** Opt into edge-to-edge on API 30-34; API 35+ already enforces it. */

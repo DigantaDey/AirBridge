@@ -3,9 +3,8 @@
  *
  * The paired UI is served by the desktop binary, not baked into the APK. This
  * shim keeps the status/navigation-bar, responsive header and Back behaviour
- * correct even when the desktop is still running an older build. The native
- * container around the WebView already reserves the real system-bar space, so
- * CSS safe-area values must stay at zero here to avoid double padding.
+ * correct even when the desktop is still running an older build. Safe-area
+ * insets are injected dynamically into CSS --ab-safe-top.
  */
 (function () {
   if (window.__airbridgeNativeShellShimInstalled) return;
@@ -21,22 +20,25 @@
     style.id = styleId;
     style.textContent =
       'html.ab-native-shell[data-airbridge-native-shell]{' +
-      '--ab-gutter:clamp(12px,4vw,24px);' +
-      '--ab-safe-top:0px;--ab-safe-right:0px;--ab-safe-bottom:0px;--ab-safe-left:0px;}' +
-      'html,body{max-width:100%!important;overflow-x:hidden!important;}' +
+      '--ab-gutter:clamp(12px,4vw,24px);}' +
+      'html,body{width:100%!important;max-width:100vw!important;overflow-x:hidden!important;' +
+      'overscroll-behavior-x:none!important;touch-action:pan-y!important;' +
+      '-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;}' +
+      'input,textarea,select,pre,code,[contenteditable="true"]{-webkit-user-select:text!important;user-select:text!important;}' +
       'button,input,textarea,select{font:inherit;max-width:100%!important;}' +
       '.brand,.header-actions{min-width:0!important;}' +
       '.utility-modal{max-width:calc(100% - 40px)!important;}' +
       '.modal-backdrop{padding:12px var(--ab-gutter)!important;}' +
       '.text-button{white-space:normal!important;overflow-wrap:anywhere!important;}' +
+      '.utility-header{height:auto!important;min-height:calc(56px + var(--ab-safe-top,0px))!important;' +
+      'padding-top:max(var(--ab-safe-top,0px),env(safe-area-inset-top,0px),12px)!important;' +
+      'padding-bottom:10px!important;padding-left:var(--ab-gutter)!important;padding-right:var(--ab-gutter)!important;}' +
       '@media(max-width:920px){' +
-      '.utility-header{height:auto!important;min-height:62px!important;' +
-      'padding:10px var(--ab-gutter)!important;flex-direction:column!important;' +
-      'align-items:stretch!important;gap:8px!important;}' +
+      '.utility-header{flex-direction:column!important;align-items:stretch!important;gap:8px!important;}' +
       '.header-actions{display:flex!important;flex-wrap:wrap!important;width:100%!important;' +
       'gap:6px!important;justify-content:flex-start!important;align-items:center!important;}' +
       '.header-actions>*{min-width:0!important;min-height:40px!important;' +
-      'padding:6px 8px!important;font-size:12px!important;line-height:1.2!important;' +
+      'padding:6px 10px!important;font-size:12px!important;line-height:1.2!important;' +
       'text-align:center!important;white-space:nowrap!important;}' +
       '.header-count{display:none!important;}' +
       '.utility-main{width:calc(100% - var(--ab-gutter) - var(--ab-gutter))!important;' +
