@@ -79,6 +79,9 @@ CP="$OUT/engine"
 echo "==> running pairing-link checks"
 "$JAVA" -cp "$CP" com.airbridge.engine.PairingLinkTestKt
 
+echo "==> running append-only file journal checks"
+"$JAVA" -cp "$CP" com.airbridge.engine.FilesTestKt
+
 echo "==> typechecking app against android.jar"
 mapfile -t APP_SRC < <(find "$REPO/android/app/src/main/kotlin" -name '*.kt' | sort)
 # Gradle fetches the real com.google.zxing:core jar; this script has no network,

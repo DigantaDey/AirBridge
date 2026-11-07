@@ -40,9 +40,12 @@ async function refSha256(data: Uint8Array): Promise<string> {
 // In-memory mock of the File System Access API
 // ---------------------------------------------------------------------------
 
+let mockWriteHook: (() => Promise<void>) | null = null;
+
 class MockWritableStream {
   private buffer = new Uint8Array(0);
   async write(data: Uint8Array, options?: { at?: number }): Promise<void> {
+    if (mockWriteHook) await mockWriteHook();
     const at = options?.at ?? this.buffer.byteLength;
     if (at + data.byteLength > this.buffer.byteLength) {
       const next = new Uint8Array(at + data.byteLength);
@@ -235,6 +238,49 @@ describe('phone disk-backed receive (File System Access API)', () => {
       const written = mockDir.getFile('Holiday-Photos.zip')!.getBuffer();
       expect(Buffer.compare(Buffer.from(written), Buffer.from(raw))).toBe(0);
     } finally {
+      pair.stop();
+    }
+  });
+
+  it('does not advance progress or ACK storage before the disk write completes', async () => {
+    const pair = await makePair();
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    let writesStarted = 0;
+    mockWriteHook = async () => {
+      writesStarted++;
+      await writeGate;
+    };
+    try {
+      const size = 2 * 1024 * 1024;
+      const raw = new Uint8Array(size);
+      for (let i = 0; i < size; i++) raw[i] = (i * 19 + 3) & 0xff;
+      const input: SendableFileInput = {
+        name: 'durable-ack.bin',
+        size,
+        type: 'application/octet-stream',
+        async sliceBytes(start, end) {
+          return raw.slice(start, end);
+        },
+      };
+
+      const sendPromise = pair.sender.sendFiles(pair.senderPeerTarget, [input]);
+      await waitForCondition(() => writesStarted > 0);
+      const duringWrite = pair.receiver.getSnapshot().transfers.find(
+        (transfer) => transfer.files[0]?.name === input.name,
+      );
+      expect(duringWrite?.status).toBe('transferring');
+      // The old implementation counted bytes as soon as they entered the
+      // write queue, hiding disk lag and releasing the sender prematurely.
+      expect(duringWrite?.transferredBytes).toBe(0);
+
+      releaseWrite();
+      await sendPromise;
+      await waitForCondition(() => pair.getReceiverCompleted() !== null);
+      expect(pair.getReceiverCompleted()!.receivedFiles[0].verified).toBe(true);
+    } finally {
+      mockWriteHook = null;
+      releaseWrite();
       pair.stop();
     }
   });

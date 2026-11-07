@@ -347,7 +347,9 @@ export function PairingDock({
                           {tr.status === "pending-accept"
                             ? "Waiting for recipient to accept…"
                             : tr.status === "transferring"
-                              ? `${pct}% · ${formatSpeed(tr.speedBytesPerSec)}${
+                              ? `${pct}% · ${
+                                  tr.direction === "incoming" ? "Download" : "Upload"
+                                } ${formatSpeed(tr.speedBytesPerSec)}${
                                   tr.etaSeconds
                                     ? ` · ${tr.etaSeconds}s left`
                                     : ""

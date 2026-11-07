@@ -355,7 +355,7 @@ export function CompanionSimulator({
                 </span>
                 <span className="font-mono-tabular text-[10px] text-emerald-400 shrink-0">
                   {tr.status === 'transferring'
-                    ? formatSpeed(tr.speedBytesPerSec)
+                    ? `${tr.direction === 'incoming' ? 'Download' : 'Upload'} ${formatSpeed(tr.speedBytesPerSec)}`
                     : tr.status}
                 </span>
               </div>

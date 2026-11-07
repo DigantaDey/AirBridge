@@ -61,11 +61,11 @@ export function isValidFileManifest(files: unknown, totalBytes: unknown): files 
   }
   return sum === totalBytes;
 }
-const MAX_UNACKED_CHUNKS = 256; // 64 MiB sliding window at 256 KiB chunks — never let ACK RTT throttle a fast LAN link
-const ACK_INTERVAL_CHUNKS = 32; // receiver ACKs at most every 32 chunks (8 MiB) + on each file's last chunk
+const MAX_UNACKED_CHUNKS = 64; // 16 MiB of receiver-confirmed work: deep for LAN RTTs without hiding a slow disk
+const ACK_INTERVAL_CHUNKS = 32; // receiver ACKs every 32 contiguous stored chunks (8 MiB) + file completion
 const ENCRYPT_PIPELINE_DEPTH = 8; // file reads + AES-GCM encrypts kept in flight ahead of the socket (2 MiB of frames)
-const MAX_BUFFER_HIGH_WATER = 16 * 1024 * 1024; // 16 MiB socket buffer threshold — deep enough to keep the pipe full
-const BUFFER_LOW_WATER = 4 * 1024 * 1024; // resume sending once a drained socket falls to 4 MiB
+const MAX_BUFFER_HIGH_WATER = 4 * 1024 * 1024; // cap queued bytes so other apps are not stuck behind a huge Wi-Fi buffer
+const BUFFER_LOW_WATER = 1024 * 1024; // resume after the socket has drained below 1 MiB
 
 export interface SendableFileInput {
   name: string;
@@ -193,6 +193,9 @@ interface InternalReceiveState {
   session: TransferSessionView;
   fileChunks: Array<Array<Uint8Array | undefined>>;
   receivedChunkCounts: number[];
+  /** First chunk not yet stored contiguously, and last ACK sent, per file. */
+  nextContiguousChunks: number[];
+  lastAckedChunks: number[];
   bytesReceived: number;
   lastSpeedTs: number;
   lastSpeedBytes: number;
@@ -352,7 +355,10 @@ type ShowDirectoryPicker = (options?: {
  */
 abstract class ChunkStreamReceiver {
   protected readonly queue: Array<{ chunkIndex: number; data: Uint8Array }> = [];
+  /** Queued or durable chunks (dedup), and durable chunks (ACK/finalize). */
   protected readonly received = new Set<number>();
+  protected readonly stored = new Set<number>();
+  private readonly storedWaiters = new Map<number, Array<(stored: boolean) => void>>();
   protected pending = 0;
   protected complete = false;
   protected finalized = false;
@@ -370,8 +376,30 @@ abstract class ChunkStreamReceiver {
     return this.received.has(chunkIndex);
   }
 
+  hasStored(chunkIndex: number): boolean {
+    return this.stored.has(chunkIndex);
+  }
+
   markReceived(chunkIndex: number): void {
     this.received.add(chunkIndex);
+    this.stored.add(chunkIndex);
+  }
+
+  /** Resolve only after this chunk's disk write has succeeded. */
+  waitUntilStored(chunkIndex: number): Promise<boolean> {
+    if (this.stored.has(chunkIndex)) return Promise.resolve(true);
+    if (this.error && !this.received.has(chunkIndex)) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      const waiters = this.storedWaiters.get(chunkIndex) ?? [];
+      waiters.push(resolve);
+      this.storedWaiters.set(chunkIndex, waiters);
+    });
+  }
+
+  private notifyStored(chunkIndex: number, stored: boolean): void {
+    const waiters = this.storedWaiters.get(chunkIndex) ?? [];
+    this.storedWaiters.delete(chunkIndex);
+    for (const resolve of waiters) resolve(stored);
   }
 
   markComplete(): void {
@@ -399,6 +427,10 @@ abstract class ChunkStreamReceiver {
       const item = this.queue.shift()!;
       this.pending++;
       void this.writeChunk(item.chunkIndex, item.data)
+        .then(() => {
+          this.stored.add(item.chunkIndex);
+          this.notifyStored(item.chunkIndex, true);
+        })
         .catch((err) => {
           // A chunk that never landed on disk must not count as received,
           // or finalization would hash a truncated file as complete.
@@ -406,6 +438,7 @@ abstract class ChunkStreamReceiver {
           this.error =
             this.error ||
             (err instanceof Error ? err.message : 'Failed to write chunk to disk.');
+          this.notifyStored(item.chunkIndex, false);
         })
         .finally(() => {
           this.pending--;
@@ -1539,20 +1572,29 @@ export class WarpClient {
     const resume: Record<number, number> = {};
     let anyResume = false;
 
-    for (const file of recvState.session.files) {
-      const receiver = new DaemonReceiver(
-        {
-          transferId: recvState.session.transferId,
-          fileIndex: file.index,
-          name: file.name,
-          size: file.size,
-          chunkSize: file.chunkSize,
-          totalChunks: file.totalChunks,
-        },
-        recvState.session.peerName,
-        this.apiBaseUrl(),
-      );
-      const onDisk = await this.queryDiskPartial(recvState.session.transferId, file.index);
+    // Resume probes are independent loopback reads. Doing up to 100 of them
+    // serially added a visible per-file delay before every multi-file accept.
+    const probes = await Promise.all(
+      recvState.session.files.map(async (file) => {
+        const receiver = new DaemonReceiver(
+          {
+            transferId: recvState.session.transferId,
+            fileIndex: file.index,
+            name: file.name,
+            size: file.size,
+            chunkSize: file.chunkSize,
+            totalChunks: file.totalChunks,
+          },
+          recvState.session.peerName,
+          this.apiBaseUrl(),
+        );
+        receivers.set(file.index, receiver);
+        const onDisk = await this.queryDiskPartial(recvState.session.transferId, file.index);
+        return { file, receiver, onDisk };
+      }),
+    );
+
+    for (const { file, receiver, onDisk } of probes) {
       let resumeFrom = 0;
       if (onDisk && onDisk.receivedChunks.length > 0) {
         const present = new Set(onDisk.receivedChunks);
@@ -1563,11 +1605,12 @@ export class WarpClient {
         recvState.receivedChunkCounts[file.index] = onDisk.receivedCount;
         recvState.bytesReceived += onDisk.receivedBytes;
       }
+      recvState.nextContiguousChunks[file.index] = resumeFrom;
+      recvState.lastAckedChunks[file.index] = resumeFrom - 1;
       if (resumeFrom > 0) {
         resume[file.index] = resumeFrom;
         anyResume = true;
       }
-      receivers.set(file.index, receiver);
     }
 
     recvState.diskReceivers = receivers;
@@ -1609,21 +1652,23 @@ export class WarpClient {
     directoryHandle: FsDirectoryHandle,
   ): Promise<void> {
     const receivers = new Map<number, FileSystemReceiver>();
-    for (const file of recvState.session.files) {
-      const receiver = new FileSystemReceiver(
-        {
-          transferId: recvState.session.transferId,
-          fileIndex: file.index,
-          name: file.name,
-          size: file.size,
-          chunkSize: file.chunkSize,
-          totalChunks: file.totalChunks,
-        },
-        directoryHandle,
-      );
-      await receiver.open();
-      receivers.set(file.index, receiver);
-    }
+    await Promise.all(
+      recvState.session.files.map(async (file) => {
+        const receiver = new FileSystemReceiver(
+          {
+            transferId: recvState.session.transferId,
+            fileIndex: file.index,
+            name: file.name,
+            size: file.size,
+            chunkSize: file.chunkSize,
+            totalChunks: file.totalChunks,
+          },
+          directoryHandle,
+        );
+        await receiver.open();
+        receivers.set(file.index, receiver);
+      }),
+    );
     recvState.fileSystemReceivers = receivers;
   }
 
@@ -2059,6 +2104,8 @@ export class WarpClient {
             Array.from({ length: f.totalChunks }, () => undefined)
           ),
           receivedChunkCounts: payload.files.map(() => 0),
+          nextContiguousChunks: payload.files.map(() => 0),
+          lastAckedChunks: payload.files.map(() => -1),
           bytesReceived: 0,
           lastSpeedTs: Date.now(),
           lastSpeedBytes: 0,
@@ -2406,37 +2453,77 @@ export class WarpClient {
 
     recvState.session.transport = transport;
 
-    const diskReceiver = recvState.diskReceivers?.get(decoded.fileIndex);
-    const fsReceiver = recvState.fileSystemReceivers?.get(decoded.fileIndex);
-    if (diskReceiver) {
-      if (!diskReceiver.hasReceived(decoded.chunkIndex)) {
-        diskReceiver.push(decoded.chunkIndex, plainBytes);
-        recvState.receivedChunkCounts[decoded.fileIndex]++;
-        recvState.bytesReceived += plainBytes.byteLength;
-      }
-    } else if (fsReceiver) {
-      if (!fsReceiver.hasReceived(decoded.chunkIndex)) {
-        fsReceiver.push(decoded.chunkIndex, plainBytes);
-        recvState.receivedChunkCounts[decoded.fileIndex]++;
+    const fileIndex = decoded.fileIndex;
+    const chunkIndex = decoded.chunkIndex;
+    const diskReceiver = recvState.diskReceivers?.get(fileIndex);
+    const fsReceiver = recvState.fileSystemReceivers?.get(fileIndex);
+    const streamReceiver = diskReceiver ?? fsReceiver;
+    if (streamReceiver) {
+      const alreadyQueued = streamReceiver.hasReceived(chunkIndex);
+      if (!alreadyQueued) streamReceiver.push(chunkIndex, plainBytes);
+      // Queueing is not receiving: only durable bytes may advance progress or
+      // release the sender's sliding window. This is the backpressure signal
+      // that keeps a slow disk from accumulating an unbounded invisible queue.
+      const stored = await streamReceiver.waitUntilStored(chunkIndex);
+      if (!stored || this.incomingStates.get(decoded.transferId) !== recvState) return;
+      if (!alreadyQueued) {
+        recvState.receivedChunkCounts[fileIndex]++;
         recvState.bytesReceived += plainBytes.byteLength;
       }
     } else {
-      const fileArr = recvState.fileChunks[decoded.fileIndex];
+      const fileArr = recvState.fileChunks[fileIndex];
       if (!fileArr) return;
-
-      if (!fileArr[decoded.chunkIndex]) {
-        fileArr[decoded.chunkIndex] = plainBytes;
-        recvState.receivedChunkCounts[decoded.fileIndex]++;
+      if (!fileArr[chunkIndex]) {
+        fileArr[chunkIndex] = plainBytes;
+        recvState.receivedChunkCounts[fileIndex]++;
         recvState.bytesReceived += plainBytes.byteLength;
       }
     }
 
+    const meta = recvState.session.files[fileIndex];
+    if (!meta) return;
     recvState.session.transferredBytes = recvState.bytesReceived;
 
+    const isChunkStored = (index: number): boolean =>
+      streamReceiver
+        ? streamReceiver.hasStored(index)
+        : Boolean(recvState.fileChunks[fileIndex]?.[index]);
+    let nextContiguous = recvState.nextContiguousChunks[fileIndex];
+    while (nextContiguous < meta.totalChunks && isChunkStored(nextContiguous)) {
+      nextContiguous++;
+    }
+    recvState.nextContiguousChunks[fileIndex] = nextContiguous;
+    const contiguousAck = nextContiguous - 1;
+    const lastAck = recvState.lastAckedChunks[fileIndex];
+    if (
+      contiguousAck > lastAck &&
+      (contiguousAck - lastAck >= ACK_INTERVAL_CHUNKS || nextContiguous === meta.totalChunks)
+    ) {
+      recvState.lastAckedChunks[fileIndex] = contiguousAck;
+      // ACK only a contiguous durable prefix. Decrypts and writes can finish
+      // out of order, so acknowledging an arbitrary completed chunk would
+      // incorrectly release earlier chunks that are still in flight.
+      void this.sendControlMessage(
+        fromPeerId,
+        {
+          kind: 'chunk-ack',
+          transferId: decoded.transferId,
+          fileIndex,
+          ackedChunkIndex: contiguousAck,
+          bytesReceivedTotal: recvState.bytesReceived,
+        },
+        true
+      ).catch(() => {});
+    }
+
+    const fileStored = recvState.receivedChunkCounts[fileIndex] >= meta.totalChunks;
     const now = Date.now();
     const elapsed = (now - recvState.lastSpeedTs) / 1000;
-    if (elapsed >= 0.15) {
-      const instant = (recvState.bytesReceived - recvState.lastSpeedBytes) / elapsed;
+    // Include the last chunk so batches of small files do not finish while the
+    // receiver still displays 0 B/s merely because no 150 ms tick elapsed.
+    if (elapsed >= 0.15 || fileStored) {
+      const instant =
+        (recvState.bytesReceived - recvState.lastSpeedBytes) / Math.max(elapsed, 0.001);
       recvState.session.speedBytesPerSec =
         recvState.session.speedBytesPerSec === 0
           ? instant
@@ -2451,29 +2538,9 @@ export class WarpClient {
       this.emit();
     }
 
-    const meta = recvState.session.files[decoded.fileIndex];
-    const isLastChunk = meta && decoded.chunkIndex === meta.totalChunks - 1;
-    if (decoded.chunkIndex % ACK_INTERVAL_CHUNKS === 0 || isLastChunk) {
-      // Fire-and-forget: ACKs are infrequent now (every 8 MiB), and awaiting
-      // their AES-GCM encryption here would stall this chunk's decrypt slot
-      // in the receive pipeline behind control-channel latency.
-      void this.sendControlMessage(
-        fromPeerId,
-        {
-          kind: 'chunk-ack',
-          transferId: decoded.transferId,
-          fileIndex: decoded.fileIndex,
-          ackedChunkIndex: decoded.chunkIndex,
-          bytesReceivedTotal: recvState.bytesReceived,
-        },
-        true
-      ).catch(() => {});
-    }
-
     if (
-      meta &&
-      recvState.receivedChunkCounts[decoded.fileIndex] >= meta.totalChunks &&
-      (recvState.fileCompletePayloads.has(decoded.fileIndex) || recvState.transferCompleteReceived)
+      fileStored &&
+      (recvState.fileCompletePayloads.has(fileIndex) || recvState.transferCompleteReceived)
     ) {
       await this.scheduleReceiveFinalization(decoded.transferId, false);
     }
