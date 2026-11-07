@@ -169,7 +169,11 @@ npm run build
 
 ## 📄 License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the **AirBridge Fair-Use & Non-Commercial License**.
+- **Individual / Personal Use**: Free for personal, individual non-commercial use on personal devices.
+- **Commercial / Enterprise / Organizational Use**: Any commercial, corporate, enterprise, or monetized usage requires explicit prior written consent from the author ([Diganta Dey](https://github.com/DigantaDey)).
+
+See [LICENSE](LICENSE) for full legal terms.
 
 <p align="center">
   Developed with ❤️ by <a href="https://github.com/DigantaDey">Diganta Dey</a> • <a href="https://airbridge.fyi/"><strong>airbridge.fyi</strong></a>

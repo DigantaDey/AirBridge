@@ -3,7 +3,7 @@
   "version": "1.3.0",
   "description": "AirBridge — Fast, E2EE, open-source AirDrop & Universal Clipboard alternative for Android and MacBook.",
   "type": "module",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "bin": {
     "airbridge": "./bin/airbridge.mjs"
   },
