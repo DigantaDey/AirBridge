@@ -107,8 +107,18 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        // The user may have just returned from Android's Accessibility settings.
-        if (::webView.isInitialized) publishAccessibilityServiceState()
+        if (::webView.isInitialized) {
+            webView.onResume()
+            webView.resumeTimers()
+            publishAccessibilityServiceState()
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        if (::webView.isInitialized) {
+            webView.onResume()
+        }
     }
 
     override fun onDestroy() {

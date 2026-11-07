@@ -226,7 +226,8 @@ class ConnectionService : Service() {
     }
 
     private fun updateTransferWakeLock() {
-        if (!transferActive) {
+        val continuity = Prefs(this).connectionContinuity
+        if (!transferActive && !continuity) {
             releaseTransferWakeLock()
             return
         }
