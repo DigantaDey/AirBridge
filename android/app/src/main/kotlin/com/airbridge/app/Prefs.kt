@@ -51,8 +51,13 @@ class Prefs(context: Context) {
         return code
     }
 
+    /**
+     * Background clipboard/connection is on by default after pairing. An
+     * explicit opt-out is persisted, so reopening Settings cannot silently
+     * re-enable it. Android may still pause clipboard reads while hidden.
+     */
     var connectionContinuity: Boolean
-        get() = sp.getBoolean("connectionContinuity", false)
+        get() = sp.getBoolean("connectionContinuity", true)
         set(value) = sp.edit().putBoolean("connectionContinuity", value).apply()
 
     /** Last working loopback port; 0 until the relay has run once. */

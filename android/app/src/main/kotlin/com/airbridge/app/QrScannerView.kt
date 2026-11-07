@@ -15,6 +15,7 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.media.Image
 import android.media.ImageReader
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -24,6 +25,9 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
+import android.view.View.MeasureSpec
+import android.view.WindowInsets
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -34,6 +38,7 @@ import com.google.zxing.MultiFormatReader
 import com.google.zxing.NotFoundException
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
+import kotlin.math.abs
 import kotlin.math.min
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -56,9 +61,15 @@ class QrScannerView(context: Context) : FrameLayout(context) {
     /** Called on the main thread when no usable camera could be opened. */
     var onCameraUnavailable: (() -> Unit)? = null
 
-    private val preview = SurfaceView(context)
+    private val preview = AspectPreview(context)
+    private val previewHost = FrameLayout(context).apply {
+        setBackgroundColor(Color.BLACK)
+        addView(preview, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT, Gravity.CENTER))
+    }
     private val overlay = ScannerOverlay(context)
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var headerChrome: LinearLayout? = null
+    private var footerChrome: LinearLayout? = null
     private val decoding = AtomicBoolean(false)
 
     private var cameraThread: HandlerThread? = null
@@ -76,9 +87,10 @@ class QrScannerView(context: Context) : FrameLayout(context) {
 
     init {
         setBackgroundColor(Color.BLACK)
-        addView(preview, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        addView(previewHost, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         addView(overlay, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         addView(buildChrome(), LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        installChromeInsets()
 
         preview.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
@@ -150,6 +162,8 @@ class QrScannerView(context: Context) : FrameLayout(context) {
             gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
             setPadding(dp(24), 0, dp(24), dp(36))
         }
+        headerChrome = header
+        footerChrome = footer
         footer.addView(TextView(context).apply {
             text = "No camera or a broken code? Close this and enter the address shown by AirBridge."
             setTextColor(CHROME_MUTED)
@@ -185,7 +199,7 @@ class QrScannerView(context: Context) : FrameLayout(context) {
         private val hole = RectF()
 
         override fun onDraw(canvas: Canvas) {
-            val side = min(width, height) * 0.66f
+            val side = min(min(width, height) * 0.66f, dpf(320f))
             val left = (width - side) / 2f
             val top = (height - side) / 2f
             hole.set(left, top, left + side, top + side)
@@ -214,6 +228,49 @@ class QrScannerView(context: Context) : FrameLayout(context) {
         }
     }
 
+    /** Keep scanner chrome clear of the status and navigation bars. */
+    private fun installChromeInsets() {
+        setOnApplyWindowInsetsListener { _, insets ->
+            val (top, bottom) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                bars.top to bars.bottom
+            } else {
+                legacySystemBarInsets(insets)
+            }
+            headerChrome?.let {
+                it.setPadding(it.paddingLeft, dp(28) + top, it.paddingRight, it.paddingBottom)
+            }
+            footerChrome?.let {
+                it.setPadding(it.paddingLeft, it.paddingTop, it.paddingRight, dp(36) + bottom)
+            }
+            insets
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun legacySystemBarInsets(insets: WindowInsets): Pair<Int, Int> =
+        insets.systemWindowInsetTop to insets.systemWindowInsetBottom
+
+    /** A SurfaceView that centre-crops the camera stream instead of stretching it. */
+    private inner class AspectPreview(context: Context) : SurfaceView(context) {
+        var aspectRatio = 0f
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val width = MeasureSpec.getSize(widthMeasureSpec)
+            val height = MeasureSpec.getSize(heightMeasureSpec)
+            if (aspectRatio <= 0f || width == 0 || height == 0) {
+                super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+                return
+            }
+            val viewAspect = width.toFloat() / height.toFloat()
+            if (viewAspect > aspectRatio) {
+                setMeasuredDimension(width, (width / aspectRatio).toInt())
+            } else {
+                setMeasuredDimension((height * aspectRatio).toInt(), height)
+            }
+        }
+    }
+
     // ------------------------------------------------------------------- camera
 
     private fun startCamera() {
@@ -229,6 +286,8 @@ class QrScannerView(context: Context) : FrameLayout(context) {
             mainHandler.post { onCameraUnavailable?.invoke() }
             return
         }
+        preview.aspectRatio = previewAspect(info)
+        preview.requestLayout()
         val thread = HandlerThread("airbridge-qr").also { it.start() }
         cameraThread = thread
         val handler = Handler(thread.looper)
@@ -268,7 +327,12 @@ class QrScannerView(context: Context) : FrameLayout(context) {
         }
     }
 
-    private class CameraSpec(val cameraId: String, val size: android.util.Size)
+    private class CameraSpec(
+        val cameraId: String,
+        val size: android.util.Size,
+        val sensorOrientation: Int,
+        val displayDegrees: Int,
+    )
 
     private fun pickCamera(manager: CameraManager): CameraSpec? {
         val ids = manager.cameraIdList
@@ -284,12 +348,52 @@ class QrScannerView(context: Context) : FrameLayout(context) {
         val analysisSizes = map.getOutputSizes(ImageFormat.YUV_420_888)?.toList().orEmpty()
         if (analysisSizes.isEmpty()) return null
         val analysisKeys = analysisSizes.map { it.width to it.height }.toSet()
-        val shared = previewSizes.filter { (it.width to it.height) in analysisKeys && it.width <= 1920 && it.height <= 1920 }
-        val size = shared.maxByOrNull { it.width.toLong() * it.height }
-            ?: analysisSizes.filter { it.width <= 1920 }.maxByOrNull { it.width.toLong() * it.height }
+        val shared = previewSizes.filter {
+            (it.width to it.height) in analysisKeys && it.width <= 1920 && it.height <= 1920
+        }
+        val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+        val displayDegrees = displayRotationDegrees()
+        val targetAspect = resources.displayMetrics.widthPixels.toFloat() /
+            resources.displayMetrics.heightPixels.toFloat()
+        // Prefer a stream whose displayed aspect matches this screen; otherwise
+        // the centre-crop would discard a large part of the QR frame.
+        val aspectMatched = shared.filter {
+            abs(previewAspect(it, sensorOrientation, displayDegrees) - targetAspect) <= 0.08f
+        }
+        val size = (aspectMatched.ifEmpty { shared })
+            .maxByOrNull { it.width.toLong() * it.height }
+            ?: analysisSizes.filter { it.width <= 1920 }
+                .maxByOrNull { it.width.toLong() * it.height }
             ?: analysisSizes.first()
-        return CameraSpec(cameraId, size)
+        return CameraSpec(cameraId, size, sensorOrientation, displayDegrees)
     }
+
+    private fun displayRotationDegrees(): Int {
+        @Suppress("DEPRECATION")
+        val rotation = (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager)
+            .defaultDisplay.rotation
+        return when (rotation) {
+            Surface.ROTATION_0 -> 0
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+    }
+
+    private fun previewAspect(
+        size: android.util.Size,
+        sensorOrientation: Int,
+        displayDegrees: Int,
+    ): Float {
+        val rotation = (sensorOrientation - displayDegrees + 360) % 360
+        val width = if (rotation == 90 || rotation == 270) size.height else size.width
+        val height = if (rotation == 90 || rotation == 270) size.width else size.height
+        return width.toFloat() / height.toFloat()
+    }
+
+    private fun previewAspect(spec: CameraSpec): Float =
+        previewAspect(spec.size, spec.sensorOrientation, spec.displayDegrees)
 
     private fun configure(device: CameraDevice, imageReader: ImageReader) {
         val handler = cameraHandler ?: return

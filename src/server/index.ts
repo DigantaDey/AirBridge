@@ -33,6 +33,8 @@ import {
   type HostClipboardProvider,
 } from './hostClipboard.js';
 import { registerCliBeamRoutes, type CliBeamSession } from './cliSendSession.js';
+import { startBackgroundClipboardPeer, type BackgroundClipboardPeer } from './backgroundClipboard.js';
+import { isValidPairCode, normalizePairCode } from '../shared/protocol.js';
 
 export interface AirBridgeServerOptions {
   port?: number;
@@ -48,6 +50,13 @@ export interface AirBridgeServerOptions {
    */
   hostClipboard?: boolean | HostClipboardProvider;
   hostClipboardPollMs?: number;
+  /**
+   * Keep a headless encrypted peer alive so OS clipboard changes still beam
+   * when every AirBridge browser tab is closed. Defaults to on outside tests.
+   */
+  backgroundClipboard?: boolean;
+  /** Override the daemon's persistent background-peer state file (tests). */
+  backgroundClipboardStoragePath?: string | null;
   /**
    * Serve HTTPS (on the same port as HTTP). Defaults to on outside tests:
    * browsers refuse WebCrypto on `http://<LAN-IP>`, so a phone cannot use
@@ -84,6 +93,7 @@ export interface AirBridgeServerInstance {
   /** Protocol used for LAN (phone-facing) URLs. */
   protocol: 'http' | 'https';
   hub: SignalingHub;
+  backgroundClipboard: BackgroundClipboardPeer | null;
   port: number;
   lanUrls: string[];
   close: () => Promise<void>;
@@ -185,6 +195,7 @@ export async function createAirBridgeServer(
   httpsServer?.on('connection', (socket) => (socket as net.Socket).setNoDelay(true));
   let activePort = requestedPort;
   let mdns: MdnsHandle | null = null;
+  let backgroundPeer: BackgroundClipboardPeer | null = null;
 
   const clipboardProvider: HostClipboardProvider | null =
     typeof options.hostClipboard === 'object' && options.hostClipboard !== null
@@ -202,6 +213,13 @@ export async function createAirBridgeServer(
     clipboardProvider,
     clipboardPollMs: options.hostClipboardPollMs,
   });
+
+  const backgroundClipboardEnabled =
+    options.backgroundClipboard === true ||
+    (options.backgroundClipboard === undefined &&
+      mode !== 'test' &&
+      process.env.AIRBRIDGE_BACKGROUND_CLIPBOARD !== '0' &&
+      hub.hasHostClipboardBridge());
 
   if (tls) {
     // Local CA download for first-time trust setup on the phone. Registered
@@ -619,6 +637,32 @@ export async function createAirBridgeServer(
     }
   );
 
+  // The local browser tells the daemon which pairing group its headless
+  // clipboard peer should join. Restricted to this machine: a phone on the LAN
+  // must not be able to move the desktop into another pair code.
+  app.post(
+    '/api/daemon/background-pair-code',
+    express.json({ limit: '1kb' }),
+    (req: Request, res: Response) => {
+      if (!backgroundClipboardEnabled || !isLocalMachineRequest(req)) {
+        res.status(403).json({ error: 'Background clipboard is restricted to this machine.' });
+        return;
+      }
+      const raw = (req.body as { pairCode?: unknown } | undefined)?.pairCode;
+      if (typeof raw !== 'string') {
+        res.status(400).json({ error: 'pairCode is required.' });
+        return;
+      }
+      const clean = normalizePairCode(raw);
+      if (!isValidPairCode(clean)) {
+        res.status(400).json({ error: 'Invalid pair code.' });
+        return;
+      }
+      backgroundPeer?.setPairCode(clean);
+      res.json({ ok: true });
+    }
+  );
+
   // CLI instant beam routes
   registerCliBeamRoutes(app, cliSessions, (file, ip) => {
     options.onCliDownload?.(file.name, ip);
@@ -786,6 +830,20 @@ export async function createAirBridgeServer(
     mdns = startMdnsResponder(activePort);
   }
 
+  if (backgroundClipboardEnabled) {
+    try {
+      backgroundPeer = startBackgroundClipboardPeer({
+        port: activePort,
+        defaultPairCode: hub.getDefaultPairCode(),
+        writeClipboard: (text) => hub.writeHostClipboard(text),
+        storagePath: options.backgroundClipboardStoragePath,
+      });
+      hub.setBackgroundClipboardActive(true);
+    } catch (err) {
+      console.warn('Background clipboard peer could not start:', err instanceof Error ? err.message : err);
+    }
+  }
+
   return {
     app,
     httpServer,
@@ -793,10 +851,13 @@ export async function createAirBridgeServer(
     tls,
     protocol,
     hub,
+    backgroundClipboard: backgroundPeer,
     port: activePort,
     lanUrls: getLanUrls(activePort, protocol),
     async close() {
       mdns?.close();
+      backgroundPeer?.stop();
+      hub.setBackgroundClipboardActive(false);
       hub.close();
       await receiveStore.dispose();
       // The internal HTTP/HTTPS servers don't listen directly in TLS mode;

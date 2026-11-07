@@ -45,6 +45,8 @@ export interface AirBridgeNativeBridge {
   setTransferActive?(active: boolean): boolean;
   /** Updates the foreground notification with the live Upload/Download rate. */
   updateTransferSpeed?(payloadJson: string): boolean;
+  /** Keeps the Android status/navigation bars legible in light or dark mode. */
+  setDarkTheme?(enabled: boolean): boolean;
 }
 
 /** Minimal live-transfer shape the Android notification needs. */
@@ -60,6 +62,8 @@ export interface NativeTransferSpeedSnapshot {
 declare global {
   interface Window {
     AirBridgeAndroid?: AirBridgeNativeBridge;
+    /** The Android foreground service pushes system-clipboard changes here. */
+    __airbridgeNativeClipboard?: (text: string) => void;
   }
 }
 
@@ -112,6 +116,11 @@ export function getNativeConnectionContinuity(): boolean {
 
 export function setNativeConnectionContinuity(enabled: boolean): boolean {
   try { return nativeBridge()?.setConnectionContinuityEnabled?.(enabled) === true; } catch { return false; }
+}
+
+/** Sync Android's system bars with the web app's light/dark appearance. */
+export function setNativeDarkTheme(enabled: boolean): boolean {
+  try { return nativeBridge()?.setDarkTheme?.(enabled) === true; } catch { return false; }
 }
 
 /** Keep the Android CPU awake while the WebView is actively sending or receiving a transfer. */

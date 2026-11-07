@@ -83,9 +83,17 @@ at roughly 5 MB.
 *Auto-beam copied text* is on by default. On the machine running the server it watches
 the OS clipboard in the background through `pbpaste`/`pbcopy` on macOS, PowerShell's
 `Get-Clipboard`/`Set-Clipboard` on Windows, or `wl-paste`/`xclip`/`xsel` on Linux, so
-copying on the Mac beams without switching back to the tab. On Android it hooks the
-page's copy event, the Android share sheet (when installed as a PWA), and, if the
-browser grants clipboard read, a check when you return to the tab.
+copying on the Mac beams without switching back to the tab. The desktop daemon also
+keeps a small **headless encrypted peer** alive: it joins the same pair code and holds
+the ECDH session, so clipboard sharing continues even when every AirBridge browser tab
+is closed. Set `AIRBRIDGE_BACKGROUND_CLIPBOARD=0` to disable that peer.
+
+On Android, *Background clipboard & connection* is on by default after pairing. A
+foreground service keeps the WebView and its encrypted session alive, watches the
+system clipboard natively, and writes incoming beams to the system clipboard. It still
+uses the page's copy event and the PWA share sheet when available. Android 10+ can
+suppress clipboard reads while an app is hidden, so background capture is best effort
+on those devices; returning to the app flushes anything it missed.
 
 Incoming beams are written to the host OS clipboard on the Mac and to the browser
 clipboard elsewhere, with a **Copy** toast for browsers that refuse the write. The last
@@ -277,6 +285,7 @@ Environment variables, all optional:
 | `AIRBRIDGE_DOWNLOAD_DIR` | `~/Downloads/AirBridge` | Received-files folder |
 | `AIRBRIDGE_LOCAL_DAEMON` | on outside tests | `0` disables direct-to-disk saving |
 | `AIRBRIDGE_CLIPBOARD_WATCH` | on outside tests | `0` disables the host OS clipboard bridge |
+| `AIRBRIDGE_BACKGROUND_CLIPBOARD` | on outside tests | `0` disables the daemon's headless clipboard peer |
 | `NODE_ENV` | unset | `production` serves the built client from `dist/client` |
 
 The server's own endpoints, for debugging or scripting: `GET /api/health`,
@@ -420,7 +429,7 @@ These are real gaps, not TODO padding:
 
 ```sh
 npm run typecheck   # tsc --noEmit
-npm test            # vitest: 9 files, 47 tests
+npm test            # vitest: 18 files, 115 tests
 npm run build       # vite client + tsc server
 ```
 
@@ -433,7 +442,8 @@ Layout:
 - `src/shared` — protocol types, frame codecs, pair codes, ZIP writer.
 - `bin/airbridge.mjs` — CLI entry point (daemon and one-shot send).
 - `tests/` — protocol, crypto, end-to-end relay transfers, TLS/HTTPS, security and
-  received-folder behaviour, CLI/daemon, transfer speed, ZIP, and UI tests.
+  received-folder behaviour, CLI/daemon, background clipboard, transfer speed, ZIP,
+  and UI tests.
 - `public/` — PWA manifest with the share target, service worker, icon.
 
 `npm run build` writes `dist/client` and `dist/server`; those are build outputs, not
@@ -521,11 +531,12 @@ browser UI. Three things make that possible:
   the pairing QR the computer prints (`https://<host>/?pair=ABC-DEF`). Closing it (×)
   leaves a connect screen styled like the rest of the app: computers found over mDNS,
   or a typed address, plus the same scanner again.
-- **A small bridge** (`window.AirBridgeAndroid`) for the four things a WebView cannot do:
+- **A small bridge** (`window.AirBridgeAndroid`) for the things a WebView cannot do:
   clipboard read/write, saving received files to Downloads (a `blob:` download link is
-  a no-op inside a WebView), starting the scanner, and switching computers from
-  *Settings → Change computer*. Everything else in the page is untouched, so a browser
-  sees no difference.
+  a no-op inside a WebView), starting the scanner, switching computers from
+  *Settings → Change computer*, publishing live transfer speed to the foreground
+  notification, and matching the system bars to the UI's light/dark theme. Everything
+  else in the page is untouched, so a browser sees no difference.
 
 Practical notes:
 
@@ -534,6 +545,12 @@ Practical notes:
 - Re-pair with a different computer from the phone's *Settings → Change computer*, or by
   scanning again from the pairing dialog. `airbridge://<host>:<port>?pair=<code>` links
   do the same thing, which is handy with `adb shell am start -a android.intent.action.VIEW`.
+- The shell applies system-bar insets to the WebView and scanner chrome, wraps the
+  header actions into tappable rows on narrow screens, and centre-crops the camera
+  preview so the QR frame stays square instead of stretching.
+- Background clipboard is enabled by default after pairing. The foreground service
+  keeps the encrypted session and native clipboard watcher alive when you leave the
+  app; Android can still pause clipboard reads while the app is hidden.
 - Transfers run while the app is in the foreground; unlike a browser tab, the page keeps
   running when the screen is off only as long as Android keeps the WebView alive.
 - Build it with `gradle -p android :app:assembleDebug` (or `:app:assembleRelease`), and

@@ -6,6 +6,7 @@ import {
   installNativeShellBridge,
   isNativeShell,
   publishNativeTransferSpeed,
+  setNativeDarkTheme,
   saveBlobToDevice,
   scanPairingCode,
   setNativeTransferActive,
@@ -26,6 +27,11 @@ class FakeBridge implements AirBridgeNativeBridge {
   forgetComputer: () => boolean = () => true;
   transferStates: boolean[] = [];
   speedPayloads: string[] = [];
+  darkThemes: boolean[] = [];
+  setDarkTheme(enabled: boolean): boolean {
+    this.darkThemes.push(enabled);
+    return true;
+  }
   setTransferActive(active: boolean): boolean {
     this.transferStates.push(active);
     return true;
@@ -141,6 +147,16 @@ describe("native shell detection", () => {
     expect(setNativeTransferActive(true)).toBe(true);
     expect(setNativeTransferActive(false)).toBe(true);
     expect(bridge.transferStates).toEqual([true, false]);
+  });
+
+  it("syncs the Android system bars with the web theme", () => {
+    const bridge = new FakeBridge();
+    (window as { AirBridgeAndroid?: unknown }).AirBridgeAndroid = bridge;
+    expect(setNativeDarkTheme(true)).toBe(true);
+    expect(setNativeDarkTheme(false)).toBe(true);
+    expect(bridge.darkThemes).toEqual([true, false]);
+    delete (window as { AirBridgeAndroid?: unknown }).AirBridgeAndroid;
+    expect(setNativeDarkTheme(true)).toBe(false); // inert without the bridge
   });
 
   it("publishes Upload/Download speed to the Android notification", () => {

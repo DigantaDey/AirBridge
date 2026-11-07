@@ -145,6 +145,7 @@ export class SignalingHub {
   private readonly clients = new Map<string, ConnectedClient>();
   private readonly pingTimer: NodeJS.Timeout;
   private readonly clipboardMonitor: HostClipboardMonitor | null;
+  private backgroundClipboardActive = false;
   private getLanUrls: () => string[];
   private getDaemonStatus: () => LocalDaemonStatus;
 
@@ -250,6 +251,21 @@ export class SignalingHub {
     };
   }
 
+  public hasHostClipboardBridge(): boolean {
+    return Boolean(this.clipboardMonitor?.isSupported());
+  }
+
+  /** Keeps the OS clipboard watcher alive for the daemon's headless peer. */
+  public setBackgroundClipboardActive(active: boolean): void {
+    this.backgroundClipboardActive = active;
+    this.syncClipboardWatchState();
+  }
+
+  /** Writes an incoming beam to the host OS clipboard without echoing it back. */
+  public async writeHostClipboard(text: string): Promise<boolean> {
+    return (await this.clipboardMonitor?.writeClipboard(text)) ?? false;
+  }
+
   private syncClipboardWatchState(): void {
     if (!this.clipboardMonitor) return;
     let hasActiveHostClient = false;
@@ -259,7 +275,7 @@ export class SignalingHub {
         break;
       }
     }
-    this.clipboardMonitor.setShouldWatch(hasActiveHostClient);
+    this.clipboardMonitor.setShouldWatch(hasActiveHostClient || this.backgroundClipboardActive);
   }
 
   private deliverHostClipboard(text: string): void {
@@ -483,7 +499,7 @@ export class SignalingHub {
             msg.text.length > 0 &&
             msg.text.length <= 512_000
           ) {
-            this.clipboardMonitor?.writeClipboard(msg.text).catch(() => {});
+            this.writeHostClipboard(msg.text).catch(() => {});
           }
           break;
         }

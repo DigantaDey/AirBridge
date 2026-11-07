@@ -4,6 +4,8 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Handler
@@ -16,11 +18,12 @@ import kotlin.math.floor
 import kotlin.math.log
 import kotlin.math.pow
 
-/** Opt-in connection anchor and short-lived transfer CPU wake-lock owner. */
+/** Background clipboard/connection anchor and short-lived transfer wake-lock owner. */
 class ConnectionService : Service() {
     private var transferActive = false
     private var transferWakeLock: PowerManager.WakeLock? = null
     private var transferSpeed: TransferSpeedSnapshot? = null
+    private var clipboardListener: ClipboardManager.OnPrimaryClipChangedListener? = null
 
     private data class TransferSpeedSnapshot(
         val uploading: Boolean,
@@ -33,6 +36,16 @@ class ConnectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val listener = ClipboardManager.OnPrimaryClipChangedListener {
+            publishSystemClipboard(clipboard)
+        }
+        try {
+            clipboard.addPrimaryClipChangedListener(listener)
+            clipboardListener = listener
+        } catch (e: Exception) {
+            Log.w("AirBridgeClip", "could not watch clipboard: ${e.message}")
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
@@ -95,6 +108,26 @@ class ConnectionService : Service() {
         return START_STICKY
     }
 
+    /**
+     * Android 10+ can suppress clipboard reads while the app is backgrounded.
+     * The listener still fires when the OS allows it; failures are swallowed so
+     * the foreground service (and the encrypted session) stay alive.
+     */
+    private fun publishSystemClipboard(clipboard: ClipboardManager) {
+        val text = try {
+            val clip = clipboard.primaryClip
+            if (clip == null || clip.itemCount == 0) return
+            clip.getItemAt(0)?.coerceToText(this)?.toString()?.trim().orEmpty()
+        } catch (e: SecurityException) {
+            return
+        } catch (e: Exception) {
+            return
+        }
+        if (text.isEmpty() || text.length > 256_000) return
+        if (consumeOwnClipboardWrite(text)) return
+        MainActivity.publishLocalClipboard(text)
+    }
+
     /** Refreshes the foreground notification from the WebView's live rate. */
     private fun applyTransferSpeed(payloadJson: String) {
         transferSpeed = parseTransferSpeed(payloadJson)
@@ -154,7 +187,7 @@ class ConnectionService : Service() {
         }
         val text = when {
             !transferActive ->
-                "Connection continuity is enabled. Clipboard access is limited by Android."
+                "Background clipboard is on. Android may pause clipboard access while hidden."
             speed == null ->
                 "Keeping the transfer active while the screen is off. Keep AirBridge open until it completes."
             else -> {
@@ -204,6 +237,15 @@ class ConnectionService : Service() {
 
     override fun onDestroy() {
         if (instance === this) instance = null
+        clipboardListener?.let { listener ->
+            try {
+                (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                    .removePrimaryClipChangedListener(listener)
+            } catch (_: Exception) {
+                // ignore
+            }
+        }
+        clipboardListener = null
         releaseTransferWakeLock()
         super.onDestroy()
     }
@@ -222,6 +264,21 @@ class ConnectionService : Service() {
 
         @Volatile
         private var instance: ConnectionService? = null
+
+        @Volatile
+        private var lastOwnClipboardText: String? = null
+
+        /** Called by ShellBridge.copyText before it writes an incoming beam. */
+        fun markOwnClipboardWrite(text: String) {
+            lastOwnClipboardText = text.trim()
+        }
+
+        private fun consumeOwnClipboardWrite(text: String): Boolean {
+            val own = lastOwnClipboardText ?: return false
+            if (own != text) return false
+            lastOwnClipboardText = null
+            return true
+        }
 
         /**
          * Called from the WebView bridge. Updating an already-foreground

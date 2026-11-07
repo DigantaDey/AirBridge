@@ -2,6 +2,10 @@
 
 :root {
   color-scheme: light;
+  /* Plain browsers get display-cutout insets; the Android shell applies the
+     same insets natively to its WebView, so it zeroes these to avoid doubling. */
+  --ab-safe-top: env(safe-area-inset-top, 0px);
+  --ab-safe-bottom: env(safe-area-inset-bottom, 0px);
   --ab-bg: #fff;
   --ab-surface: #fff;
   --ab-text: #111;
@@ -13,6 +17,7 @@
   --ab-inverse: #111;
   --ab-inverse-text: #fff;
 }
+html.ab-native-shell { --ab-safe-top: 0px; --ab-safe-bottom: 0px; }
 html.dark {
   color-scheme: dark;
   --ab-bg: #111;
@@ -27,13 +32,13 @@ html.dark {
   --ab-inverse-text: #111;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--ab-bg); color: var(--ab-text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; -webkit-font-smoothing: antialiased; }
+body { margin: 0; max-width: 100%; overflow-x: hidden; background: var(--ab-bg); color: var(--ab-text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; -webkit-font-smoothing: antialiased; }
 button, input { font: inherit; }
 button { cursor: pointer; }
 button:focus-visible, input:focus-visible { outline: 2px solid var(--ab-text); outline-offset: 3px; }
 button:disabled { cursor: not-allowed; opacity: .45; }
 .utility-shell { min-height: 100vh; background: var(--ab-bg); color: var(--ab-text); }
-.utility-header { height: 62px; border-bottom: 1px solid var(--ab-border); display: flex; align-items: center; justify-content: space-between; padding: 0 max(24px, calc((100vw - 920px)/2)); }
+.utility-header { height: calc(62px + var(--ab-safe-top)); border-bottom: 1px solid var(--ab-border); display: flex; align-items: center; justify-content: space-between; padding: var(--ab-safe-top) max(24px, calc((100vw - 920px)/2)) 0; }
 .brand { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 650; letter-spacing: -.02em; }
 .brand-mark { width: 23px; height: 23px; border: 1px solid var(--ab-text); border-radius: 6px; display: grid; place-items: center; font-size: 12px; }
 .header-actions { display: flex; align-items: center; gap: 10px; }
@@ -99,8 +104,8 @@ html.dark .transfer-heading .transfer-speed-badge[data-direction="outgoing"] .tr
 .transfer-row progress::-moz-progress-bar { background: var(--ab-text); }
 .quiet-count { color: var(--ab-muted); font-size: 12px; }
 .utility-footer { margin-top: 38px; padding-top: 13px; border-top: 1px solid var(--ab-border); display: flex; align-items: center; justify-content: space-between; color: var(--ab-muted); font-size: 11px; }
-.modal-backdrop { position: fixed; inset: 0; z-index: 50; background: rgb(0 0 0 / .38); display: flex; align-items: center; justify-content: center; padding: 20px; }
-.utility-modal { width: min(100%, 500px); max-height: min(90vh, 760px); overflow: auto; background: var(--ab-bg); color: var(--ab-text); border: 1px solid var(--ab-border-strong); padding: 24px; box-shadow: 0 12px 44px rgb(0 0 0 / .16); }
+.modal-backdrop { position: fixed; inset: 0; z-index: 50; background: rgb(0 0 0 / .38); display: flex; align-items: center; justify-content: center; padding: max(20px, var(--ab-safe-top)) 20px max(20px, var(--ab-safe-bottom)); }
+.utility-modal { width: min(100%, 500px); max-width: calc(100vw - 40px); max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px); overflow: auto; background: var(--ab-bg); color: var(--ab-text); border: 1px solid var(--ab-border-strong); padding: 24px; box-shadow: 0 12px 44px rgb(0 0 0 / .16); }
 .modal-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
 .modal-heading h2 { margin: 0; font-size: 21px; font-weight: 550; letter-spacing: -.035em; }
 .modal-close { border: 0; background: transparent; color: var(--ab-muted); font-size: 24px; line-height: 1; padding: 0 2px; }
@@ -118,6 +123,9 @@ html.dark .transfer-heading .transfer-speed-badge[data-direction="outgoing"] .tr
 .pairing-modal form { margin-top: 14px; }
 .pairing-modal .rounded-2xl.bg-white { border: 1px solid var(--ab-border); }
 .advanced-toggle { margin-top: 12px; }
+.settings-info, .setting-field, .setting-toggle { overflow-wrap: anywhere; }
+.settings-info p { overflow-wrap: anywhere; }
+.settings-modal .advanced-toggle { display: block; width: 100%; margin-top: 16px; padding: 12px 0 8px; border-top: 1px solid var(--ab-border); white-space: normal; text-align: left; }
 .help-copy, .settings-info { margin-top: 15px; border-top: 1px solid var(--ab-border); padding-top: 11px; color: var(--ab-muted); font-size: 12px; }
 .help-copy p, .settings-info p { margin: 4px 0; }
 .recent-list { margin-top: 18px; border-top: 1px solid var(--ab-border); }
@@ -134,6 +142,8 @@ html.dark .transfer-heading .transfer-speed-badge[data-direction="outgoing"] .tr
 .setting-toggle strong, .settings-info strong { font-size: 12px; font-weight: 550; }
 .setting-toggle small { color: var(--ab-muted); font-size: 11px; }
 .setting-toggle input { accent-color: var(--ab-text); }
+.settings-info strong { display: block; margin-bottom: 6px; color: var(--ab-text); font-size: 13px; font-weight: 600; }
+.settings-info .secondary-button { margin-top: 10px; }
 .utility-toast { position: fixed; right: 20px; bottom: 20px; z-index: 60; max-width: 360px; padding: 13px 38px 13px 15px; border: 1px solid var(--ab-border-strong); background: var(--ab-bg); box-shadow: 0 6px 22px rgb(0 0 0 / .12); display: flex; flex-direction: column; font-size: 12px; }
 .utility-toast strong { font-weight: 600; }
 .utility-toast span { color: var(--ab-muted); margin-top: 3px; overflow-wrap: anywhere; }
@@ -159,14 +169,60 @@ html.dark .clipboard-error { color: #f87171; }
 .clipboard-badge { border: 1px solid var(--ab-border); border-radius: 999px; padding: 1px 8px; text-transform: uppercase; letter-spacing: .06em; flex-shrink: 0; }
 .clipboard-item pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; background: var(--ab-subtle); border: 1px solid var(--ab-border); padding: 8px 9px; border-radius: 6px; max-height: 128px; overflow: auto; }
 .clipboard-item-actions { display: flex; gap: 14px; justify-content: flex-end; }
-@media (max-width: 560px) {
-  .utility-header { padding: 0 18px; }
+@media (max-width: 720px) {
+  /* Android WebView: keep every header action on-screen and tappable. */
+  .utility-header {
+    height: auto;
+    min-height: calc(62px + var(--ab-safe-top));
+    padding: calc(10px + var(--ab-safe-top)) 12px 10px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .brand { padding-left: 2px; }
+  .header-actions {
+    width: 100%;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+  .header-actions > * {
+    min-width: 0;
+    min-height: 44px;
+    padding: 6px 4px;
+    font-size: 12px;
+    line-height: 1.2;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .header-count { display: none; }
   .utility-main { width: calc(100% - 36px); padding-top: 30px; }
   .device-heading { align-items: flex-start; flex-direction: column; gap: 10px; margin-bottom: 27px; }
   .device-heading h1 { font-size: 23px; }
   .recovery-note { align-items: flex-start; }
-  .utility-footer { align-items: flex-start; gap: 8px; flex-direction: column; }
-  .utility-modal { padding: 19px; }
+  .utility-footer { align-items: flex-start; gap: 8px; flex-direction: column; padding-bottom: var(--ab-safe-bottom); }
+  /* Tall settings sheets scroll with the viewport instead of being clipped. */
+  .modal-backdrop {
+    align-items: flex-start;
+    overflow-y: auto;
+    padding: max(12px, var(--ab-safe-top)) 12px max(12px, var(--ab-safe-bottom));
+  }
+  .utility-modal {
+    width: 100%;
+    max-width: none;
+    max-height: none;
+    overflow: visible;
+    margin: 0 auto;
+    padding: 16px;
+  }
+  .modal-heading { gap: 12px; }
+  .settings-modal .advanced-toggle { margin-top: 18px; }
+  .setting-toggle { gap: 10px; }
+  .setting-toggle span { min-width: 0; }
+  .setting-toggle small, .setting-field input { overflow-wrap: anywhere; }
 }
 
 .folder-locate-button { display: inline-flex; align-items: center; justify-content: center; padding: 6px; line-height: 0; }
