@@ -75,9 +75,9 @@ function isValidMeta(meta: PartialReceiveMeta): boolean {
     meta.fileIndex >= 0 &&
     typeof meta.name === 'string' &&
     meta.name.length > 0 &&
-    Number.isFinite(meta.size) &&
+    Number.isInteger(meta.size) &&
     meta.size >= 0 &&
-    Number.isFinite(meta.chunkSize) &&
+    Number.isInteger(meta.chunkSize) &&
     meta.chunkSize > 0 &&
     Number.isInteger(meta.totalChunks) &&
     meta.totalChunks >= 1
@@ -233,8 +233,10 @@ export class PartialReceiveStore {
         Array.isArray(parsed.receivedChunks) &&
         Number.isInteger(parsed.totalChunks) &&
         parsed.totalChunks > 0 &&
-        Number.isFinite(parsed.chunkSize) &&
-        parsed.chunkSize > 0
+        Number.isInteger(parsed.chunkSize) &&
+        parsed.chunkSize > 0 &&
+        Number.isInteger(parsed.size) &&
+        parsed.size >= 0
       ) {
         const receivedChunks = new Array<boolean>(parsed.totalChunks).fill(false);
         for (let i = 0; i < parsed.totalChunks; i++) receivedChunks[i] = parsed.receivedChunks[i] === true;
@@ -302,6 +304,11 @@ export class PartialReceiveStore {
       .then(() => 'r+')
       .catch(() => 'w+');
     state.fd = await fs.promises.open(state.tempPath, flag);
+    // A stale .part from an earlier receive with the same ID must not leave
+    // trailing bytes past the declared size. Truncating to the exact size also
+    // pre-fills zero holes for out-of-order chunk writes; all holes are
+    // overwritten before receivedCount can equal totalChunks.
+    await state.fd.truncate(state.size);
     return state.fd;
   }
 
@@ -421,7 +428,11 @@ export class PartialReceiveStore {
     return hash.digest('hex');
   }
 
-  async finalize(transferId: string, fileIndex: number): Promise<FinalizeResult> {
+  async finalize(
+    transferId: string,
+    fileIndex: number,
+    expectedSha256?: string,
+  ): Promise<FinalizeResult> {
     if (!TRANSFER_ID_RE.test(transferId) || !Number.isInteger(fileIndex) || fileIndex < 0) {
       throw new Error('Invalid finalize request.');
     }
@@ -439,6 +450,16 @@ export class PartialReceiveStore {
       }
       await this.flushJournal(state);
       const sha256 = await this.hashFile(state.tempPath);
+      // Reject before the .part file is renamed: a hash mismatch must never
+      // become a "completed" file in Downloads. Remove the partial so a retry
+      // starts clean instead of trusting corrupted bytes as a resume prefix.
+      if (expectedSha256 && sha256 !== expectedSha256) {
+        await fs.promises.rm(state.tempPath, { force: true });
+        await fs.promises.rm(state.metaPath, { force: true });
+        await fs.promises.rm(state.journalPath, { force: true });
+        this.states.delete(key);
+        throw new Error('SHA-256 verification failed; the partial file was discarded.');
+      }
       const finalPath = await resolveFinalPath(this.config.downloadDir, state.name);
       await fs.promises.rename(state.tempPath, finalPath);
       await fs.promises.rm(state.metaPath, { force: true });

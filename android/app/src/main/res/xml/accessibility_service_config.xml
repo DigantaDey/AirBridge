@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Explicit, user-enabled Accessibility Service opt-in for background clipboard
+  capture. AirBridge never enables this by itself: the user must opt in inside
+  Settings AND turn the service on in Android's Accessibility settings.
+
+  The service only reacts to copy/selection-like UI events and attempts a plain
+  ClipboardManager read. It deliberately does not retrieve window content,
+  inspect text fields, record keystrokes or perform gestures. Android 10+ may
+  still deny background clipboard reads on some builds; this improves capture
+  on supported devices without claiming an OS-level guarantee.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeViewClicked|typeViewLongClicked|typeViewTextChanged|typeViewTextSelectionChanged|typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canRetrieveWindowContent="false"
+    android:canRequestTouchExplorationMode="false"
+    android:canPerformGestures="false"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="150"
+    android:settingsActivity="com.airbridge.app.MainActivity" />

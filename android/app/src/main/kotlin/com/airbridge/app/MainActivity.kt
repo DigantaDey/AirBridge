@@ -89,6 +89,12 @@ class MainActivity : Activity() {
         pairingLinkFromIntent(intent)?.let { applyPairing(it) }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // The user may have just returned from Android's Accessibility settings.
+        if (::webView.isInitialized) publishAccessibilityServiceState()
+    }
+
     override fun onDestroy() {
         if (transferActive) setTransferActive(false)
         closeScanner()
@@ -163,6 +169,11 @@ class MainActivity : Activity() {
     }
 
     private inner class ShellWebViewClient : WebViewClient() {
+        override fun onPageFinished(view: WebView, url: String) {
+            super.onPageFinished(view, url)
+            publishAccessibilityServiceState()
+        }
+
         /** A crashed renderer leaves the WebView blank and unusable; rebuild it. */
         override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
             Log.w(TAG, "web renderer gone (crashed=${detail.didCrash()})")
@@ -354,6 +365,20 @@ class MainActivity : Activity() {
     @Suppress("DEPRECATION")
     private fun legacySystemBarInsets(insets: WindowInsets): Pair<Int, Int> =
         insets.systemWindowInsetTop to insets.systemWindowInsetBottom
+
+    /** Push the OS accessibility-service state to the settings UI. */
+    private fun publishAccessibilityServiceState() {
+        val enabled = try {
+            ClipboardAccessibilityService.isEnabled(this)
+        } catch (e: Exception) {
+            Log.w(TAG, "could not read accessibility service state: ${e.message}")
+            false
+        }
+        webView.evaluateJavascript(
+            "window.__airbridgeNativeAccessibilityState && window.__airbridgeNativeAccessibilityState($enabled)",
+            null,
+        )
+    }
 
     /** Match the system bars to the web app's light/dark theme. */
     fun setDarkTheme(enabled: Boolean): Boolean {

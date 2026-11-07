@@ -8,6 +8,12 @@ import {
   generateIdentityKeyPair,
   sha256Hex,
 } from '../src/client/engine/crypto.js';
+import {
+  decodeEncryptedChunkFrame,
+  encodeEncryptedChunkFrame,
+  unwrapRoutedRelayFrame,
+  wrapRoutedRelayFrame,
+} from '../src/shared/protocol.js';
 
 describe('incremental SHA-256', () => {
   it('matches WebCrypto across empty, boundary-sized, and arbitrarily split input', async () => {
@@ -36,6 +42,47 @@ describe('incremental SHA-256', () => {
     const expected = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', raw));
     const expectedHex = Array.from(expected).map((byte) => byte.toString(16).padStart(2, '0')).join('');
     expect(await sha256Hex(chunks)).toBe(expectedHex);
+  });
+});
+
+describe('binary integrity for non-zero-offset views', () => {
+  it('encrypts, frames, relays and hashes only the view bytes', async () => {
+    const key = await globalThis.crypto.subtle.generateKey(
+      { name: 'AES-GCM', length: 256 },
+      true,
+      ['encrypt', 'decrypt'],
+    ) as CryptoKey;
+    const raw = new Uint8Array(600 * 1024 + 37);
+    for (let i = 0; i < raw.length; i++) raw[i] = (i * 31 + 17) & 0xff;
+    // Deliberately unaligned byteOffset: WebCrypto, SHA-256 and the frame
+    // codecs must use byteOffset/byteLength, not the whole backing buffer.
+    const padded = new Uint8Array(raw.length + 73);
+    padded.set(raw, 37);
+    const view = padded.subarray(37, 37 + raw.length);
+
+    const expected = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', raw));
+    const expectedHex = Array.from(expected).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    expect(await sha256Hex([view])).toBe(expectedHex);
+
+    const { iv, ciphertext } = await encryptBinaryChunk(key, view, 2, 9);
+    // Simulate a relayed frame living inside a larger pooled buffer.
+    const inner = encodeEncryptedChunkFrame({
+      transferId: 'abcdef0123456789',
+      fileIndex: 2,
+      chunkIndex: 9,
+      iv,
+      ciphertext,
+    });
+    const routed = wrapRoutedRelayFrame('1111111111111111', '2222222222222222', inner);
+    const pooled = new Uint8Array(routed.byteLength + 51);
+    pooled.set(routed, 19);
+    const routedView = pooled.subarray(19, 19 + routed.byteLength);
+    const { payload } = unwrapRoutedRelayFrame(routedView);
+    const decoded = decodeEncryptedChunkFrame(payload);
+    const plain = await decryptBinaryChunk(key, decoded.iv, decoded.ciphertext);
+    expect(decoded.fileIndex).toBe(2);
+    expect(decoded.chunkIndex).toBe(9);
+    expect(Buffer.compare(Buffer.from(plain), Buffer.from(raw))).toBe(0);
   });
 });
 

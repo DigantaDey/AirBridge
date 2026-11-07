@@ -3,9 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type AirBridgeNativeBridge,
   forgetNativeComputer,
+  getNativeAccessibilityOptIn,
   installNativeShellBridge,
+  isNativeAccessibilityServiceEnabled,
   isNativeShell,
+  openNativeAccessibilitySettings,
   publishNativeTransferSpeed,
+  setNativeAccessibilityOptIn,
   setNativeDarkTheme,
   saveBlobToDevice,
   scanPairingCode,
@@ -28,6 +32,23 @@ class FakeBridge implements AirBridgeNativeBridge {
   transferStates: boolean[] = [];
   speedPayloads: string[] = [];
   darkThemes: boolean[] = [];
+  accessibilityOptIn = false;
+  serviceEnabledInSettings = false;
+  openedAccessibilitySettings = 0;
+  accessibilityOptInEnabled(): boolean {
+    return this.accessibilityOptIn;
+  }
+  setAccessibilityOptInEnabled(enabled: boolean): boolean {
+    this.accessibilityOptIn = enabled;
+    return true;
+  }
+  accessibilityServiceEnabled(): boolean {
+    return this.serviceEnabledInSettings;
+  }
+  openAccessibilitySettings(): boolean {
+    this.openedAccessibilitySettings += 1;
+    return true;
+  }
   setDarkTheme(enabled: boolean): boolean {
     this.darkThemes.push(enabled);
     return true;
@@ -235,6 +256,26 @@ describe("native shell detection", () => {
     (window as { AirBridgeAndroid?: unknown }).AirBridgeAndroid = new FakeBridge();
     expect(isNativeShell()).toBe(true);
     expect(installNativeShellBridge()).toBe(true);
+  });
+
+  it("keeps the accessibility-service opt-in off by default and requires OS settings", () => {
+    const bridge = new FakeBridge();
+    (window as { AirBridgeAndroid?: unknown }).AirBridgeAndroid = bridge;
+    expect(getNativeAccessibilityOptIn()).toBe(false);
+    expect(isNativeAccessibilityServiceEnabled()).toBe(false);
+    expect(setNativeAccessibilityOptIn(true)).toBe(true);
+    expect(getNativeAccessibilityOptIn()).toBe(true);
+    expect(openNativeAccessibilitySettings()).toBe(true);
+    expect(bridge.openedAccessibilitySettings).toBe(1);
+    bridge.serviceEnabledInSettings = true;
+    expect(isNativeAccessibilityServiceEnabled()).toBe(true);
+  });
+
+  it("is inert for accessibility helpers in a plain browser", () => {
+    expect(getNativeAccessibilityOptIn()).toBe(false);
+    expect(setNativeAccessibilityOptIn(true)).toBe(false);
+    expect(isNativeAccessibilityServiceEnabled()).toBe(false);
+    expect(openNativeAccessibilitySettings()).toBe(false);
   });
 });
 

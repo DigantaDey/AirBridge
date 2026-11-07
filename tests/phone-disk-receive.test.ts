@@ -44,17 +44,64 @@ let mockWriteHook: (() => Promise<void>) | null = null;
 
 class MockWritableStream {
   private buffer = new Uint8Array(0);
-  async write(data: Uint8Array, options?: { at?: number }): Promise<void> {
+  private cursor = 0;
+  constructor(private readonly commit: (data: Uint8Array) => void) {}
+
+  private resize(size: number): void {
+    const next = new Uint8Array(size);
+    next.set(this.buffer.subarray(0, Math.min(size, this.buffer.byteLength)));
+    this.buffer = next;
+  }
+
+  private static async bytesFrom(
+    data: BufferSource | Blob | string | null | undefined,
+  ): Promise<Uint8Array> {
+    if (data == null) return new Uint8Array(0);
+    if (typeof data === 'string') return new TextEncoder().encode(data);
+    if (data instanceof Blob) return new Uint8Array(await data.arrayBuffer());
+    if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    if (ArrayBuffer.isView(data)) {
+      return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    }
+    throw new Error('Unsupported write payload');
+  }
+
+  async write(chunk: FileSystemWriteChunkType): Promise<void> {
     if (mockWriteHook) await mockWriteHook();
-    const at = options?.at ?? this.buffer.byteLength;
+    let data: Uint8Array;
+    let at = this.cursor;
+    if (chunk && typeof chunk === 'object' && 'type' in chunk) {
+      const params = chunk as WriteParams;
+      if (params.type === 'seek') {
+        this.cursor = params.position ?? 0;
+        return;
+      }
+      if (params.type === 'truncate') {
+        this.resize(params.size ?? 0);
+        this.cursor = Math.min(this.cursor, this.buffer.byteLength);
+        return;
+      }
+      if (params.type !== 'write') throw new Error('Unsupported write command');
+      data = await MockWritableStream.bytesFrom(params.data);
+      at = params.position ?? this.cursor;
+    } else {
+      data = await MockWritableStream.bytesFrom(chunk as BufferSource | Blob | string);
+    }
     if (at + data.byteLength > this.buffer.byteLength) {
-      const next = new Uint8Array(at + data.byteLength);
-      next.set(this.buffer);
-      this.buffer = next;
+      this.resize(at + data.byteLength);
     }
     this.buffer.set(data, at);
+    this.cursor = at + data.byteLength;
   }
-  async close(): Promise<void> {}
+
+  async truncate(size: number): Promise<void> {
+    this.resize(size);
+    this.cursor = Math.min(this.cursor, size);
+  }
+
+  async close(): Promise<void> {
+    this.commit(this.buffer.slice());
+  }
   getBuffer(): Uint8Array {
     return this.buffer;
   }
@@ -62,15 +109,20 @@ class MockWritableStream {
 
 class MockFileHandle {
   readonly name: string;
-  private readonly stream = new MockWritableStream();
-  constructor(name: string) {
+  private buffer: Uint8Array;
+  constructor(name: string, initial: Uint8Array = new Uint8Array(0)) {
     this.name = name;
+    this.buffer = initial.slice();
   }
   async createWritable(): Promise<MockWritableStream> {
-    return this.stream;
+    // Matches createWritable()'s default keepExistingData=false: a fresh,
+    // empty temp stream that commits its bytes to this handle on close().
+    return new MockWritableStream((final) => {
+      this.buffer = final;
+    });
   }
   async getFile(): Promise<{ size: number; stream: () => ReadableStream<Uint8Array> }> {
-    const buffer = this.stream.getBuffer();
+    const buffer = this.buffer.slice();
     return {
       size: buffer.byteLength,
       stream: () =>
@@ -83,7 +135,7 @@ class MockFileHandle {
     };
   }
   getBuffer(): Uint8Array {
-    return this.stream.getBuffer();
+    return this.buffer;
   }
 }
 
@@ -96,6 +148,9 @@ class MockDirectoryHandle {
   }
   async removeEntry(name: string): Promise<void> {
     this.files.delete(name);
+  }
+  seedFile(name: string, data: Uint8Array): void {
+    this.files.set(name, new MockFileHandle(name, data));
   }
   getFile(name: string): MockFileHandle | undefined {
     return this.files.get(name);
@@ -317,6 +372,41 @@ describe('phone disk-backed receive (File System Access API)', () => {
 
       await sendPromise.catch(() => {});
       expect(pair.getReceiverCompleted()).toBeNull();
+    } finally {
+      pair.stop();
+    }
+  });
+
+  it('overwrites a preexisting longer file exactly using absolute chunk positions', async () => {
+    const pair = await makePair();
+    try {
+      const size = CHUNK_SIZE * 2 + 123;
+      const raw = new Uint8Array(size);
+      for (let i = 0; i < size; i++) raw[i] = (i * 41 + 19) & 0xff;
+      const stale = new Uint8Array(size + 777);
+      stale.fill(0x5a);
+      mockDir.seedFile('overwrite-long.bin', stale);
+
+      const input: SendableFileInput = {
+        name: 'overwrite-long.bin',
+        size,
+        type: 'video/mp4',
+        async sliceBytes(start, end) {
+          return raw.slice(start, end);
+        },
+      };
+
+      await pair.sender.sendFiles(pair.senderPeerTarget, [input]);
+      await waitForCondition(() => pair.getReceiverCompleted() !== null);
+      const done = pair.getReceiverCompleted()!;
+      expect(done.status).toBe('completed');
+      expect(done.receivedFiles).toHaveLength(1);
+      expect(done.receivedFiles[0].verified).toBe(true);
+      expect(done.receivedFiles[0].sha256).toBe(await refSha256(raw));
+
+      const written = mockDir.getFile('overwrite-long.bin')!.getBuffer();
+      expect(written.byteLength).toBe(size);
+      expect(Buffer.compare(Buffer.from(written), Buffer.from(raw))).toBe(0);
     } finally {
       pair.stop();
     }

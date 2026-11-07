@@ -60,6 +60,15 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("connectionContinuity", true)
         set(value) = sp.edit().putBoolean("connectionContinuity", value).apply()
 
+    /**
+     * Accessibility-assisted hidden clipboard capture is OFF by default. The
+     * user must explicitly opt in, then enable the AirBridge service in
+     * Android's Accessibility settings; the app cannot enable it silently.
+     */
+    var accessibilityClipboardOptIn: Boolean
+        get() = sp.getBoolean("accessibilityClipboardOptIn", false)
+        set(value) = sp.edit().putBoolean("accessibilityClipboardOptIn", value).apply()
+
     /** Last working loopback port; 0 until the relay has run once. */
     var relayPort: Int
         get() = sp.getInt("relayPort", 0)
@@ -69,6 +78,12 @@ class Prefs(context: Context) {
     fun pairingLink(): PairingLink? = PairingLink.parse(target)
 
     fun forget() {
-        sp.edit().remove("target").remove("serverUrl").remove("pairCode").remove("pendingPairCode").apply()
+        sp.edit()
+            .remove("target")
+            .remove("serverUrl")
+            .remove("pairCode")
+            .remove("pendingPairCode")
+            .remove("accessibilityClipboardOptIn")
+            .apply()
     }
 }

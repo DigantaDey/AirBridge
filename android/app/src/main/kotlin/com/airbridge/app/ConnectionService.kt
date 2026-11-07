@@ -12,6 +12,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.util.Log
 import org.json.JSONObject
 import java.util.Locale
 import kotlin.math.floor
@@ -124,8 +125,7 @@ class ConnectionService : Service() {
             return
         }
         if (text.isEmpty() || text.length > 256_000) return
-        if (consumeOwnClipboardWrite(text)) return
-        MainActivity.publishLocalClipboard(text)
+        publishClipboardChange(this, text)
     }
 
     /** Refreshes the foreground notification from the WebView's live rate. */
@@ -185,9 +185,20 @@ class ConnectionService : Service() {
             speed.uploading -> "AirBridge upload in progress"
             else -> "AirBridge download in progress"
         }
+        val prefs = Prefs(this)
+        val accessibilityOptIn = prefs.accessibilityClipboardOptIn
+        val accessibilityEnabled = accessibilityOptIn &&
+            ClipboardAccessibilityService.isEnabled(this)
+        val clipboardLine = when {
+            accessibilityEnabled ->
+                "Background clipboard is on with your Accessibility Service opt-in."
+            accessibilityOptIn ->
+                "Accessibility opt-in is on. Enable the AirBridge service in Android Settings."
+            else ->
+                "Background clipboard is on. Hidden clipboard reads may pause; opt in to Accessibility assistance in Settings."
+        }
         val text = when {
-            !transferActive ->
-                "Background clipboard is on. Android may pause clipboard access while hidden."
+            !transferActive -> clipboardLine
             speed == null ->
                 "Keeping the transfer active while the screen is off. Keep AirBridge open until it completes."
             else -> {
@@ -201,6 +212,7 @@ class ConnectionService : Service() {
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
             .setContentTitle(title)
             .setContentText(text)
+            .setStyle(Notification.BigTextStyle().bigText(text))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
         if (transferActive) {
@@ -265,18 +277,54 @@ class ConnectionService : Service() {
         @Volatile
         private var instance: ConnectionService? = null
 
+        private const val OWN_WRITE_ECHO_WINDOW_MS = 1_500L
+        private const val DUPLICATE_EVENT_WINDOW_MS = 400L
+
         @Volatile
         private var lastOwnClipboardText: String? = null
+        @Volatile
+        private var lastOwnClipboardAt = 0L
+        @Volatile
+        private var lastPublishedClipboardText: String? = null
+        @Volatile
+        private var lastPublishedClipboardAt = 0L
 
         /** Called by ShellBridge.copyText before it writes an incoming beam. */
         fun markOwnClipboardWrite(text: String) {
             lastOwnClipboardText = text.trim()
+            lastOwnClipboardAt = System.currentTimeMillis()
         }
 
-        private fun consumeOwnClipboardWrite(text: String): Boolean {
-            val own = lastOwnClipboardText ?: return false
-            if (own != text) return false
-            lastOwnClipboardText = null
+        /**
+         * Shared by the foreground-service listener and the optional
+         * Accessibility Service. A short window suppresses an incoming-beam
+         * echo and duplicate notifications for the same clipboard change; a
+         * later re-copy of that text is still forwarded.
+         */
+        @Synchronized
+        fun publishClipboardChange(context: Context, text: String): Boolean {
+            if (!Prefs(context).connectionContinuity) {
+                lastOwnClipboardText = null
+                return false
+            }
+            val trimmed = text.trim()
+            if (trimmed.isEmpty() || trimmed.length > 256_000) return false
+            val now = System.currentTimeMillis()
+            val own = lastOwnClipboardText
+            if (own != null && own == trimmed && now - lastOwnClipboardAt < OWN_WRITE_ECHO_WINDOW_MS) {
+                lastOwnClipboardText = null
+                lastPublishedClipboardText = trimmed
+                lastPublishedClipboardAt = now
+                return false // an incoming beam, not a new local copy
+            }
+            if (trimmed == lastPublishedClipboardText &&
+                now - lastPublishedClipboardAt < DUPLICATE_EVENT_WINDOW_MS
+            ) {
+                return false
+            }
+            lastPublishedClipboardText = trimmed
+            lastPublishedClipboardAt = now
+            MainActivity.publishLocalClipboard(trimmed)
             return true
         }
 

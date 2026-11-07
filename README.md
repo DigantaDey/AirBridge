@@ -37,8 +37,9 @@ row and the transfers dock: **Upload** on the sender and **Download** on the rec
 alongside progress and an ETA. On Android the foreground notification mirrors the rate
 while the screen is off. If bytes stop moving, the reading decays to 0 B/s rather than
 freezing at the last value. Either side can cancel. Every file is hashed with SHA-256 as
-it streams and the receiver compares that against the hash the sender declared, so a
-corrupted file shows up as unverified rather than passing quietly.
+it streams and the receiver compares that against the hash the sender declared **before**
+anything is saved: a mismatched or incomplete file is rejected and its partial discarded,
+rather than appearing in Downloads as a corrupted video.
 
 Transfer history (last 50) lives in the browser's local storage and is reconciled
 between paired devices over the encrypted channel when they reconnect, so a reload on
@@ -58,9 +59,10 @@ file anchors an append-only, fixed-width resume journal, checkpointed in bounded
 instead of rewriting the full manifest for every chunk. A transfer that is interrupted
 (tab closed, network dropped) can therefore resume from the highest contiguous chunk
 already on disk without quadratic metadata I/O; at most one 32-chunk batch needs to be
-re-sent after an unclean shutdown. A re-delivered chunk is a no-op, and a transfer that
-is cancelled or declines leaves its partial behind under
-`~/Downloads/AirBridge/.airbridge-partial/` rather than a corrupt file.
+re-sent after an unclean shutdown. A re-delivered chunk is a no-op. The daemon verifies
+the sender's SHA-256 before renaming the `.part` file, and a cancelled, declined or
+failed verification leaves no finished file behind; a mismatch removes the partial under
+`~/Downloads/AirBridge/.airbridge-partial/` instead of publishing corrupt bytes.
 
 The folder icon in the header (and next to saved items in **Recent transfers**) opens
 that folder in Finder, Explorer, or your Linux file manager. Folder browsing for the
@@ -94,6 +96,16 @@ system clipboard natively, and writes incoming beams to the system clipboard. It
 uses the page's copy event and the PWA share sheet when available. Android 10+ can
 suppress clipboard reads while an app is hidden, so background capture is best effort
 on those devices; returning to the app flushes anything it missed.
+
+For stronger hidden capture, **Settings → Accessibility-assisted clipboard capture**
+offers an explicit Accessibility Service opt-in. It is off by default. Opting in persists
+the choice, and the app then asks you to enable *AirBridge clipboard bridge* in Android's
+Accessibility settings; the service cannot be enabled silently by the app. Once both are
+on, copy and selection events trigger a plain-text clipboard read that is forwarded to the
+paired computer. The service does not retrieve window content, read text fields, record
+keystrokes or perform gestures, and Android/OEM builds may still deny background
+clipboard reads. It improves best-effort capture; it is not an OS guarantee, and the
+Mac daemon and Android foreground service still need to be alive for a fully closed app.
 
 Incoming beams are written to the host OS clipboard on the Mac and to the browser
 clipboard elsewhere, with a **Copy** toast for browsers that refuse the write. The last
@@ -429,7 +441,7 @@ These are real gaps, not TODO padding:
 
 ```sh
 npm run typecheck   # tsc --noEmit
-npm test            # vitest: 18 files, 115 tests
+npm test            # vitest: 19 files, 125 tests
 npm run build       # vite client + tsc server
 ```
 
@@ -442,8 +454,9 @@ Layout:
 - `src/shared` — protocol types, frame codecs, pair codes, ZIP writer.
 - `bin/airbridge.mjs` — CLI entry point (daemon and one-shot send).
 - `tests/` — protocol, crypto, end-to-end relay transfers, TLS/HTTPS, security and
-  received-folder behaviour, CLI/daemon, background clipboard, transfer speed, ZIP,
-  and UI tests.
+  received-folder behaviour, CLI/daemon, background clipboard, hash-before-save and
+  stale-partial-truncation file integrity, explicit Accessibility Service opt-in,
+  transfer speed, ZIP, and UI tests.
 - `public/` — PWA manifest with the share target, service worker, icon.
 
 `npm run build` writes `dist/client` and `dist/server`; those are build outputs, not

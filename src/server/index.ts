@@ -594,15 +594,23 @@ export async function createAirBridgeServer(
         res.status(403).json({ error: 'Received-files state is restricted to this machine.' });
         return;
       }
-      const body = req.body as { transferId?: unknown; fileIndex?: unknown };
+      const body = req.body as {
+        transferId?: unknown;
+        fileIndex?: unknown;
+        expectedSha256?: unknown;
+      };
       const transferId = typeof body.transferId === 'string' ? body.transferId : '';
       const fileIndex = Number(body.fileIndex);
+      const expectedSha256 =
+        typeof body.expectedSha256 === 'string' && /^[0-9a-f]{64}$/.test(body.expectedSha256)
+          ? body.expectedSha256
+          : undefined;
       if (!/^[0-9a-f]{16}$/.test(transferId) || !Number.isInteger(fileIndex) || fileIndex < 0) {
         res.status(400).json({ error: 'transferId and fileIndex are required.' });
         return;
       }
       try {
-        const result = await receiveStore.finalize(transferId, fileIndex);
+        const result = await receiveStore.finalize(transferId, fileIndex, expectedSha256);
         res.json({ ok: true, ...result });
       } catch (err) {
         res.status(400).json({
