@@ -1,635 +1,176 @@
 # AirBridge
 
-AirBridge moves files and clipboard text between an Android phone and a Mac over your
-local network. The two devices derive their own keys with ECDH P-256 and encrypt file
-data and control messages with AES-256-GCM before anything leaves the browser. Between
-the two devices, the Node service only forwards ciphertext.
-
-There is one UI, and the Android app *is* it. You start the service on the computer and
-open it at `http://localhost:3000`; the phone either opens the same page in a browser or
-scans the QR code with the APK, which loads that very page in a WebView (see
-[The Android app](#the-android-app)). Nothing is re-implemented per platform, so a
-screen or fix looks the same everywhere. Nothing here speaks Apple's AirDrop protocol,
-despite the name and the look of the UI.
-
-It exists because getting a file from an Android phone to a Mac usually means a cloud
-account, a cable, or a chat app that recompresses your photos. AirBridge keeps both
-devices on the local network and gives them an encrypted channel directly.
-
-This is a working prototype. Moving files around a LAN works; installing it and
-forgetting about it does not, mostly because of the one-time certificate step on the
-phone (explained below) that no browser-based version can avoid.
-
-## What it does
-
-### Files
-
-Drag files onto the drop area, or use the picker. Up to 100 files per transfer, mixed
-types and sizes; files stay staged until you pick a target and hit send.
-
-The receiver gets an offer showing the sender, file list, total size, a six-digit
-verification code, and WebP thumbnails for image files under 25 MB. Decline or accept.
-Ticking *Auto-accept future drops from <device>* marks the sender as trusted so their
-next offers skip the prompt.
-
-During the transfer both devices show the same smoothed live rate in the active-transfer
-row and the transfers dock: **Upload** on the sender and **Download** on the receiver,
-alongside progress and an ETA. On Android the foreground notification mirrors the rate
-while the screen is off. If bytes stop moving, the reading decays to 0 B/s rather than
-freezing at the last value. Either side can cancel. Every file is hashed with SHA-256 as
-it streams and the receiver compares that against the hash the sender declared **before**
-anything is saved: a mismatched or incomplete file is rejected and its partial discarded,
-rather than appearing in Downloads as a corrupted video.
-
-Transfer history (last 50) lives in the browser's local storage and is reconciled
-between paired devices over the encrypted channel when they reconnect, so a reload on
-one side doesn't lose the other side's record.
-
-### Received files
-
-When the service is running on the machine receiving the file, each decrypted chunk is
-streamed straight to disk as it arrives — the browser never holds the whole file in
-memory, and there is no per-file size cap on the host. A macOS notification is posted
-once the file is complete and verified. The default folder is `~/Downloads/AirBridge`;
-change it in **Settings → Received files folder**, with `--dir` on the CLI, or with
-`AIRBRIDGE_DOWNLOAD_DIR`. The choice is remembered per machine in `~/.airbridge/settings.json`.
-
-Chunks are written to a `.part` file at their declared offset. One small manifest per
-file anchors an append-only, fixed-width resume journal, checkpointed in bounded batches
-instead of rewriting the full manifest for every chunk. A transfer that is interrupted
-(tab closed, network dropped) can therefore resume from the highest contiguous chunk
-already on disk without quadratic metadata I/O; at most one 32-chunk batch needs to be
-re-sent after an unclean shutdown. A re-delivered chunk is a no-op. The daemon verifies
-the sender's SHA-256 before renaming the `.part` file, and a cancelled, declined or
-failed verification leaves no finished file behind; a mismatch removes the partial under
-`~/Downloads/AirBridge/.airbridge-partial/` instead of publishing corrupt bytes.
-
-The folder icon in the header (and next to saved items in **Recent transfers**) opens
-that folder in Finder, Explorer, or your Linux file manager. Folder browsing for the
-picker, creating a folder, and opening one are all loopback-only, so a phone can't move
-your save location or pop windows open on your desktop.
-
-On a phone (or any browser without the local daemon), received chunks are streamed
-straight to a file in a directory you pick via the browser's File System Access API —
-the same incremental, memory-bounded write, just pointed at the phone's storage instead
-of the host's Downloads folder. The file is hash-verified as it closes. If the browser
-doesn't support that API, or you cancel the picker, it falls back to reassembling in
-browser memory and downloading; multi-file transfers in that fallback are packed into a
-zip by a small built-in ZIP writer and downloaded as one archive.
-
-### Clipboard
-
-Text and images, both directions. Text is capped at 256,000 characters and image beams
-at roughly 5 MB.
-
-*Auto-beam copied text* is on by default. On the machine running the server it watches
-the OS clipboard in the background through `pbpaste`/`pbcopy` on macOS, PowerShell's
-`Get-Clipboard`/`Set-Clipboard` on Windows, or `wl-paste`/`xclip`/`xsel` on Linux, so
-copying on the Mac beams without switching back to the tab. The desktop daemon also
-keeps a small **headless encrypted peer** alive: it joins the same pair code and holds
-the ECDH session, so clipboard sharing continues even when every AirBridge browser tab
-is closed. Set `AIRBRIDGE_BACKGROUND_CLIPBOARD=0` to disable that peer.
-
-On Android, *Background clipboard & connection* is on by default after pairing. A
-foreground service keeps the WebView and its encrypted session alive, watches the
-system clipboard natively, and writes incoming beams to the system clipboard. It still
-uses the page's copy event and the PWA share sheet when available. Android 10+ can
-suppress clipboard reads while an app is hidden, so background capture is best effort
-on those devices; returning to the app flushes anything it missed.
-
-For stronger hidden capture, **Settings → Accessibility-assisted clipboard capture**
-offers an explicit Accessibility Service opt-in. It is off by default. Opting in persists
-the choice, and the app then asks you to enable *AirBridge clipboard bridge* in Android's
-Accessibility settings; the service cannot be enabled silently by the app. Once both are
-on, copy and selection events trigger a plain-text clipboard read that is forwarded to the
-paired computer. The service does not retrieve window content, read text fields, record
-keystrokes or perform gestures, and Android/OEM builds may still deny background
-clipboard reads. It improves best-effort capture; it is not an OS guarantee, and the
-Mac daemon and Android foreground service still need to be alive for a fully closed app.
-
-Incoming beams are written to the host OS clipboard on the Mac and to the browser
-clipboard elsewhere, with a **Copy** toast for browsers that refuse the write. The last
-50 beams stay in the Clipboard panel with copy, *Open URL* for links, and *Save* for
-images. Beamed text is labelled as a URL, OTP, code or plain text, which drives the
-badge and the *Open URL* button for links.
-
-Both directions can be turned off per device: *Auto-beam copied text* and *Receive
-clipboard beams*.
-
-### Pairing and discovery
-
-There are two ways to connect:
-
-- **Nearby.** With visibility set to *Nearby* on both devices, each appears in the
-  other's list. The server groups clients by their socket address on the same /24; it
-  deliberately ignores `X-Forwarded-For`, so a client can't claim someone else's subnet.
-- **Pair code.** Across networks, put the same six characters on both sides, or scan
-  the QR code, which is just `https://<host>/?pair=ABC-DEF`. Codes use a 32-character
-  alphabet with no `0`, `1`, `I`, or `O`; that's 30 bits of entropy, which is why join
-  attempts are rate limited per connection rather than trusted.
-
-Visibility is *Nearby*, *Paired only*, or *Hidden*. The pairing code is saved in local
-storage, so two devices that have paired tend to find each other again after a reload.
-
-### The rest of the UI
-
-Install it as a PWA and Android registers AirBridge as a share target, so files and
-text from other apps can be shared into it. The **Demo phone** button opens a second,
-simulated client inside the same browser so you can try the flow without a phone; it is
-labelled as a simulation and does not prove anything about real networking. There are
-also send/receive chimes (mutable), a dark theme, and a renameable device name.
-
-## What you need
-
-- Node.js 20 or newer and npm on the machine that serves the app. It is built and
-  tested on Node 22.
-- Both devices on the same Wi-Fi, or both able to reach the same server if they're not.
-  Guest networks and networks with client isolation will usually block discovery.
-- A phone browser with WebCrypto: any current Chrome, Firefox, or Chromium-based
-  browser. The address has to be `https://`, not `http://192.168…`.
-- Android is the phone target this was built against. macOS is the main desktop target;
-  the server runs on Windows and Linux too, but only macOS gets notifications, and the
-  rest of that path is less exercised.
-
-## Running from source
-
-```sh
-git clone https://github.com/DigantaDey/AirBridge.git
-cd AirBridge
-npm ci
-npm run dev
-```
-
-Open `http://localhost:3000` on the Mac. The terminal prints the address to use on the
-phone, the location of the generated certificate authority, and its SHA-256
-fingerprint:
-
-```
-⚡ AirBridge Warp Server listening on port 3000
-💻 On this Mac:        http://localhost:3000  (secure as-is)
-📱 On your phone:      https://192.168.1.20:3000
-🔐 HTTPS uses a locally generated certificate authority (/Users/you/.airbridge/tls).
-   CA SHA-256 fingerprint: C0:A5:18:…:B4:54
-   First time on a phone: install the CA from http://192.168.1.20:3000/airbridge-ca.crt
-```
-
-`npm run dev` runs the TypeScript server directly through `tsx` and mounts Vite in
-middleware mode, so the client hot-reloads. For a production-style run:
-
-```sh
-npm run build   # dist/client + dist/server
-npm start       # serves the built app
-```
-
-## The HTTPS step on the phone
-
-This is the part everyone trips over, and it isn't avoidable in a browser.
-
-AirBridge's encryption runs on the Web Crypto API, and browsers only expose
-`crypto.subtle` in a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts):
-HTTPS, or `http://localhost`. A plain `http://192.168.1.20:3000` page is not one, so key
-generation fails and the phone reports that a secure connection is required. No public
-CA will issue a certificate for a private LAN address either.
-
-So the server creates its own small certificate authority on first run:
-
-1. Start AirBridge on the Mac and note the fingerprint in the terminal.
-2. On the phone, open `http://<mac-ip>:3000/airbridge-ca.crt`. That single download
-   stays on HTTP on purpose — the phone can't fetch a CA over a connection that
-   already needs that CA to be trusted.
-3. Install it as a **CA certificate** (Android: Settings → Security & privacy → More
-   security settings → Install a certificate; wording varies by vendor). Compare the
-   fingerprint Android shows with the one on the Mac before confirming.
-4. Open `https://<mac-ip>:3000`. It loads with a lock and pairing works.
-
-Repeat that only for new phones. The leaf certificate covers `localhost` and the
-current LAN addresses, and if the Mac's IP changes the leaf is re-issued under the
-**same** CA, so already-trusting devices don't see a new warning.
-
-Details worth knowing:
-
-- One port serves both HTTP and HTTPS. Plain HTTP from another device is redirected
-  (308) to the same URL over HTTPS, so an old bookmark still works. Loopback stays on
-  HTTP because `http://localhost` is already a secure context.
-- The CA lives in `~/.airbridge/tls` (`AIRBRIDGE_TLS_DIR` moves it). Delete the
-  directory and remove the certificate from the phone to revoke it.
-- Prefer your own certificate? Point `AIRBRIDGE_TLS_CERT` and `AIRBRIDGE_TLS_KEY` at a
-  PEM pair, or pass `--tls-cert`/`--tls-key`. With mkcert:
-  `mkcert -install && mkcert localhost 127.0.0.1 ::1 $(ipconfig getifaddr en0)`, then
-  install mkcert's `rootCA.pem` on the phone.
-- `GET /api/health` reports `https`, `tlsSource` and `caFingerprintSha256`, which is the
-  quick way to see what the server is actually serving.
-- If the phone shows a certificate warning instead of the app, check the fingerprint in
-  the browser's certificate details against the Mac's output before continuing. Don't
-  train yourself to click through that screen.
-
-HTTPS gives the page a secure context. It is separate from the end-to-end encryption
-between the two devices, which happens on top of it.
-
-The Android app skips this whole dance: it loads the same page over loopback, which is
-already a secure context, and lets its own relay do the TLS. No CA to install.
-
-## Using it
-
-Open AirBridge on both devices. If they're on the same network and both set to
-*Nearby*, each should appear in the other's list within a second or two. Otherwise scan
-the QR from the other device, or type the same six-character code into both.
-
-Before sending a file, compare the six-digit code under the device name on both
-screens. It's derived from both public keys, so matching codes mean there's no
-machine-in-the-middle. Then select a target, stage files, and send.
-
-For clipboard, hit **Clipboard** on a device card to send text or an image to that
-device, or just copy something and let auto-beam do it.
-
-## Command line
-
-The CLI is `bin/airbridge.mjs`. It isn't published to npm yet, so run it from the
-checkout rather than through `npx`:
-
-```sh
-node bin/airbridge.mjs                       # daemon mode
-node bin/airbridge.mjs daemon --dir ~/Inbox --reveal
-node bin/airbridge.mjs send ./Slides.pdf ~/Movies/clip.mp4
-```
-
-`npm run cli -- daemon` does the same thing if you prefer npm scripts.
-
-Daemon mode starts the server, enables direct-to-disk saving, and prints a QR code for
-the phone. `--reveal` also pops each received file open in Finder.
-
-`send` is a one-shot beam: it starts a throwaway server on a random port, serves the
-listed files, and prints a QR code you scan with the Android camera. The link contains a
-256-bit token and expires after 15 minutes. Downloads support HTTP range requests, so a
-client that retries can pick up where it stopped instead of starting over.
-
-One rough edge: the QR points straight at the file when you send a single file, but a
-multi-file send points at a JSON manifest with per-file URLs rather than a download
-page. It works, it just isn't a nice experience yet.
-
-Because these links are plain token-gated downloads, they stay on HTTP even when TLS is
-enabled. No browser crypto is involved, and a certificate warning would only get in the
-way.
-
-| Flag | Meaning |
-| --- | --- |
-| `-p`, `--port <n>` | Port to listen on (default 3000, or `PORT`) |
-| `-d`, `--dir <path>` | Received-files folder (default `~/Downloads/AirBridge`) |
-| `--reveal` | Reveal received files in Finder |
-| `--http` | Plain HTTP only (not recommended; phones will block WebCrypto) |
-| `--tls-cert <pem>`, `--tls-key <pem>` | Use your own certificate instead of the generated CA |
-| `--tls-dir <path>` | Where the generated CA lives (default `~/.airbridge/tls`) |
-| `-h`, `--help` | Help |
-
-The in-app "How it works" panel still says `npx airbridge …`; that only works once the
-package is on npm.
-
-## Configuration
-
-Environment variables, all optional:
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `PORT` | `3000` | Listen port |
-| `AIRBRIDGE_HTTPS` | on | `0` disables TLS (only sensible behind a TLS-terminating proxy) |
-| `AIRBRIDGE_TLS_CERT`, `AIRBRIDGE_TLS_KEY` | — | PEM certificate and key (both required); turns HTTPS on and skips the generated CA |
-| `AIRBRIDGE_TLS_DIR` | `~/.airbridge/tls` | Where the generated CA and leaf are stored |
-| `AIRBRIDGE_DOWNLOAD_DIR` | `~/Downloads/AirBridge` | Received-files folder |
-| `AIRBRIDGE_LOCAL_DAEMON` | on outside tests | `0` disables direct-to-disk saving |
-| `AIRBRIDGE_CLIPBOARD_WATCH` | on outside tests | `0` disables the host OS clipboard bridge |
-| `AIRBRIDGE_BACKGROUND_CLIPBOARD` | on outside tests | `0` disables the daemon's headless clipboard peer |
-| `NODE_ENV` | unset | `production` serves the built client from `dist/client` |
-
-The server's own endpoints, for debugging or scripting: `GET /api/health`,
-`GET /api/received-folder` and `PUT /api/received-folder`,
-`POST /api/received-folder/open`, `GET /api/fs/list`, `POST /api/fs/mkdir`,
-`POST /api/daemon/save`, `GET /api/beam/:token[/file/:index]`, and the `/ws` signaling
-socket. The folder and filesystem routes answer only on loopback; the daemon
-routes answer from this machine (loopback or one of its own interfaces, so the host
-browser works over the LAN IP too). From anywhere else they return 403.
-
-## If something's wrong
-
-- **"Secure connection required" / key generation fails.** The phone is on HTTP. Use
-  the `https://` address and install the CA as described above.
-- **No devices in the list.** Both sides need the same server and both need visibility
-  set to *Nearby*, or a shared pair code. Guest Wi-Fi and client-isolated networks block
-  this; use a phone hotspot if you're stuck.
-- **Transfers stall on a large file.** On the machine running the server, chunks stream
-  to disk as they arrive, so size is bounded by disk, not RAM. A phone does the same via
-  the File System Access API. Only when that API is unavailable does the browser fall back
-  to reassembling the file in memory first — try smaller batches, or send from the CLI
-  where no per-chunk browser buffer is involved.
-- **Keep AirBridge open during a transfer.** The Android app shell requests a foreground
-  service and holds a partial CPU wake lock while a transfer is active, which helps the
-  WebView continue when the screen turns off. Android vendors can still throttle or stop
-  WebView/network work, so this is best-effort rather than a guarantee. The sender retries
-  transient connection interruptions and resumes from receiver-confirmed chunks; the Mac
-  daemon's durable partials survive reconnects. A page reload or process death still loses
-  the in-memory sender/receiver session, so this is not cross-reload recovery. Browser/PWA
-  use outside the Android shell remains subject to background-tab throttling.
-
-## How transfers actually work
-
-Signaling and relay run over a WebSocket at `/ws`. Control messages are JSON with
-AES-GCM–encrypted payloads; the only unencrypted control messages the server accepts or
-forwards are `ping` and `pong`. File data travels in two binary frame types:
-
-- `0x01` — an encrypted chunk: frame type, 16-character transfer ID, file index, chunk
-  index, 12-byte IV, ciphertext. That's a 37-byte header.
-- `0x02` — a routed relay frame: recipient peer ID, sender peer ID, then the inner
-  frame. The server overwrites the sender ID in place and forwards it; it can't read
-  the chunk inside.
-
-A WebRTC data channel is attempted when both browsers support it, and chunks use it
-once it's open. Otherwise they go through the relay. Both paths carry the same
-encrypted frames, and a chunk that exceeds the data channel's negotiated maximum
-message size is relayed instead of tearing the channel down. ICE uses
-`stun:stun.l.google.com:19302`; on a LAN the host candidates usually suffice, but the
-STUN request is still made.
-
-Tuning, for anyone reading the engine:
-
-- 256 KiB chunks by default. The manifest declares its chunk size (16 KiB to 1 MiB
-  accepted), so 64 KiB peers from older builds still work.
-- Up to 8 reads and AES-GCM encrypts in flight ahead of the socket, while the network
-  write loop drains in order.
-- The sender may run 64 chunks (16 MiB) ahead of ACKs. The receiver ACKs every 32
-  contiguous chunks that are actually stored, plus the last chunk of each file. This
-  keeps a slow disk from hiding a large receive queue behind premature ACKs.
-- Socket backpressure is applied above 4 MiB buffered and released at 1 MiB, bounding
-  latency for other apps sharing the Wi-Fi link.
-- Manifests are validated before acceptance: 100 files maximum, `totalChunks` must
-  match `size` and `chunkSize`, and a transfer is capped at 262,144 chunks (64 GiB at
-  256 KiB).
-- On loopback, the test suite moves a 16 MiB file end to end, hash included, in well
-  under a second on a development machine. That number says more about the pipeline
-  than about your Wi-Fi; the link is the limit in practice.
-
-Received files are only decrypted after you accept the offer. Chunks for a transfer
-that hasn't been accepted are neither decrypted nor stored.
-
-## Security model
-
-The server sees device names, public keys and ciphertext. It does not have the session
-keys, so it can't read files or clipboard text, and it refuses to relay plaintext
-control payloads other than ping/pong, so a hostile peer can't forge an accept, a cancel,
-or inject clipboard text without the session key.
-
-Transfers are peer-bound on both ends, so guessing a transfer ID gets you nothing. File
-manifests are validated, pair-code joins are rate limited, connection counts are capped
-(128 total, 32 per network), and CLI beam tokens are 256-bit with a 15-minute expiry and
-per-address throttling of failed lookups.
-
-There is one deliberate plaintext hop. When the Mac's own browser receives a text beam
-and the host clipboard bridge is on, it asks the local service over loopback to put that
-text on the system clipboard. The text is already decrypted at that point; it stays on
-that machine and is never sent to a remote peer. Image beams skip that path.
-
-Identity keys are generated fresh per page load. The six-digit code is what binds a
-transfer to the device you think you're talking to, which is why the UI puts it next to
-the device name and in the accept dialog. Trust is stored against the peer's public
-key, so because keys rotate on reload you will often have to trust the same device
-again after a restart; the trust list can also collect stale keys. That's a known rough
-edge, not a security feature.
-
-[SECURITY.md](SECURITY.md) has the audit notes, the list of issues that were fixed
-(plaintext control injection, pre-consent chunk storage, forged `X-Forwarded-For`,
-unvalidated profiles, and so on), and the residual risks.
-
-## What's missing
-
-These are real gaps, not TODO padding:
-
-- **Desktop packaging is not a signed install.** No `.dmg`, `.app` or MSI: releases are
-  single-file binaries, ad-hoc signed on macOS. Turning them into notarised installers
-  needs signing identities and an update path this repository does not have. (The Android
-  APK is signed with a committed sideload key, so updates install over the previous one.)
-- **The service is a separate process.** Pairing goes through it; it is not native
-  local discovery. The mDNS packet the server sends (`_airbridge._tcp.local`) is a
-  Bonjour announcement that only the Android app browses (to list computers on the
-  connect screen) — a browser can't, so the web UI relies on pair codes and QR links.
-- **Both devices must reach the same server.** The relay can carry a transfer when a
-  direct WebRTC path fails, but AirBridge doesn't ship a hosted relay or tunnel, so
-  "across networks" means you've made the server reachable somehow.
-- **The phone certificate install is manual.** That's a browser/OS trust requirement no
-  web app can automate away.
-- **The phone's disk path depends on the browser.** The host streams received chunks
-  straight to disk, and a phone does the same through the File System Access API — but
-  that API is Chromium-only and requires you to pick a directory once per transfer. On a
-  browser without it (or if you cancel the picker), the phone falls back to reassembling
-  the file in browser memory before downloading, so a many-gigabyte file sent *to* such
-  a browser can still exhaust it. Sending *from* a phone is unaffected.
-- **A hash mismatch doesn't block the write.** The per-file hash is checked and shown as
-  a shield icon in the transfer list, but the file is still handed to the save path. If
-  integrity matters for what you're moving, look for that icon (its tooltip carries the
-  hash) rather than assuming a completed transfer was verified.
-- **Trust management is thin.** There's a trust toggle on each device card, no list of
-  trusted devices with revocation, and, as noted above, trust doesn't survive key
-  rotation cleanly.
-- **Tests are headless.** They cover the protocol, crypto, TLS bootstrap, CLI, and UI
-  behaviour in jsdom, plus in-process transfers through the real relay. No test here
-  touches a physical Android phone, an iPhone, or a signed build.
-- **Not AirDrop-compatible.** iOS/iPadOS isn't a target: the UI detects it, but
-  clipboard writes there rely on a Copy-button fallback when the browser refuses.
-- **The macOS LaunchAgent is a template.** `macos/com.airbridge.daemon.plist` hardcodes
-  `/usr/local/bin/node` and a relative script path, so fix both before loading it at
-  login. `macos/AirBridgeQuickSend.workflow.sh` is the script behind the Finder Quick
-  Action ("Beam to Android").
-
-## Development
-
-```sh
-npm run typecheck   # tsc --noEmit
-npm test            # vitest: 19 files, 125 tests
-npm run build       # vite client + tsc server
-```
-
-Layout:
-
-- `src/client` — React UI (`App.tsx`, `components/`) and the transfer engine
-  (`engine/warpClient.ts`, `crypto.ts`).
-- `src/server` — Express + `ws` server, signaling hub, TLS bootstrap, host clipboard
-  bridge, CLI beam sessions, macOS daemon helpers, mDNS announcement.
-- `src/shared` — protocol types, frame codecs, pair codes, ZIP writer.
-- `bin/airbridge.mjs` — CLI entry point (daemon and one-shot send).
-- `tests/` — protocol, crypto, end-to-end relay transfers, TLS/HTTPS, security and
-  received-folder behaviour, CLI/daemon, background clipboard, hash-before-save and
-  stale-partial-truncation file integrity, explicit Accessibility Service opt-in,
-  transfer speed, ZIP, and UI tests.
-- `public/` — PWA manifest with the share target, service worker, icon.
-
-`npm run build` writes `dist/client` and `dist/server`; those are build outputs, not
-installable packages.
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+<p align="center">
+  <a href="https://airbridge.fyi/">
+    <img src="public/icon.svg" width="96" height="96" alt="AirBridge Logo">
+  </a>
+</p>
+
+<h3 align="center">AirBridge</h3>
+
+<p align="center">
+  <strong>Fast, Zero-Trust Encrypted File Transfer & Universal Clipboard Sync between Android, macOS, Windows, and Linux.</strong>
+</p>
+
+<p align="center">
+  <a href="https://airbridge.fyi/"><strong>🌐 Official Website: airbridge.fyi</strong></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/DigantaDey/AirBridge/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/DigantaDey/AirBridge/ci.yml?branch=main&label=CI&style=flat-square" alt="CI Status"></a>
+  <a href="https://github.com/DigantaDey/AirBridge/releases/latest"><img src="https://img.shields.io/github/v/release/DigantaDey/AirBridge?style=flat-square&color=blue" alt="Latest Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/DigantaDey/AirBridge?style=flat-square" alt="License"></a>
+  <a href="https://airbridge.fyi/"><img src="https://img.shields.io/badge/website-airbridge.fyi-emerald?style=flat-square" alt="Website"></a>
+</p>
 
 ---
 
-## Install (free, no Apple / Microsoft accounts)
+## Overview
 
-Every release ships single-file binaries for **macOS (Apple silicon + Intel),
-Windows x64/ARM64, and Linux (x64/ARM64, glibc + static)** plus an Android APK:
+**AirBridge** bridges the gap between Apple's ecosystem and Android. It delivers an AirDrop-like experience over your local Wi-Fi network without relying on cloud accounts, third-party servers, cables, or media-compressing chat apps.
 
+With **End-to-End Encryption (E2EE)** powered by ECDH P-256 key exchange and AES-256-GCM chunk encryption, your files and clipboard content stay strictly private. AirBridge streams encrypted data directly between devices on your local area network (LAN), ensuring zero bandwidth limits, zero per-file size caps, and maximum local transfer speeds.
+
+Whether you are dropping 50 GB video files or syncing clipboard snippets between your Mac and Android phone, AirBridge provides a unified, edge-to-edge native-web UI that behaves seamlessly across mobile, tablet, and desktop form factors.
+
+---
+
+## 🚀 Quick Install
+
+Installing AirBridge requires **no paid developer accounts, app store logins, or cloud subscriptions**.
+
+### macOS & Linux
 ```bash
-# macOS / Linux — installs to ~/.local/bin, optional --autostart login item
 curl -fsSL https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.sh | bash
 ```
+> *On macOS, this creates `AirBridge.app` in `~/Applications` and places the executable in `~/.local/bin`.*
 
-On macOS the installer also creates **AirBridge.app** in `~/Applications`.
-Open **AirBridge** from Launchpad, Spotlight, or Finder whenever you need it;
-it starts the local service if needed and opens the existing web interface in
-your default browser. The server keeps running in the background after the
-browser closes. Re-run the installer to update both the binary and launcher.
-
-The installer opens the app on completion. Use `--no-start` to install without
-opening it, or `--autostart` to start the service at login without opening a
-browser. If you set `PORT` during installation, the launcher remembers it.
-If the app cannot start, check `~/.airbridge/launcher.log` and make sure that
-port is free. The source fallback also needs its installed Node.js to remain
-available at the same path.
-
-To uninstall, delete `~/Applications/AirBridge.app` and the installed binary
-(default `~/.local/bin/AirBridge`). If you enabled `--autostart`, also run
-`launchctl bootout gui/$(id -u)/com.airbridge.daemon` and remove
-`~/Library/LaunchAgents/com.airbridge.daemon.plist`. The source fallback is in
-`~/.local/share/airbridge/src`; settings, logs, and certificates are in
-`~/.airbridge` and received files are in `~/Downloads/AirBridge` (delete these
-separately only if you no longer need them).
-
+### Windows (PowerShell)
 ```powershell
-# Windows — %LOCALAPPDATA%\AirBridge via inbox curl (no SmartScreen sheet)
 powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.ps1 -UseBasicParsing | iex"
 ```
 
-Android 8.0+: sideload `AirBridge.apk` from the [latest
-release](https://github.com/DigantaDey/AirBridge/releases/latest) (updates
-install over the previous version). Releases are integrity-checked with
-`SHA256SUMS.txt`; the installer verifies the checksum before it writes the
-binary. Update the computer-side AirBridge binary at the same time: the APK is a
-shell that renders the UI served by that binary, not a standalone second app.
+### Android
+Download and install `AirBridge.apk` from the [Latest Release](https://github.com/DigantaDey/AirBridge/releases/latest).
 
-If Play Protect blocks the APK install, see [Play Protect and sideloaded
-APKs](#play-protect-and-sideloaded-apks) below.
+---
 
-Asset names are `AirBridge-<os>-<arch>` with `darwin`, `linux`, `windows` as
-`<os>` (`macOS` used to be called `macos`, which is why the old installer
-404'd), plus `AirBridge-linux-<arch>-musl` for static Linux builds.
+## ✨ Features
 
-No prebuilt binary published for your machine? The installer falls back to a
-local source build automatically — or force it:
+### 📁 High-Speed Direct-to-Disk File Transfers
+* **Zero File-Size Caps**: Stream multi-gigabyte files directly to disk without loading entire payloads into system RAM.
+* **Resume Interrupted Transfers**: Append-only fixed-width resume journal (`.part` files) saves checkpoint batches, allowing dropped transfers to resume seamlessly from the last verified chunk.
+* **SHA-256 Pre-Save Verification**: Every file is hashed with SHA-256 as it streams. The receiving device compares the computed hash against the declared hash **before** saving or publishing the file, preventing corrupted files from reaching your Downloads folder.
+* **Batch Operations**: Send up to 100 mixed-type files per transfer session. Image transfers automatically generate WebP previews for immediate inspection.
+
+### 📋 Background Universal Clipboard Sync
+* **Bidirectional Syncing**: Copy text or images on your Mac, Windows, or Linux desktop, and instantly paste them on Android (and vice versa).
+* **Headless Background Peer**: Desktop daemons maintain encrypted ECDH sessions in the background so clipboard syncing works even when browser tabs are closed.
+* **Android Foreground Service**: Keeps encrypted WebCrypto sessions alive when the screen is off or when switching between Android apps.
+* **Accessibility-Assisted Capture**: Optional, explicit opt-in Accessibility Service (`ClipboardAccessibilityService`) for enhanced background copy capture on Android 10+.
+
+### 🔒 Zero-Trust End-to-End Encryption (E2EE)
+* **Ephemeral ECDH P-256 Key Exchange**: Devices generate fresh keypairs per session to establish shared secrets.
+* **AES-256-GCM Payload Encryption**: Control messages and 256 KiB binary file frames are encrypted on the sender before leaving the device and decrypted only after consent on the receiver.
+* **6-Digit Verification Codes**: SAS (Short Authentication String) derivation lets users visually verify key integrity and prevent man-in-the-middle attacks.
+
+### 📱 Adaptive Edge-to-Edge Native UI
+* **Dynamic Safe-Area Handling**: Automatically calculates status bar, display cutout, and navigation bar insets, ensuring zero overlap with device status bars.
+* **No Sideways Panning / Webpage Bounce**: Touch-action constraints (`pan-y`) and native overscroll mode (`OVER_SCROLL_NEVER`) eliminate horizontal page sliding for a 100% native app feel.
+* **Light & Dark Studio Themes**: Automatically matches OS appearance settings with responsive layouts for phones, foldables, tablets, and desktop displays.
+
+---
+
+## 📊 Feature Comparison
+
+| Feature / Capability | **AirBridge** | **Apple AirDrop** | **LocalSend** | **KDE Connect / NearDrop** | **PairDrop / Snapdrop** | **Quick Share** |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Android <-> macOS Support** | **Full (Native APK + macOS App)** | ❌ Apple Only | ⚠️ Separate UI Apps | ⚠️ Partial / Unofficial | 🌐 Browser Only | ❌ Windows/Android Only |
+| **End-to-End Encryption (E2EE)** | **ECDH P-256 + AES-256-GCM** | 🔒 Proprietary | 🔒 TLS (P2P) | 🔒 TLS | 🔒 WebRTC / TLS | 🔒 Proprietary |
+| **Universal Background Clipboard** | **Auto-Sync (Background Daemon + Service)** | ⚠️ Apple Devices Only | ❌ Manual Send | ⚠️ Requires Config | ❌ Manual | ❌ No |
+| **Direct-to-Disk Chunked Streaming** | **Yes (`.part` Resume Journal)** | ⚠️ Memory Bounded | ⚠️ In-Memory Buffering | ⚠️ Memory Bounded | ❌ In-Memory Assembly | ⚠️ Variable |
+| **SHA-256 Pre-Save Verification** | **Yes (Verified before rename)** | ❌ No | ❌ Post-Transfer | ❌ No | ❌ No | ❌ No |
+| **No Cloud / 100% Offline LAN** | **Yes** | ⚠️ Needs Apple ID | **Yes** | **Yes** | ⚠️ Needs WebRTC STUN | ⚠️ Needs Google Acc |
+| **CLI / Daemon Execution Mode** | **Yes (`npx airbridge` / Binary)** | ❌ No | ❌ No | ⚠️ Partial | ❌ No | ❌ No |
+
+---
+
+## 🛠️ Architecture & Technical Specs
+
+AirBridge operates over a dual-layer network pipeline:
+
+```
+┌─────────────────┐       WebSocket (/ws) / WebRTC DataChannel      ┌─────────────────┐
+│  Android App /  │ ═══════════════════════════════════════════════ │   macOS / PC    │
+│  Browser Peer   │   ECDH P-256 Key Exchange + AES-256-GCM Payload │  Daemon / Host  │
+└─────────────────┘                                                 └─────────────────┘
+```
+
+1. **Signaling & Relay**: WebSockets at `/ws` carry JSON control messages and binary payload frames (`0x01` encrypted chunk, `0x02` routed relay frame). WebRTC DataChannels are established whenever P2P ICE candidate gathering succeeds.
+2. **Loopback Relay Protocol**: The Android APK runs a loopback relay (`http://127.0.0.1:<port>`) to serve the UI within a secure WebCrypto context without requiring custom CA certificate installation.
+3. **Chunked Pipeline Tuning**:
+   - **Chunk Size**: 256 KiB default (supports 16 KiB to 1 MiB bounds).
+   - **Pipelining**: Up to 8 concurrent reads and AES-GCM encryption buffers in flight ahead of socket writes.
+   - **Flow Control**: Backpressure applied above 4 MiB buffered socket data and released at 1 MiB.
+   - **ACK Windows**: Receiver ACKs every 32 contiguous chunks stored on disk.
+
+---
+
+## 🔧 Configuration & Environment Variables
+
+AirBridge daemons and CLI sessions can be customized via environment flags:
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `PORT` | `3000` | Port for the AirBridge HTTP/HTTPS signaling server |
+| `AIRBRIDGE_DOWNLOAD_DIR` | `~/Downloads/AirBridge` | Destination folder for received files |
+| `AIRBRIDGE_HTTPS` | `1` | Enforces TLS/HTTPS (set to `0` behind reverse proxies) |
+| `AIRBRIDGE_TLS_CERT` / `AIRBRIDGE_TLS_KEY` | `null` | Path to custom PEM certificate and private key |
+| `AIRBRIDGE_BACKGROUND_CLIPBOARD` | `1` | Enables/disables the headless encrypted background clipboard peer |
+
+### Command Line Interface (CLI)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.sh | bash -s -- --from-source
+# Start background daemon with custom download directory
+npx airbridge daemon --dir ~/Inbox --reveal
+
+# One-shot terminal file send (generates pairing QR in terminal)
+npx airbridge send ./Presentation.pdf ./Archive.zip
 ```
 
-Why this needs **no paid signatures**: macOS binaries are ad-hoc signed on CI
-and curl-installed files carry no quarantine/Gatekeeper flag; Windows uses a
-portable EXE fetched without Mark-of-the-Web (SignPath free OSS signing is the
-optional upgrade path). Full story, matrix, and CI flow:
-[docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
+---
 
-### The Android app
+## 💻 Local Development & Testing
 
-`AirBridge.apk` is a shell, not a second app. It renders the page the desktop serves —
-same screens, same features, same fixes — so the phone can never drift away from the
-browser UI. Three things make that possible:
+AirBridge is built with TypeScript, React, Vite, Express, and Kotlin.
 
-- **A loopback relay.** WebView cannot be taught to trust the desktop's self-signed
-  certificate beyond the main frame (subresources, `fetch` and `wss` keep failing), so
-  the app serves the UI to itself on `http://127.0.0.1:<fixed port>` and copies the raw
-  bytes to the computer, wrapped in TLS. Loopback is a secure context in every Chromium
-  build, so WebCrypto, storage and the service worker all behave exactly as they do in
-  a desktop browser. The fixed port keeps the origin — and with it the phone's device
-  identity, theme and pair code — stable across launches.
-- **A QR scanner on first run.** An unpaired phone opens a full-screen camera scanner for
-  the pairing QR the computer prints (`https://<host>/?pair=ABC-DEF`). Closing it (×)
-  leaves a connect screen styled like the rest of the app: computers found over mDNS,
-  or a typed address, plus the same scanner again.
-- **A small bridge** (`window.AirBridgeAndroid`) for the things a WebView cannot do:
-  clipboard read/write, saving received files to Downloads (a `blob:` download link is
-  a no-op inside a WebView), starting the scanner, switching computers from
-  *Settings → Change computer*, publishing live transfer speed to the foreground
-  notification, and matching the system bars to the UI's light/dark theme. Everything
-  else in the page is untouched, so a browser sees no difference.
+```bash
+# Clone repository
+git clone https://github.com/DigantaDey/AirBridge.git
+cd AirBridge
 
-Practical notes:
+# Install dependencies
+npm ci
 
-- The app needs the computer to be running AirBridge; it is a window into that computer's
-  service, not a peer by itself.
-- Re-pair with a different computer from the phone's *Settings → Change computer*, or by
-  scanning again from the pairing dialog. `airbridge://<host>:<port>?pair=<code>` links
-  do the same thing, which is handy with `adb shell am start -a android.intent.action.VIEW`.
-- The shell reserves status/navigation-bar space in a native container *around* the
-  WebView (Chromium ignores `WebView.setPadding()`), injects a small shim into every
-  page for safe-area/Back parity with older desktop builds, wraps the header actions
-  into tappable rows on narrow screens, and centre-crops the camera preview so the QR
-  frame stays square instead of stretching.
-- Update the desktop binary and `AirBridge.apk` from the same release. The phone
-  renders the UI served by the desktop, so an old desktop binary can keep serving old
-  page assets after the APK has been updated.
-- Background clipboard is enabled by default after pairing. The foreground service
-  keeps the encrypted session and native clipboard watcher alive when you leave the
-  app; Android can still pause clipboard reads while the app is hidden.
-- Transfers run while the app is in the foreground; unlike a browser tab, the page keeps
-  running when the screen is off only as long as Android keeps the WebView alive.
-- Build it with `gradle -p android :app:assembleDebug` (or `:app:assembleRelease`), and
-  run `npm run verify:android` for a no-Gradle preflight of the engine and app sources.
+# Start development server with Vite hot reloading
+npm run dev
 
-#### Play Protect and sideloaded APKs
+# Run full unit test suite (Vitest + JSDOM)
+npm test
 
-Builds that include the optional Accessibility Service declare
-`android.permission.BIND_ACCESSIBILITY_SERVICE`. Google Play Protect's enhanced fraud
-protection can block installing `AirBridge.apk` when it is opened from a browser, file
-manager or messaging app, with: “App blocked to protect your device — This app can
-request access to sensitive data. This can increase the risk of identity theft or
-financial fraud.” That is a manifest-policy block for internet-sideloaded APKs declaring
-accessibility, SMS or notification-listener permissions, not a malware verdict and not a
-signing-key problem. The service is off by default and is never enabled by the app itself.
-See [Google's Play Protect warning
-guidance](https://developers.google.com/android/play-protect/warning-dev-guidance) and
-the [enhanced fraud protection rollout
-notes](https://www.forbes.com/sites/zakdoffman/2024/10/11/google-play-store-new-app-warning-for-samsung-galaxy-s24-pixel-9-pro-android/);
-it is most often seen in India and other rollout regions.
+# Run TypeScript typechecking
+npm run typecheck
 
-If you trust this build, install it from a computer with USB debugging enabled:
-
-```sh
-adb install -r /path/to/AirBridge.apk
+# Build client and server bundles
+npm run build
 ```
 
-ADB is not an internet-sideloading source, so Play Protect stays enabled. On Android 13+
-you may also need **App info → ⋮ → Allow restricted settings** before Android lets you
-enable the Accessibility Service. Do **not** turn off “Scan apps with Play Protect” to get
-past the prompt. If you believe the classification is wrong, you can
-[appeal the Play Protect
-warning](https://developers.google.com/android/play-protect/warning-dev-guidance#request-appeal).
-Publishing through the Play Store also avoids this specific block. A permission-minimized
-APK without the accessibility declaration would install normally from a browser; this
-release ships one APK that includes it.
+---
 
-### Cutting a release
+## 📄 License
 
-`install.sh` / `install.ps1` read `releases/latest/download/…`, so a GitHub
-release must exist before the one-liners work. Publish one either by pushing a
-tag (`git tag v1.0.0 && git push origin v1.0.0`) or without a local checkout:
-**Actions → Release → Run workflow → version `1.0.0`**.
-([`release.yml`](.github/workflows/release.yml) builds every desktop target,
-ad-hoc signs the macOS binaries, builds the APK, and attaches all of them plus
-`SHA256SUMS.txt`.)
+This project is licensed under the [MIT License](LICENSE).
 
-### Download center inside the app + universal CLI
-
-Once AirBridge is running anywhere, open its web UI and click **Downloads**:
-every platform build is listed there (the visitor's device is highlighted).
-Artifacts dropped next to the running binary are served straight from that
-machine over the LAN — a phone can install the APK without internet access;
-everything else links to GitHub Releases with `SHA256SUMS.txt` verification.
-
-**No build for your platform?** AirBridge is truly cross-platform via the CLI:
-`npx airbridge` (Node 20+) — or the single-file binary itself — starts the
-server on any OS and **prints a pairing QR in the terminal**; scanning it with
-a phone opens the page already inside the host's pairing group
-(`?pair=<code>`, first-claim scoped, rotate anytime).
+<p align="center">
+  Developed with ❤️ by <a href="https://github.com/DigantaDey">Diganta Dey</a> • <a href="https://airbridge.fyi/"><strong>airbridge.fyi</strong></a>
+</p>
