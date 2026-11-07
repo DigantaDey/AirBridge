@@ -32,8 +32,8 @@ verification code, and WebP thumbnails for image files under 25 MB. Decline or a
 Ticking *Auto-accept future drops from <device>* marks the sender as trusted so their
 next offers skip the prompt.
 
-During the transfer you get progress, a smoothed speed reading and an ETA. Either side
-can cancel. Every file is hashed with SHA-256 as it streams and the receiver compares
+During the transfer you get progress, a smoothed speed reading labelled **Upload** on
+the sender and **Download** on the receiver, and an ETA. Either side can cancel. Every file is hashed with SHA-256 as it streams and the receiver compares
 that against the hash the sender declared, so a corrupted file shows up as unverified
 rather than passing quietly.
 
@@ -50,12 +50,14 @@ once the file is complete and verified. The default folder is `~/Downloads/AirBr
 change it in **Settings → Received files folder**, with `--dir` on the CLI, or with
 `AIRBRIDGE_DOWNLOAD_DIR`. The choice is remembered per machine in `~/.airbridge/settings.json`.
 
-Chunks are written to a `.part` file at their declared offset and a small manifest is
-persisted beside it, so a transfer that is interrupted (tab closed, network dropped) can
-resume from the highest contiguous chunk already on disk instead of starting over. A
-re-delivered chunk is a no-op, and a transfer that is cancelled or declines leaves its
-partial behind under `~/Downloads/AirBridge/.airbridge-partial/` rather than a corrupt
-file.
+Chunks are written to a `.part` file at their declared offset. One small manifest per
+file anchors an append-only, fixed-width resume journal, checkpointed in bounded batches
+instead of rewriting the full manifest for every chunk. A transfer that is interrupted
+(tab closed, network dropped) can therefore resume from the highest contiguous chunk
+already on disk without quadratic metadata I/O; at most one 32-chunk batch needs to be
+re-sent after an unclean shutdown. A re-delivered chunk is a no-op, and a transfer that
+is cancelled or declines leaves its partial behind under
+`~/Downloads/AirBridge/.airbridge-partial/` rather than a corrupt file.
 
 The folder icon in the header (and next to saved items in **Recent transfers**) opens
 that folder in Finder, Explorer, or your Linux file manager. Folder browsing for the
@@ -325,15 +327,17 @@ Tuning, for anyone reading the engine:
   accepted), so 64 KiB peers from older builds still work.
 - Up to 8 reads and AES-GCM encrypts in flight ahead of the socket, while the network
   write loop drains in order.
-- The sender may run 256 chunks ahead of ACKs. The receiver ACKs every 32 chunks plus
-  the last chunk of each file, fire-and-forget.
-- Socket backpressure is applied above 16 MiB buffered and released at 4 MiB.
+- The sender may run 64 chunks (16 MiB) ahead of ACKs. The receiver ACKs every 32
+  contiguous chunks that are actually stored, plus the last chunk of each file. This
+  keeps a slow disk from hiding a large receive queue behind premature ACKs.
+- Socket backpressure is applied above 4 MiB buffered and released at 1 MiB, bounding
+  latency for other apps sharing the Wi-Fi link.
 - Manifests are validated before acceptance: 100 files maximum, `totalChunks` must
   match `size` and `chunkSize`, and a transfer is capped at 262,144 chunks (64 GiB at
   256 KiB).
-- On loopback, the test suite moves a 16 MiB file end to end, hash included, in about
-  0.4 s on a development machine. That number says more about the pipeline than about
-  your Wi-Fi; the link is the limit in practice.
+- On loopback, the test suite moves a 16 MiB file end to end, hash included, in well
+  under a second on a development machine. That number says more about the pipeline
+  than about your Wi-Fi; the link is the limit in practice.
 
 Received files are only decrypted after you accept the offer. Chunks for a transfer
 that hasn't been accepted are neither decrypted nor stored.

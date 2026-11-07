@@ -12,6 +12,7 @@ import {
   type SendableFileInput,
   type TransferSessionView,
 } from '../src/client/engine/warpClient.js';
+import { PartialReceiveStore } from '../src/server/partialReceive.js';
 
 function waitForCondition(predicate: () => boolean, timeoutMs = 10000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -47,6 +48,73 @@ function createMemoryFile(
     },
   };
 }
+
+describe('append-only resume journal', () => {
+  it('does not rewrite full manifests per chunk and recovers safely after a crash', async () => {
+    const downloadDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'airbridge-journal-'));
+    const config = {
+      enabled: true,
+      downloadDir,
+      autoSaveToDownloads: true,
+      notifyOnReceive: false,
+      revealInFinder: false,
+    };
+    const transferId = 'abababababababab';
+    const chunkSize = 64;
+    const totalChunks = 80;
+    const raw = new Uint8Array(chunkSize * totalChunks);
+    for (let i = 0; i < raw.length; i++) raw[i] = (i * 29 + 11) & 0xff;
+    const meta = {
+      transferId,
+      fileIndex: 0,
+      name: 'journal.bin',
+      size: raw.length,
+      chunkSize,
+      totalChunks,
+    };
+
+    const firstProcess = new PartialReceiveStore(config);
+    try {
+      // Stop short of both the next batch and the last chunk. The on-disk
+      // snapshot must stay tiny; progress belongs in the fixed-width journal.
+      for (let i = 0; i < 40; i++) {
+        await firstProcess.writeChunk(meta, i, raw.slice(i * chunkSize, (i + 1) * chunkSize));
+      }
+      const partialDir = path.join(downloadDir, '.airbridge-partial');
+      const snapshot = JSON.parse(
+        await fs.promises.readFile(path.join(partialDir, `${transferId}-0.json`), 'utf8'),
+      ) as { receivedChunks: boolean[] };
+      expect(snapshot.receivedChunks.filter(Boolean)).toHaveLength(1);
+      const journal = await fs.promises.readFile(path.join(partialDir, `${transferId}-0.journal`));
+      expect(journal.byteLength).toBe(32 * 4);
+
+      // Simulate an unclean restart (do not dispose the first store): at most
+      // one 32-chunk batch may need retransmission, never the whole file.
+      const recovered = new PartialReceiveStore(config);
+      const summary = await recovered.listReceived(transferId, 0);
+      expect(summary).not.toBeNull();
+      expect(summary!.receivedCount).toBe(33);
+      expect(summary!.receivedChunks).toEqual(Array.from({ length: 33 }, (_, i) => i));
+      await firstProcess.dispose();
+
+      // Replaying every uncheckpointed chunk is idempotent. Finish and verify
+      // the original bytes, then ensure all resumable metadata is cleaned up.
+      for (let i = 0; i < totalChunks; i++) {
+        await recovered.writeChunk(meta, i, raw.slice(i * chunkSize, (i + 1) * chunkSize));
+      }
+      const done = await recovered.finalize(transferId, 0);
+      expect(done.bytes).toBe(raw.length);
+      expect(Buffer.compare(await fs.promises.readFile(done.savedPath), Buffer.from(raw))).toBe(0);
+      await expect(
+        fs.promises.access(path.join(partialDir, `${transferId}-0.journal`)),
+      ).rejects.toThrow();
+      await recovered.dispose();
+    } finally {
+      await firstProcess.dispose();
+      await fs.promises.rm(downloadDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('disk-backed receive endpoints', () => {
   let server: AirBridgeServerInstance;

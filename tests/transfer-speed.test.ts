@@ -149,6 +149,48 @@ describe("high-throughput transfer pipeline", () => {
     }
   });
 
+  it("keeps multi-file batches verified and reports live speed on both devices", async () => {
+    const pair = await makePair("speed-multi-file");
+    try {
+      const files = Array.from({ length: 12 }, (_, fileIndex) => {
+        const size = CHUNK_SIZE * 2 + fileIndex * 97;
+        const raw = new Uint8Array(size);
+        for (let i = 0; i < size; i++) raw[i] = (i * 17 + fileIndex * 31) & 0xff;
+        const input: SendableFileInput = {
+          name: `batch-${fileIndex}.bin`,
+          size,
+          type: "application/octet-stream",
+          async sliceBytes(start, end) {
+            return raw.slice(start, end);
+          },
+        };
+        return { input, raw };
+      });
+
+      const senderDone = await pair.sender.sendFiles(
+        pair.senderPeerTarget,
+        files.map((f) => f.input),
+      );
+      await waitForCondition(() => pair.getCompleted() !== null);
+      const receiverDone = pair.getCompleted()!;
+
+      expect(senderDone.status).toBe("completed");
+      expect(receiverDone.receivedFiles).toHaveLength(files.length);
+      expect(senderDone.speedBytesPerSec).toBeGreaterThan(0);
+      expect(receiverDone.speedBytesPerSec).toBeGreaterThan(0);
+      for (const [index, file] of files.entries()) {
+        const received = receiverDone.receivedFiles[index];
+        expect(received.verified).toBe(true);
+        expect(Buffer.compare(
+          Buffer.concat(received.chunks.map((chunk) => Buffer.from(chunk))),
+          Buffer.from(file.raw),
+        )).toBe(0);
+      }
+    } finally {
+      pair.stop();
+    }
+  });
+
   it("moves a 16 MiB file end-to-end, verified and byte-identical", async () => {
     const pair = await makePair("speed-large");
     try {

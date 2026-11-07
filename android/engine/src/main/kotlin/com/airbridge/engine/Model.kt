@@ -13,7 +13,9 @@ object Limits {
     const val MAX_CHUNKS_PER_TRANSFER = 262_144
     const val MAX_CLIPBOARD_TEXT = 256_000
     const val MAX_CLIPBOARD_IMAGE_DATAURL = 7_000_000
-    const val MAX_UNACKED_CHUNKS = 256
+    // Match the web client: 16 MiB is enough to cover LAN RTT without
+    // allowing a fast sender to build a device-wide latency queue.
+    const val MAX_UNACKED_CHUNKS = 64
     const val ACK_INTERVAL_CHUNKS = 32
     const val MAX_HISTORY = 50
 }

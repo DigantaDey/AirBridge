@@ -15,8 +15,9 @@ import java.security.MessageDigest
  *
  * Receiving side: [FileSink] streams chunks to durable storage as they
  * arrive (never buffering the whole file), tracks received chunk indexes in
- * a sidecar manifest so an interrupted transfer resumes from disk, and
- * verifies SHA-256 on finalize.
+ * a sidecar manifest and append-only journal so an interrupted transfer
+ * resumes from disk without per-chunk JSON rewrites, and verifies SHA-256
+ * on finalize.
  */
 interface FileSource {
     val name: String
@@ -113,7 +114,10 @@ class DirectoryFileSink(
 ) : FileSink {
     private val partFile = File(stagingDir, "$transferId.${meta.index}.part")
     private val sidecar = File(stagingDir, "$transferId.${meta.index}.meta")
+    private val journalFile = File(stagingDir, "$transferId.${meta.index}.journal")
     private val received = sortedSetOf<Int>()
+    private val pendingJournal = ArrayList<Int>()
+    private var hasSnapshot = false
     private var complete = false
     private var error: String? = null
     private var raf: RandomAccessFile? = null
@@ -126,13 +130,16 @@ class DirectoryFileSink(
                 val text = sidecar.readText(Charsets.UTF_8)
                 val o = JsonValue.parseObject(text)
                 (o.optArr("received") ?: JsonValue.JsonArr()).items.forEach { v ->
-                    received.add(v.asInt())
+                    val index = v.asInt()
+                    if (index >= 0 && index < meta.totalChunks) received.add(index)
                 }
                 complete = o.optBool("complete") ?: false
+                hasSnapshot = true
             } catch (_: Exception) {
                 received.clear()
             }
         }
+        if (hasSnapshot) replayJournal() else journalFile.delete()
         if (received.isEmpty() && partFile.exists() && partFile.length() == 0L) {
             partFile.delete()
         }
@@ -142,6 +149,29 @@ class DirectoryFileSink(
             } catch (e: Exception) {
                 error = e.message
             }
+        }
+    }
+
+    /** Fixed-width indexes make resume metadata linear in the number of chunks. */
+    private fun replayJournal() {
+        try {
+            if (!journalFile.exists()) return
+            val alignedLength = journalFile.length() - journalFile.length() % JOURNAL_ENTRY_BYTES
+            if (alignedLength != journalFile.length()) {
+                RandomAccessFile(journalFile, "rw").use { it.setLength(alignedLength) }
+            }
+            val bytes = journalFile.readBytes()
+            var offset = 0
+            while (offset + JOURNAL_ENTRY_BYTES <= bytes.size) {
+                val index = ((bytes[offset].toInt() and 0xff) shl 24) or
+                    ((bytes[offset + 1].toInt() and 0xff) shl 16) or
+                    ((bytes[offset + 2].toInt() and 0xff) shl 8) or
+                    (bytes[offset + 3].toInt() and 0xff)
+                if (index >= 0 && index < meta.totalChunks) received.add(index)
+                offset += JOURNAL_ENTRY_BYTES
+            }
+        } catch (_: Exception) {
+            // The atomic sidecar is still a valid, slightly older checkpoint.
         }
     }
 
@@ -158,12 +188,24 @@ class DirectoryFileSink(
     override fun store(chunkIndex: Int, data: ByteArray) {
         if (received.contains(chunkIndex)) return
         try {
-            val handle = raf ?: RandomAccessFile(partFile, "rw").also { raf = it }
-            handle.setLength(maxOf(handle.length(), meta.size))
+            val handle = raf ?: RandomAccessFile(partFile, "rw").also {
+                // Size the part file once, not on every chunk.
+                if (it.length() != meta.size) it.setLength(meta.size)
+                raf = it
+            }
             handle.seek(chunkIndex * meta.chunkSize.toLong())
             handle.write(data)
             received.add(chunkIndex)
-            persistSidecar()
+            pendingJournal.add(chunkIndex)
+            if (!hasSnapshot) {
+                // Anchor one atomic snapshot per file, then append fixed-width
+                // indexes in bounded batches instead of rewriting JSON per chunk.
+                persistSidecar()
+                pendingJournal.clear()
+                journalFile.delete()
+            } else if (pendingJournal.size >= JOURNAL_FLUSH_CHUNKS || chunkIndex == meta.totalChunks - 1) {
+                flushJournal()
+            }
         } catch (e: Exception) {
             error = e.message ?: "write failed"
             throw IOException("disk write failed: ${e.message}", e)
@@ -180,12 +222,37 @@ class DirectoryFileSink(
             sidecar.writeText(o.toJsonString(), Charsets.UTF_8)
             tmp.delete()
         }
+        hasSnapshot = true
+    }
+
+    private fun flushJournal() {
+        if (pendingJournal.isEmpty()) return
+        if (journalFile.exists() && journalFile.length() % JOURNAL_ENTRY_BYTES != 0L) {
+            RandomAccessFile(journalFile, "rw").use {
+                it.setLength(it.length() - it.length() % JOURNAL_ENTRY_BYTES)
+            }
+        }
+        val bytes = ByteArray(pendingJournal.size * JOURNAL_ENTRY_BYTES)
+        pendingJournal.forEachIndexed { i, index ->
+            val offset = i * JOURNAL_ENTRY_BYTES
+            bytes[offset] = (index ushr 24).toByte()
+            bytes[offset + 1] = (index ushr 16).toByte()
+            bytes[offset + 2] = (index ushr 8).toByte()
+            bytes[offset + 3] = index.toByte()
+        }
+        FileOutputStream(journalFile, true).use { it.write(bytes) }
+        pendingJournal.clear()
     }
 
     override fun markComplete() {
         complete = true
         try {
+            // A completion snapshot is written only once per file. It also
+            // compacts the journal; replay remains idempotent if deletion is
+            // interrupted after the atomic rename.
             persistSidecar()
+            pendingJournal.clear()
+            journalFile.delete()
         } catch (_: Exception) {
         }
     }
@@ -200,6 +267,7 @@ class DirectoryFileSink(
             return null
         }
         try {
+            flushJournal()
             closeHandle()
             val digest = MessageDigest.getInstance("SHA-256")
             FileInputStream(partFile).use { fis ->
@@ -214,6 +282,7 @@ class DirectoryFileSink(
             val verified = declaredSha256 == null || declaredSha256 == hex
             val finalTarget = finisher(partFile, meta.name)
             sidecar.delete()
+            journalFile.delete()
             finalized = true
             return FileFinalize(finalTarget.absolutePath, hex, verified)
         } catch (e: Exception) {
@@ -234,10 +303,17 @@ class DirectoryFileSink(
         closeHandle()
         partFile.delete()
         sidecar.delete()
+        journalFile.delete()
         received.clear()
+        pendingJournal.clear()
     }
 
     override fun lastError(): String? = error
+
+    private companion object {
+        const val JOURNAL_ENTRY_BYTES = 4
+        const val JOURNAL_FLUSH_CHUNKS = 32
+    }
 }
 
 /** Convenience factory staging into one directory with a final destination hook. */

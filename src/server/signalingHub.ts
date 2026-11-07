@@ -528,9 +528,10 @@ export class SignalingHub {
       return;
     }
 
-    // Do not let a fast sender grow the relay queue without bound. Senders
-    // self-throttle at a 16 MiB socket buffer, so this 64 MiB valve should
-    // never trip in honest use — it only stops a runaway queue.
+    // Do not let a fast sender grow the relay queue without bound. Current
+    // senders cap unacknowledged receiver work at 16 MiB and their own socket
+    // queue at 4 MiB, so this 64 MiB last-resort valve stays well above the
+    // honest pipeline while still stopping a runaway client.
     if (target.ws.bufferedAmount > 64 * 1024 * 1024) return;
     // Stamp authenticated sender peerId in-place so sourcePeerId can never be forged
     overwriteRoutedSourcePeerId(bytes, sender.peerId);

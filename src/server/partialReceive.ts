@@ -9,10 +9,11 @@ import { resolveFinalPath, triggerMacNotification } from './macIntegration.js';
  *
  * The browser decrypts each inbound chunk and posts it here over loopback;
  * this store writes it straight to a `.part` file at its declared offset,
- * so a multi-gigabyte transfer never lives entirely in browser memory. The
- * manifest is persisted next to the temp file, which makes an interrupted
- * transfer recoverable: a later accept can query what already landed and
- * resume from there instead of starting over.
+ * so a multi-gigabyte transfer never lives entirely in browser memory. One
+ * atomic manifest plus an append-only chunk journal is persisted next to the
+ * temp file, which makes an interrupted transfer recoverable without rewriting
+ * growing JSON metadata for every chunk: a later accept can query what already
+ * landed and resume from there instead of starting over.
  */
 
 export interface PartialReceiveMeta {
@@ -28,9 +29,14 @@ export interface PartialReceiveMeta {
 export interface PartialReceiveState extends PartialReceiveMeta {
   tempPath: string;
   metaPath: string;
+  /** Append-only, fixed-width chunk journal (four-byte big-endian indexes). */
+  journalPath: string;
   receivedChunks: boolean[];
   receivedCount: number;
   receivedBytes: number;
+  /** Indexes not yet appended to the journal. Losing these only causes a safe re-send. */
+  pendingJournal: number[];
+  hasSnapshot: boolean;
   fd?: fs.promises.FileHandle;
 }
 
@@ -56,6 +62,11 @@ export interface ReceivedSummary {
 }
 
 const TRANSFER_ID_RE = /^[0-9a-f]{16}$/;
+const JOURNAL_ENTRY_BYTES = 4;
+// A checkpoint per 8 MiB (at the default chunk size) bounds both metadata I/O
+// and the amount that may need to be re-sent after a process crash. The final
+// chunk of every file is always checkpointed.
+const JOURNAL_FLUSH_CHUNKS = 32;
 
 function isValidMeta(meta: PartialReceiveMeta): boolean {
   return (
@@ -89,10 +100,14 @@ export class PartialReceiveStore {
     return `${transferId}:${fileIndex}`;
   }
 
-  private pathsFor(transferId: string, fileIndex: number): { tempPath: string; metaPath: string } {
+  private pathsFor(
+    transferId: string,
+    fileIndex: number,
+  ): { tempPath: string; metaPath: string; journalPath: string } {
     return {
       tempPath: path.join(this.partialDir, `${transferId}-${fileIndex}.part`),
       metaPath: path.join(this.partialDir, `${transferId}-${fileIndex}.json`),
+      journalPath: path.join(this.partialDir, `${transferId}-${fileIndex}.journal`),
     };
   }
 
@@ -123,22 +138,20 @@ export class PartialReceiveStore {
     const existing = this.states.get(key);
     if (existing) return existing;
 
-    const { tempPath, metaPath } = this.pathsFor(meta.transferId, meta.fileIndex);
+    const { tempPath, metaPath, journalPath } = this.pathsFor(meta.transferId, meta.fileIndex);
     await fs.promises.mkdir(this.partialDir, { recursive: true });
 
     let receivedChunks: boolean[] = new Array(meta.totalChunks).fill(false);
     let receivedCount = 0;
-    let receivedBytes = 0;
+    let hasSnapshot = false;
     try {
       const raw = await fs.promises.readFile(metaPath, 'utf8');
       const parsed = JSON.parse(raw) as {
         receivedChunks?: unknown;
-        receivedBytes?: unknown;
         size?: unknown;
         chunkSize?: unknown;
         totalChunks?: unknown;
         name?: unknown;
-        senderName?: unknown;
       };
       // Only trust a manifest whose declared dimensions match the current
       // offer; a stale file from a previous, differently-sized transfer must
@@ -151,15 +164,14 @@ export class PartialReceiveStore {
       ) {
         const arr = parsed.receivedChunks;
         if (Array.isArray(arr)) {
-          receivedChunks = new Array(meta.totalChunks).fill(false);
           for (let i = 0; i < arr.length && i < meta.totalChunks; i++) {
             if (arr[i]) {
               receivedChunks[i] = true;
               receivedCount++;
             }
           }
+          hasSnapshot = true;
         }
-        receivedBytes = Number(parsed.receivedBytes) || 0;
       }
     } catch {
       // Fresh receive: no persisted manifest yet.
@@ -169,10 +181,20 @@ export class PartialReceiveStore {
       ...meta,
       tempPath,
       metaPath,
+      journalPath,
       receivedChunks,
       receivedCount,
-      receivedBytes,
+      receivedBytes: 0,
+      pendingJournal: [],
+      hasSnapshot,
     };
+    if (hasSnapshot) {
+      await this.replayJournal(state);
+    } else {
+      // An orphaned journal has no trustworthy dimensions without its manifest.
+      await fs.promises.rm(journalPath, { force: true });
+    }
+    this.recountReceivedBytes(state);
     this.states.set(key, state);
     return state;
   }
@@ -181,7 +203,7 @@ export class PartialReceiveStore {
     const key = this.key(transferId, fileIndex);
     const inMemory = this.states.get(key);
     if (inMemory) return inMemory;
-    const { tempPath, metaPath } = this.pathsFor(transferId, fileIndex);
+    const { tempPath, metaPath, journalPath } = this.pathsFor(transferId, fileIndex);
     try {
       const raw = await fs.promises.readFile(metaPath, 'utf8');
       const parsed = JSON.parse(raw) as PartialReceiveState;
@@ -189,8 +211,14 @@ export class PartialReceiveStore {
         parsed &&
         TRANSFER_ID_RE.test(parsed.transferId || '') &&
         Number.isInteger(parsed.fileIndex) &&
-        Array.isArray(parsed.receivedChunks)
+        Array.isArray(parsed.receivedChunks) &&
+        Number.isInteger(parsed.totalChunks) &&
+        parsed.totalChunks > 0 &&
+        Number.isFinite(parsed.chunkSize) &&
+        parsed.chunkSize > 0
       ) {
+        const receivedChunks = new Array<boolean>(parsed.totalChunks).fill(false);
+        for (let i = 0; i < parsed.totalChunks; i++) receivedChunks[i] = parsed.receivedChunks[i] === true;
         const state: PartialReceiveState = {
           transferId,
           fileIndex,
@@ -198,13 +226,18 @@ export class PartialReceiveStore {
           senderName: typeof parsed.senderName === 'string' ? parsed.senderName : undefined,
           size: Number(parsed.size) || 0,
           chunkSize: Number(parsed.chunkSize) || 0,
-          totalChunks: Number(parsed.totalChunks) || 0,
+          totalChunks: Number(parsed.totalChunks),
           tempPath,
           metaPath,
-          receivedChunks: parsed.receivedChunks,
-          receivedCount: parsed.receivedChunks.filter(Boolean).length,
-          receivedBytes: Number(parsed.receivedBytes) || 0,
+          journalPath,
+          receivedChunks,
+          receivedCount: receivedChunks.filter(Boolean).length,
+          receivedBytes: 0,
+          pendingJournal: [],
+          hasSnapshot: true,
         };
+        await this.replayJournal(state);
+        this.recountReceivedBytes(state);
         this.states.set(key, state);
         return state;
       }
@@ -212,6 +245,35 @@ export class PartialReceiveStore {
       // no persisted manifest
     }
     return null;
+  }
+
+  private recountReceivedBytes(state: PartialReceiveState): void {
+    let bytes = 0;
+    for (let i = 0; i < state.totalChunks; i++) {
+      if (!state.receivedChunks[i]) continue;
+      bytes += state.size === 0 ? 0 : Math.min(state.chunkSize, state.size - i * state.chunkSize);
+    }
+    state.receivedBytes = bytes;
+  }
+
+  /** Replay complete journal entries; a crash-truncated tail is discarded safely. */
+  private async replayJournal(state: PartialReceiveState): Promise<void> {
+    try {
+      const journal = await fs.promises.readFile(state.journalPath);
+      const completeLength = journal.byteLength - (journal.byteLength % JOURNAL_ENTRY_BYTES);
+      if (completeLength !== journal.byteLength) {
+        await fs.promises.truncate(state.journalPath, completeLength);
+      }
+      for (let offset = 0; offset < completeLength; offset += JOURNAL_ENTRY_BYTES) {
+        const chunkIndex = journal.readUInt32BE(offset);
+        if (chunkIndex < state.totalChunks && !state.receivedChunks[chunkIndex]) {
+          state.receivedChunks[chunkIndex] = true;
+          state.receivedCount++;
+        }
+      }
+    } catch {
+      // No journal (or an unreadable one): the atomic snapshot remains valid.
+    }
   }
 
   private async ensureFd(state: PartialReceiveState): Promise<fs.promises.FileHandle> {
@@ -246,6 +308,27 @@ export class PartialReceiveStore {
     const tmp = `${state.metaPath}.tmp`;
     await fs.promises.writeFile(tmp, JSON.stringify(payload), { mode: 0o600 });
     await fs.promises.rename(tmp, state.metaPath);
+    state.hasSnapshot = true;
+  }
+
+  /** Append a batch in O(number of new chunks), never rewriting prior history. */
+  private async flushJournal(state: PartialReceiveState): Promise<void> {
+    if (state.pendingJournal.length === 0) return;
+    // If a previous append was interrupted, discard its partial entry before
+    // adding more so every later index stays four-byte aligned.
+    const stat = await fs.promises.stat(state.journalPath).catch(() => null);
+    if (stat && stat.size % JOURNAL_ENTRY_BYTES !== 0) {
+      await fs.promises.truncate(
+        state.journalPath,
+        stat.size - (stat.size % JOURNAL_ENTRY_BYTES),
+      );
+    }
+    const batch = Buffer.allocUnsafe(state.pendingJournal.length * JOURNAL_ENTRY_BYTES);
+    for (let i = 0; i < state.pendingJournal.length; i++) {
+      batch.writeUInt32BE(state.pendingJournal[i], i * JOURNAL_ENTRY_BYTES);
+    }
+    await fs.promises.appendFile(state.journalPath, batch, { mode: 0o600 });
+    state.pendingJournal = [];
   }
 
   async writeChunk(meta: PartialReceiveMeta, chunkIndex: number, data: Uint8Array): Promise<void> {
@@ -266,7 +349,19 @@ export class PartialReceiveStore {
       state.receivedChunks[chunkIndex] = true;
       state.receivedCount++;
       state.receivedBytes += data.byteLength;
-      await this.persist(state);
+      state.pendingJournal.push(chunkIndex);
+
+      if (!state.hasSnapshot) {
+        // One small atomic manifest per file anchors the append-only journal
+        // and preserves compatibility with existing .json partial receives.
+        await this.persist(state);
+        state.pendingJournal = [];
+      } else if (
+        state.pendingJournal.length >= JOURNAL_FLUSH_CHUNKS ||
+        chunkIndex === state.totalChunks - 1
+      ) {
+        await this.flushJournal(state);
+      }
     });
   }
 
@@ -323,10 +418,12 @@ export class PartialReceiveStore {
       if (state.receivedBytes !== state.size) {
         throw new Error('Received byte count does not match the declared file size.');
       }
+      await this.flushJournal(state);
       const sha256 = await this.hashFile(state.tempPath);
       const finalPath = await resolveFinalPath(this.config.downloadDir, state.name);
       await fs.promises.rename(state.tempPath, finalPath);
       await fs.promises.rm(state.metaPath, { force: true });
+      await fs.promises.rm(state.journalPath, { force: true });
       this.states.delete(key);
 
       if (process.platform === 'darwin' && this.config.notifyOnReceive) {
@@ -353,13 +450,15 @@ export class PartialReceiveStore {
       await this.closeFd(state);
       await fs.promises.rm(state.tempPath, { force: true });
       await fs.promises.rm(state.metaPath, { force: true });
+      await fs.promises.rm(state.journalPath, { force: true });
       this.states.delete(key);
     });
   }
 
-  /** Close any open file handles (called when the server shuts down). */
+  /** Flush resumable progress and close file handles on server shutdown. */
   async dispose(): Promise<void> {
     for (const state of this.states.values()) {
+      if (state.hasSnapshot) await this.flushJournal(state).catch(() => {});
       await this.closeFd(state);
     }
     this.states.clear();

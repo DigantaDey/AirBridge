@@ -1316,7 +1316,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
             while (chunkIdx < meta.totalChunks) {
                 if (sendState.cancelled) return
 
-                // Receiver-ACK window (256 chunks) — waiters released by acks
+                // Receiver-ACK window (64 chunks) — waiters released by acks
                 // or broken by cancel/disconnect/session failure.
                 synchronized(lock) {
                     while (
