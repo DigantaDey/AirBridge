@@ -105,8 +105,10 @@ class LoopbackRelay(
         var remote: Socket? = null
         try {
             client.tcpNoDelay = true
+            client.keepAlive = true
             remote = openRemote()
             remote.tcpNoDelay = true
+            remote.keepAlive = true
             sockets.add(client)
             sockets.add(remote)
             val target = remote
@@ -147,6 +149,7 @@ class LoopbackRelay(
     }
 
     private fun openPlain(): Socket = Socket().apply {
+        keepAlive = true
         connect(InetSocketAddress(remoteHost, remotePort), CONNECT_TIMEOUT_MS)
         soTimeout = 0
     }
@@ -154,6 +157,7 @@ class LoopbackRelay(
     private fun openTls(): Socket {
         val factory = TLS_CONTEXT.socketFactory as SSLSocketFactory
         val socket = factory.createSocket() as SSLSocket
+        socket.keepAlive = true
         socket.connect(InetSocketAddress(remoteHost, remotePort), CONNECT_TIMEOUT_MS)
         // The desktop's certificate is self-signed by its own local CA. Payload
         // confidentiality does not depend on it: every control message and chunk

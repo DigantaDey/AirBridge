@@ -225,27 +225,46 @@ class ConnectionService : Service() {
         return builder.build()
     }
 
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
+
     private fun updateTransferWakeLock() {
         val continuity = Prefs(this).connectionContinuity
-        if (!transferActive && !continuity) {
+        val shouldHold = transferActive || continuity
+        if (!shouldHold) {
             releaseTransferWakeLock()
             return
         }
-        if (transferWakeLock?.isHeld == true) return
-        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
-        transferWakeLock = powerManager.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK,
-            "$packageName:AirBridgeTransfer",
-        ).apply {
-            setReferenceCounted(false)
-            acquire()
+        if (transferWakeLock?.isHeld != true) {
+            val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+            transferWakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "$packageName:AirBridgeTransfer",
+            ).apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+        if (wifiLock?.isHeld != true) {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+            @Suppress("DEPRECATION")
+            wifiLock = wifiManager.createWifiLock(
+                android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                "$packageName:AirBridgeWifi",
+            ).apply {
+                setReferenceCounted(false)
+                acquire()
+            }
         }
     }
 
     private fun releaseTransferWakeLock() {
-        val lock = transferWakeLock ?: return
-        if (lock.isHeld) lock.release()
+        val cpuLock = transferWakeLock
+        if (cpuLock?.isHeld == true) cpuLock.release()
         transferWakeLock = null
+
+        val lock = wifiLock
+        if (lock?.isHeld == true) lock.release()
+        wifiLock = null
     }
 
     override fun onDestroy() {
