@@ -11,12 +11,30 @@ describe("Android shell layout", () => {
   it("stops WebView from zooming out when the header overflows", () => {
     const activity = read("android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt");
     expect(activity).toContain("settings.loadWithOverviewMode = false");
-    expect(activity).toContain("installSystemBarInsets(webView)");
+    expect(activity).toContain("installSystemBarInsets(contentFrame)");
     expect(activity).toContain("window.decorView.setOnApplyWindowInsetsListener");
     expect(activity).toContain("setDecorFitsSystemWindows(false)");
     expect(activity).toContain("registerSystemBackCallback()");
     expect(activity).toContain("__airbridgeSystemBack");
     expect(activity).toContain("fun setDarkTheme(enabled: Boolean)");
+  });
+
+  it("physically insets a parent container instead of padding WebView itself", () => {
+    const activity = read("android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt");
+    expect(activity).toContain("contentFrame = FrameLayout(this)");
+    expect(activity).toContain("contentFrame.addView(");
+    expect(activity).toContain("contentFrame.setPadding(fallback.left, fallback.top, fallback.right, fallback.bottom)");
+    expect(activity).toContain("view.setPadding(bars.left, bars.top, bars.right, bars.bottom)");
+    expect(activity).toContain("WindowInsets.CONSUMED");
+    expect(activity).toContain("fallbackSystemBarInsets()");
+    expect(activity).toContain("applyChromeInsets(lastChromeInsets)");
+    expect(activity).toContain("NATIVE_SHELL_ASSET");
+    expect(activity).toContain("injectNativeShellShim(view)");
+    expect(activity).toContain("onPageCommitVisible(view: WebView, url: String)");
+    expect(activity).not.toContain("installSystemBarInsets(webView)");
+
+    const manifest = read("android/app/src/main/AndroidManifest.xml");
+    expect(manifest).toContain('android:windowSoftInputMode="adjustResize"');
   });
 
   it("centre-crops the QR preview instead of stretching the camera", () => {
@@ -68,14 +86,14 @@ describe("Android shell layout", () => {
     expect(prefs).toContain('getBoolean("connectionContinuity", true)');
   });
 
-  it("reads system-bar, cutout and IME insets from the decor view", () => {
+  it("reads system-bar and cutout insets from the decor view", () => {
     const helper = read(
       "android/app/src/main/kotlin/com/airbridge/app/SystemBarInsets.kt",
     );
     expect(helper).toContain("data class SystemBarInsets");
     expect(helper).toContain("WindowInsets.Type.systemBars()");
     expect(helper).toContain("WindowInsets.Type.displayCutout()");
-    expect(helper).toContain("WindowInsets.Type.ime()");
+    expect(helper).not.toContain("WindowInsets.Type.ime()");
   });
 
   it("requires an explicit, user-enabled Accessibility Service opt-in", () => {
