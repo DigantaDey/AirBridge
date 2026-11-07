@@ -14,6 +14,8 @@ describe("Android shell layout", () => {
     expect(activity).toContain("installSystemBarInsets(webView)");
     expect(activity).toContain("window.decorView.setOnApplyWindowInsetsListener");
     expect(activity).toContain("setDecorFitsSystemWindows(false)");
+    expect(activity).toContain("registerSystemBackCallback()");
+    expect(activity).toContain("__airbridgeSystemBack");
     expect(activity).toContain("fun setDarkTheme(enabled: Boolean)");
   });
 

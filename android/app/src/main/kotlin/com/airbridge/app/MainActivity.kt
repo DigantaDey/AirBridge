@@ -15,6 +15,8 @@ import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.RenderProcessGoneDetail
@@ -59,6 +61,7 @@ class MainActivity : Activity() {
     @Volatile private var transferActive = false
     private var connectedLink: PairingLink? = null
     private var darkTheme = false
+    private var backInvokedCallback: Any? = null
     private lateinit var bridge: ShellBridge
 
     /** Computers announced over mDNS, keyed by base address. */
@@ -69,6 +72,7 @@ class MainActivity : Activity() {
         prefs = Prefs(this)
         configureEdgeToEdge()
         buildContentView()
+        registerSystemBackCallback()
         startDiscovery()
         if (prefs.connectionContinuity && prefs.pairingLink() != null) startConnectionService()
 
@@ -110,17 +114,71 @@ class MainActivity : Activity() {
             (webView.parent as? ViewGroup)?.removeView(webView)
             webView.destroy()
         }
+        unregisterSystemBackCallback()
         super.onDestroy()
     }
 
     // Framework-only activity: no AndroidX back dispatcher is available.
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
+        if (!handleSystemBack()) {
+            super.onBackPressed()
+        }
+    }
+
+    /**
+     * Android 13+ delivers Back through OnBackInvokedCallback when the app opts
+     * in; older versions still use onBackPressed. Both routes share this logic:
+     * scanner → file chooser → in-page sheets → WebView history → exit.
+     */
+    private fun registerSystemBackCallback() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val callback = OnBackInvokedCallback { handleSystemBack(); Unit }
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                callback,
+            )
+            backInvokedCallback = callback
+        }
+    }
+
+    private fun unregisterSystemBackCallback() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val callback = backInvokedCallback as? OnBackInvokedCallback ?: return
+            onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback)
+            backInvokedCallback = null
+        }
+    }
+
+    /** Returns true when Back was consumed (or is being handled asynchronously). */
+    private fun handleSystemBack(): Boolean {
         if (scanner != null) {
             closeScanner()
-            return
+            return true
         }
-        super.onBackPressed()
+        if (pendingChooser != null) {
+            pendingChooser?.onReceiveValue(null)
+            pendingChooser = null
+            return true
+        }
+        if (!::webView.isInitialized) {
+            finish()
+            return true
+        }
+        webView.evaluateJavascript(
+            "(function(){return typeof window.__airbridgeSystemBack === 'function' && window.__airbridgeSystemBack() === true ? 'true' : 'false'})()",
+        ) { result ->
+            val handled = result?.trim('"') == "true"
+            runOnUiThread {
+                if (handled) return@runOnUiThread
+                if (webView.canGoBack()) {
+                    webView.goBack()
+                } else {
+                    finish()
+                }
+            }
+        }
+        return true
     }
 
     // ------------------------------------------------------------------ webview
@@ -176,6 +234,9 @@ class MainActivity : Activity() {
     private inner class ShellWebViewClient : WebViewClient() {
         override fun onPageFinished(view: WebView, url: String) {
             super.onPageFinished(view, url)
+            // Top-level loads replace the shell rather than being user
+            // navigation; keep Back from returning to a stale connect page.
+            view.clearHistory()
             publishAccessibilityServiceState()
         }
 

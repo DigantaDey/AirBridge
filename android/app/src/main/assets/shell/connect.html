@@ -380,8 +380,24 @@
         refresh();
         if (bridge) setInterval(refresh, 1500);
 
+        // Android's system Back gesture first asks the active page to dismiss
+        // its own transient UI. On the connect screen that means clearing an
+        // inline error; the native shell handles the QR scanner and exit.
+        window.__airbridgeSystemBack = function () {
+          if (!errorEl.hidden) {
+            showError("");
+            return true;
+          }
+          return false;
+        };
+
         // Exposed for tests/connect-screen.test.ts; harmless in the app.
-        window.AirBridgeConnect = { refresh: refresh, connect: connect, scan: scan };
+        window.AirBridgeConnect = {
+          refresh: refresh,
+          connect: connect,
+          scan: scan,
+          back: function () { return window.__airbridgeSystemBack(); }
+        };
       })();
     </script>
   </body>

@@ -52,6 +52,8 @@ describe("responsive Android web UI", () => {
     expect(activity).toContain("Color.TRANSPARENT");
     expect(activity).toContain("scanner?.applyChromeInsets(bars)");
     expect(activity).toContain("insets.systemBarInsets()");
+    expect(activity).toContain("registerSystemBackCallback()");
+    expect(activity).toContain("__airbridgeSystemBack");
 
     const scanner = read(
       "android/app/src/main/kotlin/com/airbridge/app/QrScannerView.kt",
@@ -77,6 +79,7 @@ describe("responsive Android web UI", () => {
     expect(connect).toContain("@media (max-width: 420px)");
     expect(connect).toContain("@media (max-width: 480px)");
     expect(connect).toContain("html.ab-native-shell");
+    expect(connect).toContain("__airbridgeSystemBack");
     expect(connect).not.toContain("100vw");
   });
 });

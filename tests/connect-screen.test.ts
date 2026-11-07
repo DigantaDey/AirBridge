@@ -186,6 +186,28 @@ describe("unpaired connect screen", () => {
     expect((document.getElementById("address") as HTMLInputElement).value).toBe("https://192.168.1.5");
   });
 
+  it("clears an inline error when Android Back is pressed", () => {
+    const { document, window } = mount({
+      state: () => JSON.stringify({ paired: false, address: "", pairCode: "", camera: true }),
+      nearbyHosts: () => "[]",
+      connect: () => "Enter your computer's address, e.g. 192.168.1.5:3411",
+      scanQr: () => true,
+      forgetComputer: () => true,
+    });
+    const input = document.getElementById("address") as HTMLInputElement;
+    input.value = "bad address";
+    (document.getElementById("form") as HTMLFormElement).dispatchEvent(
+      new (input.ownerDocument.defaultView as typeof globalThis).Event("submit", { cancelable: true }),
+    );
+    const error = document.getElementById("error") as HTMLElement;
+    expect(error.hidden).toBe(false);
+
+    const connect = window as unknown as { AirBridgeConnect: { back: () => boolean } };
+    expect(connect.AirBridgeConnect.back()).toBe(true);
+    expect(error.hidden).toBe(true);
+    expect(connect.AirBridgeConnect.back()).toBe(false);
+  });
+
   it("degrades gracefully when the page is opened outside the app", () => {
     const { document } = mount();
     (document.getElementById("scan") as HTMLButtonElement).click();

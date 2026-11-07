@@ -73,6 +73,8 @@ declare global {
     __airbridgeNativeClipboard?: (text: string) => void;
     /** Android reports whether the Accessibility Service is enabled in OS settings. */
     __airbridgeNativeAccessibilityState?: (enabled: boolean) => void;
+    /** Android asks the web UI to close its topmost sheet before exiting. */
+    __airbridgeSystemBack?: () => boolean;
   }
 }
 
