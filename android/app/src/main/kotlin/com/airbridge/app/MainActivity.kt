@@ -738,8 +738,23 @@ class MainActivity : Activity() {
         if (prefs.connectionContinuity) {
             return startConnectionService(ConnectionService.ACTION_TRANSFER_STOP)
         }
-        stopService(Intent(this, ConnectionService::class.java).setAction(ConnectionService.ACTION_STOP))
+        stopConnectionService()
         return true
+    }
+
+    private fun stopConnectionService() {
+        val intent = Intent(this, ConnectionService::class.java).setAction(ConnectionService.ACTION_STOP)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+        } catch (e: Exception) {
+            try {
+                stopService(intent)
+            } catch (_: Exception) {}
+        }
     }
 
     private fun startConnectionService(action: String = ConnectionService.ACTION_START): Boolean {
@@ -773,16 +788,25 @@ class MainActivity : Activity() {
     }
 
     fun forgetComputer() {
-        prefs.connectionContinuity = false
-        transferActive = false
-        stopService(Intent(this, ConnectionService::class.java).setAction(ConnectionService.ACTION_STOP))
-        prefs.forget()
-        relay?.stop()
-        relay = null
-        connectedLink = null
-        webView.stopLoading()
-        webView.clearHistory()
-        showConnectScreen()
+        try {
+            prefs.connectionContinuity = false
+            transferActive = false
+            stopConnectionService()
+            prefs.forget()
+            relay?.stop()
+            relay = null
+            connectedLink = null
+            try {
+                webView.stopLoading()
+            } catch (_: Exception) {}
+            try {
+                webView.clearHistory()
+            } catch (_: Exception) {}
+            showConnectScreen()
+        } catch (e: Exception) {
+            Log.w(TAG, "forgetComputer error: ${e.message}")
+            showConnectScreen()
+        }
     }
 
     fun onFileSaved(name: String, location: String) {
