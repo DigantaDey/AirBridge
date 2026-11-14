@@ -75,6 +75,26 @@ ECDH session. Summary of the audit (and fixes) behind the current code:
   excludes clips marked sensitive and never scrapes window content. Explicit
   Share/selected-text actions work when the OS denies hidden clipboard reads.
 
+## Additional reliability and resource hardening (2.2.1)
+
+- Bind completed receive receipts and active controls to the original public
+  key and consent-bearing manifest (including relative paths). Peer-reported
+  or restored history never grants resume consent or proves local verification.
+  Drop queued/decrypting controls when their socket or peer identity changes.
+- Bound native queues by both bytes and items, including zero-byte messages;
+  cap pending browser transfers before allocating chunk arrays. Memory-only
+  browser receives plus retained file payloads share a 128 MiB budget. Disk and
+  native receive paths do not buffer entire files in JavaScript.
+- Require sender SHA-256 for receiver publication/completion; reject ACKs for
+  unsent native chunks. Cancel logical receive ownership before asynchronous
+  disk cleanup, and stop queued writes before deleting owned partials.
+- Publish desktop files exclusively with collision suffixes rather than
+  overwriting a racing receive. Protect browser-initiated HTTP/WebSocket calls
+  with same-authority Origin checks (origin-less native/CLI calls remain
+  supported); reject remote daemon uploads before buffering their bodies.
+- Keep clipboard preference/pairing storage private and instance-owned; retain
+  only in-flight/latest clipboard OS writes and record echo state on success.
+
 ## Known residual risks
 
 - Nearby (unpaired) devices can still *offer* transfers/beams and see
@@ -92,6 +112,13 @@ ECDH session. Summary of the audit (and fixes) behind the current code:
 - Local processes/apps may reach loopback services; loopback is a host trust
   boundary, not an OS-level access-control mechanism. Only grant the native
   bridge to bundled local documents and do not run untrusted host software.
+- Browser File System Access APIs do not provide exclusive-create/atomic-rename
+  across external processes. Existing names are checked and in-app reservations
+  prevent competing local receives from selecting the same name, but another
+  application can race that selection. Ordered FSA writes verify before close;
+  out-of-order writes must close before bounded read-back hashing and remove a
+  mismatched file best-effort. Native Android and desktop staging verify before
+  publication and do not use this browser fallback.
 - The committed Android sideload signing key is public. It preserves update
   compatibility, not publisher authenticity. Obtain APKs/checksums from this
   repository's official releases, or distribute with your own private key.

@@ -1,6 +1,6 @@
 # Android validation and remaining device checks
 
-## Architecture being validated (2.2.0)
+## Architecture being validated (2.2.1)
 
 `ConnectionService` owns a single `NativeEngineHost` / Kotlin `AirBridgeEngine`.
 The bundled WebView UI attaches a metadata subscriber; suspending, destroying
@@ -9,11 +9,21 @@ to ContentResolver streams, not base64/Blob payloads. Incoming files are staged
 privately, SHA-256 checked, then published through MediaStore Downloads on
 Android 10+ (app-specific Downloads fallback on Android 8/9).
 
-The transfer pipeline has a byte-bounded writer, a 64-chunk receiver ACK window
-and ACK every 8 contiguous chunks. No configured kbit/s or KiB/s rate limiter
-exists. Hash/publication work is serialized off the network reader/engine
-monitor. Senders wait for verified receiver completion, and reconnect retries
-bind to the original peer key/manifest, not just a device name.
+The transfer pipeline overlaps the socket reader, ordered receive/storage worker
+and socket writer with separate 4 MiB / 128-item queues. It uses a 64-chunk
+receiver ACK window and ACKs every 8 contiguous chunks or 200 ms on progress.
+Socket buffer hints are set before TCP connect; AES-GCM reuses a per-thread
+cipher and decrypts routed buffers by range without whole-frame copies. No
+configured kbit/s or KiB/s rate limiter exists. Storage setup, disk writes,
+checkpoints and hash/publication work do not hold the engine-wide monitor. Queue saturation backpressures the socket reader;
+a genuinely blocked disk can still exhaust network heartbeat timeouts. ACK stall
+detection allows 60 seconds without forward progress while blocked. Senders
+wait for verified receiver completion. Reconnect retries and completed receipts
+bind to the original peer key/manifest and socket attempt, not just a device name
+or claimed device ID. Synced/restored history is not a verified receive receipt.
+Default-network callbacks close stale connections promptly; the service unregisters
+them on shutdown. Foreground notifications are coalesced and CPU lock renewal is
+periodic instead of being rescheduled for every progress event.
 
 ## Reproducible automated checks
 
@@ -47,15 +57,18 @@ certificates and downloads, cleans up children, and tests **HTTP and TLS**:
   also run the transfer scenarios using the pinned trust manager.
 
 Engine checks additionally cover malformed/fragmented WebSocket limits,
-exactly-once close, queue shutdown/backpressure, latest-value mailbox bounds/fairness,
-per-file ACK/resume accounting,
-integrity-before-publication, out-of-order hashing, orphan metadata and paused
+exactly-once close, byte/item queue limits (including zero-length frames), queue
+stall/shutdown behavior, range decryption/cipher recovery, latest-value mailbox
+bounds/fairness, snapshots and cancellation during a blocked disk write,
+per-file ACK/resume accounting (including ACKs for unsent chunks), changed-key
+consent/receipt rejection, integrity-before-publication, out-of-order hashing,
+orphan metadata and paused
 file descriptors. SDK-jar compilation (`npm run verify:android`) is useful as a
 local preflight, but is **not** a substitute for Gradle APK packaging or Android
 runtime testing.
 
 These results are loopback/JVM/desktop regression evidence, **not Android
-throughput measurements**. They cannot reproduce the reported “256kbps”
+throughput measurements**. They cannot reproduce the reported 80–150 kbps
 without the original phone/network, nor prove MediaStore, WebView, notification,
 URI-provider, screen-off or OEM battery behavior on a physical phone.
 
@@ -73,8 +86,12 @@ APK, not to the JVM loopback test.
 - [ ] Repeat with Home, app switching, Back, screen locked for several minutes,
       and a WebView renderer restart. The native notification should continue
       reporting progress; returning to the UI should reattach to that transfer.
-- [ ] Temporarily interrupt Wi-Fi in each direction, restore within two minutes,
-      and verify resumption without a second copy of a previously published file.
+- [ ] Toggle Android battery optimization, open AirBridge’s battery guidance,
+      return from OS Settings, and check the displayed exemption state. Test
+      screen-off transfers both with and without the OEM's background exemption.
+- [ ] Temporarily interrupt Wi-Fi in each direction, change default networks,
+      restore within two minutes, and verify resumption without a second copy
+      of a previously published file.
 - [ ] Accept/decline an incoming offer from its notification while the UI is
       absent. Test notification-permission denial and re-enabling it.
 - [ ] Cancel while waiting for acceptance and while chunks are flowing. Ensure

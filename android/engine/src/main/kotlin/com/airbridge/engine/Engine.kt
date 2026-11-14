@@ -32,7 +32,11 @@ data class EngineConfig(
 
 private class TransferInterrupted(message: String) : java.io.IOException(message)
 
-internal data class Outbound(val isText: Boolean, val payload: ByteArray)
+// Bind queued bytes to the socket that encrypted/queued them. A reconnect must
+// never deliver old controls or chunks before the new connection's hello.
+internal data class Outbound(val isText: Boolean, val payload: ByteArray, val connection: WebSocketClient? = null)
+
+private data class IncomingWork(val bytes: Int, val run: () -> Unit)
 
 internal class SendState(
     val session: TransferSession,
@@ -43,12 +47,15 @@ internal class SendState(
     var acceptFuture: CompletableFuture<String> = CompletableFuture()
     var resumeFromChunks: Map<Int, Int> = emptyMap()
     val acknowledgedPrefixes = IntArray(session.files.size)
+    val sentPrefixes = IntArray(session.files.size)
     var completion = CompletableFuture<Boolean>()
     var ackedGlobalChunks = 0
     var globalSentChunks = 0
     var bytesSent = 0L
     var lastSpeedTs = System.currentTimeMillis()
     var lastSpeedBytes = 0L
+    var lastAckNanos = System.nanoTime()
+    var connection: WebSocketClient? = null
 }
 
 internal class RecvState(
@@ -62,6 +69,7 @@ internal class RecvState(
     var forceFallbackScheduled = false
     val contiguousChunks = IntArray(session.files.size)
     val lastAckedChunks = IntArray(session.files.size)
+    val lastAckNanos = LongArray(session.files.size)
     val chunkReceived: Array<BooleanArray> =
         session.files.map { BooleanArray(it.totalChunks) }.toTypedArray()
     val fileReceivedCount = IntArray(session.files.size)
@@ -147,8 +155,8 @@ class AirBridgeEngine(private val config: EngineConfig) {
     private val seenBeamIds = LinkedHashSet<String>()
     private var lastIncomingClip: Pair<String, String>? = null // (dedupKey, unused-ts-holder)
     private var lastIncomingClipTs = 0L
-    var autoClipboardSend = true
-    var clipboardReceiveEnabled = true
+    @Volatile var autoClipboardSend = true
+    @Volatile var clipboardReceiveEnabled = true
 
     @Volatile
     private var connectionState = ConnectionState.DISCONNECTED
@@ -157,6 +165,15 @@ class AirBridgeEngine(private val config: EngineConfig) {
 
     @Volatile private var ws: WebSocketClient? = null
     private val outbound = OutboundQueue()
+    // Overlap socket/TLS reads with decryption + disk IO without an unbounded
+    // executor. All application messages still execute in wire order; RFC 6455
+    // ping/pong is handled by the reader, not by a busy storage worker.
+    private val inbound = ByteBoundedQueue<IncomingWork>(4 * 1024 * 1024) { it.bytes }
+    private var inboundThread: Thread? = null
+    private val cleanupExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "airbridge-storage-cleanup").apply { isDaemon = true }
+    }
+    private val receiveCleanup = HashSet<String>()
     private val finalizing = HashSet<String>()
     private val finalizationRequests = HashMap<String, Boolean>()
     private val finalizeExecutor = Executors.newSingleThreadExecutor { r ->
@@ -237,6 +254,15 @@ class AirBridgeEngine(private val config: EngineConfig) {
     fun start() {
         if (stopped.get() || !started.compareAndSet(false, true)) return
         setConnectionState(ConnectionState.CONNECTING)
+        inboundThread = Thread({
+            try {
+                while (!stopped.get()) {
+                    val work = inbound.take() ?: break
+                    try { work.run() }
+                    catch (e: Exception) { if (!stopped.get()) emitError("BAD_MESSAGE", e.message ?: "Bad message") }
+                }
+            } catch (_: InterruptedException) {}
+        }, "airbridge-receiver").apply { isDaemon = true; start() }
         connectionThread = Thread({ connectionLoop() }, "airbridge-connection").apply {
             isDaemon = true
             start()
@@ -250,6 +276,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
     fun stop() {
         if (!stopped.compareAndSet(false, true)) return
         outbound.close()
+        inbound.close()
         try { ws?.close() } catch (_: Exception) {}
         ws = null
         val pausedSinks: List<FileSink>
@@ -267,7 +294,11 @@ class AirBridgeEngine(private val config: EngineConfig) {
         sendExecutor.shutdownNow()
         finalizeExecutor.shutdownNow()
         timerExecutor.shutdownNow()
-        pausedSinks.forEach { runCatching { it.pause() } }
+        // File publication can be slow. Cleanup never holds the engine monitor.
+        try { cleanupExecutor.execute { pausedSinks.forEach { runCatching { it.pause() } } } }
+        catch (_: java.util.concurrent.RejectedExecutionException) {}
+        cleanupExecutor.shutdown()
+        inboundThread?.interrupt()
         connectionThread?.interrupt()
         pumpThread?.interrupt()
         setConnectionState(ConnectionState.DISCONNECTED)
@@ -285,15 +316,11 @@ class AirBridgeEngine(private val config: EngineConfig) {
             val client = WebSocketClient(
                 normalizeWsUrl(config.serverUrl),
                 object : WebSocketClient.Listener {
-                    // Process control and binary messages in wire order. The old
-                    // split reader/control executors raced accepts, file hashes
-                    // and chunks and could queue an unbounded amount of work.
                     override fun onText(text: String) {
-                        try { handleServerJson(text) }
-                        catch (e: Exception) { emitError("BAD_MESSAGE", e.message ?: "Bad message") }
+                        inbound.put(IncomingWork(text.length * 2) { handleServerJson(text) })
                     }
                     override fun onBinary(bytes: ByteArray) {
-                        try { handleBinaryFrame(bytes) } catch (_: Exception) {}
+                        inbound.put(IncomingWork(bytes.size) { handleBinaryFrame(bytes) })
                     }
                     override fun onClosed(reason: String) {}
                 },
@@ -307,7 +334,6 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 client.connectBlocking()
                 if (stopped.get()) break
                 sendHello(client)
-                setConnectionState(ConnectionState.CONNECTED)
                 attempt = 0
                 client.readLoop()
             } catch (e: Exception) {
@@ -317,7 +343,17 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 runCatching { client.close() }
                 if (ws === client) ws = null
                 outbound.clear()
-                if (!stopped.get()) onDisconnect()
+                if (!stopped.get()) {
+                    // Disconnect is an ordered barrier: finish already-read disk
+                    // writes before checkpointing or processing the next welcome.
+                    val drained = CompletableFuture<Unit>()
+                    try {
+                        inbound.put(IncomingWork(0) {
+                            try { onDisconnect() } finally { drained.complete(Unit) }
+                        })
+                        drained.get()
+                    } catch (_: Exception) { if (!stopped.get()) break }
+                }
             }
             if (stopped.get()) break
             setConnectionState(ConnectionState.RECONNECTING)
@@ -342,7 +378,8 @@ class AirBridgeEngine(private val config: EngineConfig) {
             while (!stopped.get()) {
                 val item = outbound.take() ?: return
                 if (stopped.get()) return
-                val target = ws ?: continue
+                val target = item.connection ?: continue
+                if (ws !== target || !target.isOpen) continue
                 try {
                     if (item.isText) target.sendText(String(item.payload, Charsets.UTF_8))
                     else target.sendBinary(item.payload)
@@ -366,10 +403,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
             if (pairCode.isNotEmpty()) hello.put("pairCode", pairCode)
         }
         // Bypass the queue: hello must hit the wire before any readLoop output.
-        try {
-            client.sendText(hello.toJsonString())
-        } catch (_: Exception) {
-        }
+        client.sendText(hello.toJsonString())
     }
 
     private fun currentDeviceProfile(): DeviceProfile = DeviceProfile(
@@ -391,7 +425,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
 
     private fun onDisconnect() {
         val changed = mutableListOf<TransferView>()
-        val sinks: List<FileSink>
+        val receives: List<RecvState>
         synchronized(lock) {
             peers.clear()
             sessions.clear()
@@ -405,7 +439,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 send.session.etaSeconds = null
                 changed.add(send.session.toView())
             }
-            sinks = incoming.values.flatMap { it.sinks.values }
+            receives = incoming.values.toList()
             incoming.clear()
             for (t in transfers.values) {
                 if (!isTerminal(t.status) && !outgoing.containsKey(t.transferId)) {
@@ -421,9 +455,22 @@ class AirBridgeEngine(private val config: EngineConfig) {
         }
         // A finalizer may still be publishing. Do not hold the engine monitor
         // while waiting for its sink to flush/close.
-        sinks.forEach { runCatching { it.pause() } }
+        receives.forEach { releaseReceive(it, discard = false) }
         emitPeers(emptyList())
         for (view in changed) emitTransfer(view)
+    }
+
+    private fun releaseReceive(recv: RecvState, discard: Boolean) {
+        val id = recv.session.transferId
+        synchronized(lock) { receiveCleanup.add(id) }
+        try {
+            cleanupExecutor.execute {
+                try { recv.sinks.values.forEach { sink -> runCatching { if (discard) sink.discard() else sink.pause() } } }
+                finally { synchronized(lock) { receiveCleanup.remove(id); lock.notifyAll() } }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            synchronized(lock) { receiveCleanup.remove(id) }
+        }
     }
 
     private fun isTerminal(status: String): Boolean = status in setOf(
@@ -434,24 +481,29 @@ class AirBridgeEngine(private val config: EngineConfig) {
     // Outbound JSON / control helpers
     // =========================================================================
 
-    private fun sendServer(obj: JsonValue.Obj) {
+    private fun sendServer(obj: JsonValue.Obj, connection: WebSocketClient? = ws) {
+        val target = connection?.takeIf { ws === it && !stopped.get() && connectionState == ConnectionState.CONNECTED && it.isOpen }
+            ?: throw TransferInterrupted("Connection unavailable; resuming transfer")
         val text = obj.toJsonString()
-        if (!stopped.get() && ws?.isOpen == true) {
-            outbound.put(Outbound(true, text.toByteArray(Charsets.UTF_8)))
-        }
+        outbound.put(Outbound(true, text.toByteArray(Charsets.UTF_8), target))
     }
 
     private fun sendEncryptedControl(to: String, payload: JsonValue.Obj) {
-        val peerSession: PeerCryptoSession?
-        synchronized(lock) { peerSession = sessions[to] }
-        if (peerSession == null) {
-            emitError("NO_SESSION", "No encryption session for $to")
-            return
+        val connection = ws
+        val peerSession = synchronized(lock) {
+            val peer = peers[to] ?: throw TransferInterrupted("No encryption session for $to")
+            val id = payload.optStr("transferId")
+            val boundKey = outgoing[id]?.peerPublicKey ?: acceptedTransferKeys[id]
+            if (boundKey != null && boundKey != peer.device.publicKey) throw TransferInterrupted("Transfer peer identity changed")
+            ensureSessionLocked(peer)
         }
         val env = AirCrypto.encryptControlPayload(
             peerSession.aesKey,
             payload.toJsonString().toByteArray(Charsets.UTF_8),
         )
+        if (synchronized(lock) { sessions[to] !== peerSession || ws !== connection }) {
+            throw TransferInterrupted("Connection or peer identity changed while encrypting control")
+        }
         val envelope = JsonValue.Obj()
             .put("encrypted", true)
             .put("iv", Base64Url.encode(env.iv))
@@ -461,6 +513,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 .put("type", "transfer-control")
                 .put("to", to)
                 .put("envelope", envelope),
+            connection,
         )
     }
 
@@ -498,6 +551,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 }
                 for (l in listeners) l.onWelcome(WelcomeInfo(id, code, lanUrls))
                 for (l in listeners) l.onPairCodeChanged(code)
+                setConnectionState(ConnectionState.CONNECTED)
                 applyPeers(msg.optArr("peers"))
             }
             "pair-updated" -> {
@@ -540,6 +594,8 @@ class AirBridgeEngine(private val config: EngineConfig) {
         synchronized(lock) {
             peers.clear()
             for (p in next) peers[p.peerId] = p
+            sessions.keys.retainAll(peers.keys)
+            sessionKeyFingerprints.keys.retainAll(peers.keys)
             for (send in outgoing.values) {
                 if (peers[send.session.peerId]?.device?.publicKey != send.peerPublicKey) {
                     val error = TransferInterrupted("Receiver disconnected; resuming transfer")
@@ -584,7 +640,6 @@ class AirBridgeEngine(private val config: EngineConfig) {
     }
 
     private fun sessionFor(peerId: String): PeerCryptoSession? = synchronized(lock) {
-        sessions[peerId]?.let { return it }
         peers[peerId]?.let { ensureSessionLocked(it) }
     }
 
@@ -611,6 +666,15 @@ class AirBridgeEngine(private val config: EngineConfig) {
             return
         }
 
+        synchronized(lock) {
+            val id = payload.optStr("transferId")
+            val key = peers[fromPeerId]?.device?.publicKey
+            if (id != null) {
+                val send = outgoing[id]
+                if (send != null && (send.session.peerId != fromPeerId || send.peerPublicKey != key)) return
+                if (acceptedTransferKeys.containsKey(id) && acceptedTransferKeys[id] != key) return
+            }
+        }
         when (payload.optStr("kind")) {
             "ping" -> sendPlaintextControl(
                 fromPeerId,
@@ -644,8 +708,8 @@ class AirBridgeEngine(private val config: EngineConfig) {
         if (hasText && text.length > Limits.MAX_CLIPBOARD_TEXT) return
         if (hasImage && imageDataUrl.length > Limits.MAX_CLIPBOARD_IMAGE_DATAURL) return
 
-        val dedupKey = if (hasImage) imageDataUrl.substring(0, minOf(256, imageDataUrl.length))
-        else text.trim()
+        val dedupKey = if (hasImage) AirCrypto.sha256Hex(imageDataUrl.toByteArray(Charsets.UTF_8))
+        else text
         val peer: Peer?
         val session: PeerCryptoSession?
         synchronized(lock) {
@@ -718,7 +782,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
             if (previous.status != TransferStatus.ERROR || previous.errorMessage?.startsWith("Connection lost") != true) return
             // Let any in-progress publication release its staging descriptor
             // before reopening the same journal for a network retry.
-            if (synchronized(lock) { finalizing.contains(transferId) }) {
+            if (synchronized(lock) { finalizing.contains(transferId) || receiveCleanup.contains(transferId) }) {
                 timerExecutor.schedule({ handleTransferOffer(fromPeerId, payload) }, 500, TimeUnit.MILLISECONDS)
                 return
             }
@@ -747,6 +811,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 startedAt = System.currentTimeMillis(),
             )
             transfers[transferId] = ts
+            acceptedTransferKeys[transferId] = peer.device.publicKey
             view = ts.toView()
             trusted = previous != null || config.autoAcceptAll || trustedPeerKeys.contains(peer.device.publicKey)
         }
@@ -770,76 +835,74 @@ class AirBridgeEngine(private val config: EngineConfig) {
             emitError("NO_SINK", "No receive storage configured for $transferId")
             return
         }
+        val session = synchronized(lock) {
+            val current = transfers[transferId] ?: return
+            if (current.direction != TransferDirection.INCOMING || current.status != TransferStatus.PENDING_ACCEPT) return
+            current.status = TransferStatus.CONNECTING
+            current
+        }
+        emitTransfer(synchronized(lock) { session.toView() })
+        val sinks = HashMap<Int, FileSink>()
         val resume = HashMap<Int, Int>()
-        var view: TransferView? = null
-        synchronized(lock) {
-            val session = transfers[transferId] ?: return
-            if (session.direction != TransferDirection.INCOMING ||
-                session.status != TransferStatus.PENDING_ACCEPT
-            ) return
-            val sinks = HashMap<Int, FileSink>()
-            val recv = try {
-                for (meta in session.files) {
-                    val completed = resumeCompletedFiles[transferId]?.firstOrNull { it.index == meta.index && it.verified }
-                    sinks[meta.index] = if (completed == null) factory.open(transferId, meta) else CompletedFileSink(completed, meta)
-                }
-                RecvState(session, sinks)
-            } catch (e: Exception) {
-                session.status = TransferStatus.ERROR
-                session.errorMessage = e.message ?: "cannot open receive storage"
-                session.completedAt = System.currentTimeMillis()
-                view = session.toView()
-                RecvState(session, sinks) // placeholder, immediately discarded below
+        val recv: RecvState
+        try {
+            val receipts = synchronized(lock) { resumeCompletedFiles[transferId].orEmpty() }
+            for (meta in session.files) {
+                val completed = receipts.firstOrNull { it.index == meta.index && it.verified }
+                sinks[meta.index] = if (completed == null) factory.open(transferId, meta) else CompletedFileSink(completed, meta)
             }
-            if (session.status == TransferStatus.ERROR) {
-                sinks.values.forEach { runCatching { it.pause() } }
-                incoming.remove(transferId)
+            recv = RecvState(session, sinks)
+            for (meta in session.files) {
+                val sink = sinks.getValue(meta.index)
+                val bits = recv.chunkReceived[meta.index]
+                for (i in bits.indices) if (sink.hasReceived(i)) {
+                    bits[i] = true
+                    recv.fileReceivedCount[meta.index]++
+                    recv.bytesReceived += minOf(meta.chunkSize.toLong(), maxOf(0L, meta.size - i * meta.chunkSize.toLong()))
+                }
+                val prefix = sink.resumeFrom()
+                recv.contiguousChunks[meta.index] = prefix
+                recv.lastAckedChunks[meta.index] = prefix
+                if (prefix > 0) resume[meta.index] = prefix
+            }
+        } catch (e: Exception) {
+            sinks.values.forEach { runCatching { it.pause() } }
+            val view = synchronized(lock) {
+                if (session.status != TransferStatus.CONNECTING) return
+                session.status = TransferStatus.ERROR
+                session.errorMessage = e.message ?: "Cannot open receive storage"
+                session.completedAt = System.currentTimeMillis()
                 persistHistoryLocked(transferId)
-            } else {
+                session.toView()
+            }
+            emitTransfer(view)
+            sendEncryptedControl(session.peerId, JsonValue.Obj().put("kind", "transfer-decline")
+                .put("transferId", transferId).put("reason", view.errorMessage ?: "Storage unavailable"))
+            return
+        }
+        val accepted = synchronized(lock) {
+            if (session.status != TransferStatus.CONNECTING || stopped.get() || ws?.isOpen != true ||
+                peers[session.peerId]?.device?.publicKey != acceptedTransferKeys[transferId]) false
+            else {
                 incoming[transferId] = recv
-                peers[session.peerId]?.device?.publicKey?.let { acceptedTransferKeys[transferId] = it }
                 resumeCompletedFiles.remove(transferId)
                 session.status = TransferStatus.TRANSFERRING
                 session.startedAt = System.currentTimeMillis()
-                // Seed session accounting from whatever the sink already holds
-                // on disk (resumed partials), mirroring prepareDiskReceivers().
-                for (meta in session.files) {
-                    val sink = sinks[meta.index] ?: continue
-                    val bits = recv.chunkReceived[meta.index]
-                    for (i in bits.indices) {
-                        if (!bits[i] && sink.hasReceived(i)) {
-                            bits[i] = true
-                            recv.fileReceivedCount[meta.index]++
-                            recv.bytesReceived += if (meta.size == 0L) 0L
-                            else minOf(
-                                meta.chunkSize.toLong(),
-                                meta.size - i * meta.chunkSize.toLong(),
-                            )
-                        }
-                    }
-                    val r = sink.resumeFrom()
-                    recv.contiguousChunks[meta.index] = r
-                    recv.lastAckedChunks[meta.index] = r
-                    if (r > 0) resume[meta.index] = r
-                }
                 session.transferredBytes = recv.bytesReceived
-                view = session.toView()
+                recv.lastSpeedBytes = recv.bytesReceived
+                true
             }
         }
-        view?.let { emitTransfer(it) }
-        if (view?.status != TransferStatus.TRANSFERRING) return
-
-        val accept = JsonValue.Obj()
-            .put("kind", "transfer-accept")
-            .put("transferId", transferId)
-            .put("preferredTransport", "ws-relay")
+        if (!accepted) { releaseReceive(recv, discard = session.status == TransferStatus.CANCELLED); return }
+        emitTransfer(synchronized(lock) { session.toView() })
+        val accept = JsonValue.Obj().put("kind", "transfer-accept").put("transferId", transferId)
+            .put("preferredTransport", "ws-relay").put("resumeBytesTotal", recv.bytesReceived)
         if (resume.isNotEmpty()) {
             val map = JsonValue.Obj()
-            for ((k, v) in resume) map.put(k.toString(), v.toLong())
+            for ((k, v) in resume) map.put(k.toString(), v)
             accept.put("resumeFromChunks", map)
         }
-        val targetPeer = synchronized(lock) { transfers[transferId]?.peerId } ?: return
-        sendEncryptedControl(targetPeer, accept)
+        sendEncryptedControl(session.peerId, accept)
     }
 
     fun declineIncomingTransfer(transferId: String) {
@@ -884,7 +947,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 val session = transfers[transferId] ?: return
                 if (isTerminal(session.status)) return
                 val recv = incoming.remove(transferId)
-                recv?.sinks?.values?.forEach { sk -> runCatching { sk.discard() } }
+                recv?.let { releaseReceive(it, discard = true) }
                 session.status = TransferStatus.CANCELLED
                 session.completedAt = System.currentTimeMillis()
                 peerId = session.peerId
@@ -961,7 +1024,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 val recv = incoming[transferId]
                 val session = transfers[transferId]
                 if (recv != null && session != null && session.peerId == fromPeerId) {
-                    recv.sinks.values.forEach { sk -> runCatching { sk.discard() } }
+                    releaseReceive(recv, discard = true)
                     incoming.remove(transferId)
                     session.status = TransferStatus.CANCELLED
                     session.completedAt = System.currentTimeMillis()
@@ -983,6 +1046,8 @@ class AirBridgeEngine(private val config: EngineConfig) {
             val ackedChunkIndex = payload.optInt("ackedChunkIndex") ?: return
             val meta = send.session.files[fileIndex]
             if (ackedChunkIndex !in 0 until meta.totalChunks) return
+            if (ackedChunkIndex + 1 > send.sentPrefixes[fileIndex]) return
+            if (ackedChunkIndex + 1 > send.acknowledgedPrefixes[fileIndex]) send.lastAckNanos = System.nanoTime()
             send.acknowledgedPrefixes[fileIndex] = maxOf(send.acknowledgedPrefixes[fileIndex], ackedChunkIndex + 1)
             send.ackedGlobalChunks = send.acknowledgedPrefixes.indices.sumOf { index ->
                 maxOf(0, send.acknowledgedPrefixes[index] - (send.resumeFromChunks[index] ?: 0))
@@ -1002,12 +1067,8 @@ class AirBridgeEngine(private val config: EngineConfig) {
     private fun handleBinaryFrame(bytes: ByteArray) {
         if (bytes.size < Frames.ROUTING_HEADER_LENGTH) return
         if ((bytes[0].toInt() and 0xff) != Frames.FRAME_ROUTED_RELAY) return
-        val routed = Frames.unwrapRoutedRelayFrame(bytes)
-        val inner = routed.payload
-        if (inner.size < Frames.CHUNK_HEADER_LENGTH) return
-        if ((inner[0].toInt() and 0xff) != Frames.FRAME_ENCRYPTED_CHUNK) return
-        val frame = Frames.decodeEncryptedChunkFrame(inner)
-        handleEncryptedChunk(routed.sourcePeerId, frame)
+        val (sourcePeerId, frame) = Frames.decodeRoutedEncryptedChunkFrame(bytes)
+        handleEncryptedChunk(sourcePeerId, frame)
     }
 
     private fun handleEncryptedChunk(fromPeerId: String, frame: Frames.EncryptedChunkFrame) {
@@ -1018,17 +1079,21 @@ class AirBridgeEngine(private val config: EngineConfig) {
             val r = incoming[frame.transferId] ?: return
             val s = transfers[frame.transferId] ?: return
             // Nothing is decrypted or stored before the user accepts (TS parity).
-            if (s.peerId != fromPeerId || s.status != TransferStatus.TRANSFERRING) return
+            if (s.peerId != fromPeerId || s.status != TransferStatus.TRANSFERRING ||
+                acceptedTransferKeys[frame.transferId] != peers[fromPeerId]?.device?.publicKey ||
+                !acceptedTransferKeys.containsKey(frame.transferId)) return
             val m = s.files.getOrNull(frame.fileIndex) ?: return
             if (frame.chunkIndex < 0 || frame.chunkIndex >= m.totalChunks) return
             recv = r
             session = s
             meta = m
         }
+        val expectedCiphertextSize = minOf(meta.chunkSize.toLong(), maxOf(0L, meta.size - frame.chunkIndex * meta.chunkSize.toLong())) + 16
+        if (frame.ciphertextLength.toLong() != expectedCiphertextSize) return
         val cryptoSession = sessionFor(fromPeerId) ?: return
 
         val plain = try {
-            AirCrypto.decryptBinaryChunk(cryptoSession.aesKey, frame.iv, frame.ciphertext)
+            AirCrypto.decryptBinaryChunk(cryptoSession.aesKey, frame.iv, frame.ciphertext, frame.ciphertextOffset, frame.ciphertextLength)
         } catch (_: Exception) {
             return
         }
@@ -1042,27 +1107,26 @@ class AirBridgeEngine(private val config: EngineConfig) {
         if (plain.size.toLong() != expectedSize.toLong()) return
 
         val sink = recv.sinks[frame.fileIndex] ?: return
-        var newBytes = 0L
+        val duplicate = synchronized(lock) {
+            if (incoming[frame.transferId] !== recv || session.status != TransferStatus.TRANSFERRING) return
+            recv.chunkReceived[frame.fileIndex][frame.chunkIndex]
+        }
+        // Only the ordered receiver writes chunks. Do NOT hold the engine
+        // monitor across filesystem/provider IO: UI snapshots, cancel, outgoing
+        // ACKs and clipboard sends must not wait for flash storage.
+        try { if (!duplicate) sink.store(frame.chunkIndex, plain) }
+        catch (e: Exception) { failIncomingTransfer(session, e.message ?: "disk write failed"); return }
         var shouldEmit = false
-        var fatalError: String? = null
         synchronized(lock) {
             if (incoming[frame.transferId] !== recv || session.status != TransferStatus.TRANSFERRING) return
-            if (!recv.chunkReceived[frame.fileIndex][frame.chunkIndex]) {
-                try {
-                    sink.store(frame.chunkIndex, plain)
-                } catch (e: Exception) {
-                    fatalError = e.message ?: "disk write failed"
-                }
-                if (fatalError == null) {
-                    recv.chunkReceived[frame.fileIndex][frame.chunkIndex] = true
-                    newBytes = plain.size.toLong()
-                    recv.bytesReceived += newBytes
-                    recv.fileReceivedCount[frame.fileIndex]++
-                }
+            if (!duplicate) {
+                recv.chunkReceived[frame.fileIndex][frame.chunkIndex] = true
+                recv.bytesReceived += plain.size
+                recv.fileReceivedCount[frame.fileIndex]++
             }
             // Speed / ETA smoothing mirrors warpClient.ts (0.65 / 0.35).
             val now = System.currentTimeMillis()
-            if (fatalError == null && now - recv.lastSpeedTs >= 150) {
+            if (now - recv.lastSpeedTs >= 150) {
                 val elapsed = (now - recv.lastSpeedTs) / 1000.0
                 val instant = (recv.bytesReceived - recv.lastSpeedBytes) / elapsed
                 session.speedBytesPerSec =
@@ -1079,17 +1143,15 @@ class AirBridgeEngine(private val config: EngineConfig) {
             }
             session.transferredBytes = recv.bytesReceived
         }
-        if (fatalError != null) {
-            failIncomingTransfer(session, fatalError)
-            return
-        }
-
         var contiguous = recv.contiguousChunks[frame.fileIndex]
         while (contiguous < meta.totalChunks && recv.chunkReceived[frame.fileIndex][contiguous]) contiguous++
         recv.contiguousChunks[frame.fileIndex] = contiguous
+        val ackNow = System.nanoTime()
         if (contiguous > recv.lastAckedChunks[frame.fileIndex] &&
-            (contiguous - recv.lastAckedChunks[frame.fileIndex] >= Limits.ACK_INTERVAL_CHUNKS || contiguous == meta.totalChunks)) {
+            (contiguous - recv.lastAckedChunks[frame.fileIndex] >= Limits.ACK_INTERVAL_CHUNKS ||
+                contiguous == meta.totalChunks || ackNow - recv.lastAckNanos[frame.fileIndex] >= TimeUnit.MILLISECONDS.toNanos(200))) {
             recv.lastAckedChunks[frame.fileIndex] = contiguous
+            recv.lastAckNanos[frame.fileIndex] = ackNow
             sendEncryptedControl(
                 fromPeerId,
                 JsonValue.Obj()
@@ -1116,7 +1178,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
             session.status = TransferStatus.ERROR
             session.errorMessage = message
             session.completedAt = System.currentTimeMillis()
-            incoming.remove(session.transferId)?.sinks?.values?.forEach { runCatching { it.pause() } }
+            incoming.remove(session.transferId)?.let { releaseReceive(it, discard = false) }
             persistHistoryLocked(session.transferId)
         }
         emitTransfer(synchronized(lock) { session.toView() })
@@ -1148,10 +1210,14 @@ class AirBridgeEngine(private val config: EngineConfig) {
     private fun handleTransferComplete(fromPeerId: String, payload: JsonValue.Obj) {
         val transferId = payload.optStr("transferId") ?: return
         val terminal = synchronized(lock) {
-            transfers[transferId]?.takeIf { it.peerId == fromPeerId && isTerminal(it.status) }
+            transfers[transferId]?.takeIf {
+                it.direction == TransferDirection.INCOMING && isTerminal(it.status) &&
+                    acceptedTransferKeys[transferId] == peers[fromPeerId]?.device?.publicKey &&
+                    acceptedTransferKeys.containsKey(transferId)
+            }
         }
         if (terminal != null) {
-            sendCompletionAck(terminal)
+            sendCompletionAck(terminal, fromPeerId)
             return
         }
         synchronized(lock) {
@@ -1166,8 +1232,10 @@ class AirBridgeEngine(private val config: EngineConfig) {
         maybeFinalize(transferId, force = false)
     }
 
-    private fun sendCompletionAck(session: TransferSession) {
-        sendEncryptedControl(session.peerId, JsonValue.Obj()
+    private fun sendCompletionAck(session: TransferSession, toPeerId: String = session.peerId) {
+        if (synchronized(lock) { acceptedTransferKeys[session.transferId] != peers[toPeerId]?.device?.publicKey ||
+                !acceptedTransferKeys.containsKey(session.transferId) }) return
+        sendEncryptedControl(toPeerId, JsonValue.Obj()
             .put("kind", "transfer-complete-ack").put("transferId", session.transferId)
             .put("verified", session.status == TransferStatus.COMPLETED)
             .putOpt("reason", session.errorMessage))
@@ -1266,7 +1334,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
      */
     fun sendFiles(peerId: String, inputs: List<FileSource>): String {
         require(inputs.isNotEmpty() && inputs.size <= Limits.MAX_FILES_PER_TRANSFER) { "Select 1–100 files." }
-        require(synchronized(lock) { outgoing.size < 16 }) { "Too many active transfers. Wait for one to finish." }
+        require(synchronized(lock) { transfers.values.count { !isTerminal(it.status) } < 16 }) { "Too many active transfers. Wait for one to finish." }
         val peer: Peer
         val cryptoSession: PeerCryptoSession
         synchronized(lock) {
@@ -1300,6 +1368,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
         val session: TransferSession
         val sendState: SendState
         synchronized(lock) {
+            require(transfers.values.count { !isTerminal(it.status) } < 16) { "Too many active transfers. Wait for one to finish." }
             session = TransferSession(
                 transferId = transferId,
                 peerId = peerId,
@@ -1327,10 +1396,12 @@ class AirBridgeEngine(private val config: EngineConfig) {
                     try {
                         val currentPeer = waitForTransferPeer(sendState)
                         synchronized(lock) {
+                            sendState.connection = ws
                             sendState.acceptFuture = CompletableFuture()
                             sendState.completion = CompletableFuture()
                             sendState.resumeFromChunks = emptyMap()
                             sendState.acknowledgedPrefixes.fill(0)
+                            sendState.sentPrefixes.fill(0)
                             sendState.ackedGlobalChunks = 0
                             sendState.globalSentChunks = 0
                             session.status = if (attempts == 0) TransferStatus.PENDING_ACCEPT else TransferStatus.CONNECTING
@@ -1350,6 +1421,12 @@ class AirBridgeEngine(private val config: EngineConfig) {
                                 minOf(file.size, (sendState.resumeFromChunks[file.index] ?: 0) * file.chunkSize.toLong())
                             }
                             session.transferredBytes = sendState.bytesSent
+                            session.files.forEach { file ->
+                                val prefix = sendState.resumeFromChunks[file.index] ?: 0
+                                sendState.acknowledgedPrefixes[file.index] = prefix
+                                sendState.sentPrefixes[file.index] = prefix
+                            }
+                            sendState.lastAckNanos = System.nanoTime()
                             sendState.lastSpeedBytes = sendState.bytesSent
                             sendState.lastSpeedTs = System.currentTimeMillis()
                         }
@@ -1407,6 +1484,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
     private fun assertTransferPeer(send: SendState) {
         if (send.cancelled || stopped.get()) throw java.util.concurrent.CancellationException("Transfer cancelled")
         if (ws?.isOpen != true || connectionState != ConnectionState.CONNECTED ||
+            (send.connection != null && ws !== send.connection) ||
             peers[send.session.peerId]?.device?.publicKey != send.peerPublicKey) {
             throw TransferInterrupted("Connection interrupted; resuming transfer")
         }
@@ -1443,7 +1521,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
 
                 // Receiver-ACK window (64 chunks) — waiters released by acks
                 // or broken by cancel/disconnect/session failure.
-                val ackDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+                val waitStarted = System.nanoTime()
                 synchronized(lock) {
                     while (
                         !sendState.cancelled &&
@@ -1451,7 +1529,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
                         sendState.globalSentChunks - sendState.ackedGlobalChunks >= Limits.MAX_UNACKED_CHUNKS
                     ) {
                         assertTransferPeer(sendState)
-                        if (System.nanoTime() > ackDeadline) throw TransferInterrupted("Receiver ACK stalled; resuming transfer")
+                        if (System.nanoTime() - maxOf(waitStarted, sendState.lastAckNanos) > TimeUnit.SECONDS.toNanos(60)) throw TransferInterrupted("Receiver ACK stalled; resuming transfer")
                         lock.wait(250)
                     }
                 }
@@ -1473,9 +1551,16 @@ class AirBridgeEngine(private val config: EngineConfig) {
                     Frames.EncryptedChunkFrame(session.transferId, fileIdx, chunkIdx, iv, ciphertext),
                 )
                 val routed = Frames.wrapRoutedRelayFrame(peer.peerId, myPeerId, inner)
-                outbound.put(Outbound(false, routed))
-                sendState.globalSentChunks++
-                sendState.bytesSent += plain.size.toLong()
+                synchronized(lock) {
+                    assertTransferPeer(sendState)
+                    // Account before enqueue: a loopback receiver can ACK as
+                    // soon as the writer takes the frame. All prefix state is
+                    // shared with the ACK worker under this same monitor.
+                    sendState.sentPrefixes[fileIdx] = chunkIdx + 1
+                    sendState.globalSentChunks++
+                    sendState.bytesSent += plain.size.toLong()
+                }
+                outbound.put(Outbound(false, routed, sendState.connection ?: throw TransferInterrupted("Connection lost")))
 
                 val now = System.currentTimeMillis()
                 if (now - sendState.lastSpeedTs >= 150 || chunkIdx == meta.totalChunks - 1) {
@@ -1512,11 +1597,11 @@ class AirBridgeEngine(private val config: EngineConfig) {
         }
 
         if (sendState.cancelled) return
-        val ackDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+        val waitStarted = System.nanoTime()
         synchronized(lock) {
             while (!sendState.cancelled && sendState.ackedGlobalChunks < sendState.globalSentChunks) {
                 assertTransferPeer(sendState)
-                if (System.nanoTime() > ackDeadline) throw TransferInterrupted("Receiver ACK stalled; resuming transfer")
+                if (System.nanoTime() - maxOf(waitStarted, sendState.lastAckNanos) > TimeUnit.SECONDS.toNanos(60)) throw TransferInterrupted("Receiver ACK stalled; resuming transfer")
                 lock.wait(100)
             }
         }
@@ -1709,6 +1794,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
     }
 
     private fun sendUpdateProfile() {
+        if (connectionState != ConnectionState.CONNECTED) return
         val device: DeviceProfile
         val vis: String
         synchronized(lock) {
@@ -1727,7 +1813,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
         val normalized = PairCode.normalize(rawCode)
         if (!PairCode.isValid(normalized)) return false
         synchronized(lock) { pairCode = normalized }
-        sendServer(JsonValue.Obj().put("type", "join-pair").put("pairCode", normalized))
+        if (connectionState == ConnectionState.CONNECTED) sendServer(JsonValue.Obj().put("type", "join-pair").put("pairCode", normalized))
         return true
     }
 

@@ -136,6 +136,8 @@ class DirectoryFileSink(
     private var error: String? = null
     private var raf: RandomAccessFile? = null
     private var finalized = false
+    private var paused = false
+    @Volatile private var discarded = false
     private var streamDigest: MessageDigest? = MessageDigest.getInstance("SHA-256")
     private var nextHashChunk = 0
 
@@ -221,7 +223,7 @@ class DirectoryFileSink(
 
     @Synchronized
     override fun store(chunkIndex: Int, data: ByteArray) {
-        require(!finalized && chunkIndex in 0 until meta.totalChunks) { "Invalid chunk index" }
+        require(!finalized && !paused && !discarded && chunkIndex in 0 until meta.totalChunks) { "Invalid chunk index" }
         val expected = minOf(meta.chunkSize.toLong(), maxOf(0L, meta.size - chunkIndex * meta.chunkSize.toLong())).toInt()
         require(data.size == expected) { "Chunk length does not match manifest" }
         if (received.get(chunkIndex)) return
@@ -304,11 +306,16 @@ class DirectoryFileSink(
 
     @Synchronized
     override fun finalizeIfReady(declaredSha256: String?, force: Boolean): FileFinalize? {
-        if (finalized) return null
+        if (finalized || discarded || paused) return null
         val allArrived = received.cardinality() >= meta.totalChunks
         if (!allArrived && !force) return null
         if (!allArrived && force) {
             error = error ?: "Transfer incomplete: some chunks never arrived."
+            closeHandle()
+            return null
+        }
+        if (declaredSha256 == null || !Regex("^[0-9a-f]{64}$").matches(declaredSha256)) {
+            error = "Missing or invalid SHA-256 digest; file was not published."
             closeHandle()
             return null
         }
@@ -333,7 +340,9 @@ class DirectoryFileSink(
                 discard()
                 return null
             }
+            if (discarded) return null
             val verified = true
+            error = null
             val finalTarget = finisher(partFile, meta.name)
             sidecar.delete()
             journalFile.delete()
@@ -355,17 +364,20 @@ class DirectoryFileSink(
 
     @Synchronized
     override fun pause() {
+        paused = true
         try { if (!finalized) flushJournal() } finally { closeHandle() }
     }
 
-    @Synchronized
     override fun discard() {
-        closeHandle()
-        partFile.delete()
-        sidecar.delete()
-        journalFile.delete()
-        received.clear()
-        pendingJournal.clear()
+        discarded = true
+        synchronized(this) {
+            closeHandle()
+            if (!finalized) partFile.delete()
+            sidecar.delete()
+            journalFile.delete()
+            received.clear()
+            pendingJournal.clear()
+        }
     }
 
     @Synchronized

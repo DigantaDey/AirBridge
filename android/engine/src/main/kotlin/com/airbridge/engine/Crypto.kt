@@ -55,6 +55,11 @@ object AirCrypto {
     private const val GCM_TAG_BITS = 128
 
     private val random = SecureRandom()
+    // Cipher construction/provider lookup for every 256 KiB chunk is costly on
+    // Android. Reuse only per-thread; always re-init with a fresh GCM nonce.
+    private val ciphers = object : ThreadLocal<Cipher>() {
+        override fun initialValue(): Cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    }
 
     val ecParameterSpec: ECParameterSpec by lazy {
         val params = java.security.AlgorithmParameters.getInstance("EC")
@@ -207,18 +212,28 @@ object AirCrypto {
         aesKey: SecretKeySpec,
         iv: ByteArray,
         ciphertext: ByteArray,
-    ): ByteArray = aesGcm(aesKey, iv, ciphertext, encrypt = false)
+        offset: Int = 0,
+        length: Int = ciphertext.size,
+    ): ByteArray = aesGcm(aesKey, iv, ciphertext, encrypt = false, offset = offset, length = length)
 
     private fun aesGcm(
         key: SecretKeySpec,
         iv: ByteArray,
         data: ByteArray,
         encrypt: Boolean,
+        offset: Int = 0,
+        length: Int = data.size,
     ): ByteArray {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val spec = GCMParameterSpec(GCM_TAG_BITS, iv)
-        cipher.init(if (encrypt) Cipher.ENCRYPT_MODE else Cipher.DECRYPT_MODE, key, spec)
-        return cipher.doFinal(data)
+        val cipher = ciphers.get()!!
+        return try {
+            val spec = GCMParameterSpec(GCM_TAG_BITS, iv)
+            cipher.init(if (encrypt) Cipher.ENCRYPT_MODE else Cipher.DECRYPT_MODE, key, spec)
+            cipher.doFinal(data, offset, length)
+        } catch (e: Exception) {
+            // Providers may leave a failed cipher unusable after a bad tag.
+            ciphers.remove()
+            throw e
+        }
     }
 
     fun newRandomBytes(size: Int): ByteArray =

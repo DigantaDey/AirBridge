@@ -33,6 +33,8 @@ import {
   getNativeAccessibilityOptIn,
   isNativeAccessibilityServiceEnabled,
   openNativeAccessibilitySettings,
+  isNativeBatteryOptimizationExempt,
+  openNativeBatterySettings,
   publishNativeTransferSpeed,
   setNativeAccessibilityOptIn,
   setNativeConnectionContinuity,
@@ -97,6 +99,14 @@ export function App() {
     }
   });
 
+  const [batteryUnrestricted, setBatteryUnrestricted] = useState(isNativeBatteryOptimizationExempt);
+  useEffect(() => {
+    const refresh = () => setBatteryUnrestricted(isNativeBatteryOptimizationExempt());
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
+  }, []);
+
   const [stagedFiles, setStagedFiles] = useState<SendableFileInput[]>([]);
   // Received-files folder (host daemon). Only the device running the server
   // can read/change it — the API is loopback-only, so this stays empty on a phone.
@@ -105,6 +115,7 @@ export function App() {
   const [folderSaving, setFolderSaving] = useState(false);
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   useEffect(() => {
+    if (isNativeShell()) return;
     fetch("/api/received-folder")
       .then((r) => (r.ok ? r.json() : null))
       .then((j: { downloadDir?: string } | null) => {
@@ -161,16 +172,16 @@ export function App() {
   useEffect(() => {
     if (
       isNativeShell() ||
-      !snap.pairCode ||
+      !snap.pairCode || !snap.localDaemon.clipboardBridge ||
       typeof fetch !== "function" ||
       import.meta.env.MODE === "test"
     ) return;
     fetch("/api/daemon/background-pair-code", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pairCode: snap.pairCode }),
+      body: JSON.stringify({ pairCode: snap.pairCode, autoClipboard: snap.autoClipboardSync, receiveClipboard: snap.clipboardReceiveEnabled }),
     }).catch(() => {});
-  }, [snap.pairCode]);
+  }, [snap.pairCode, snap.localDaemon.clipboardBridge, snap.autoClipboardSync, snap.clipboardReceiveEnabled]);
 
   // The Android foreground service watches the system clipboard even while
   // the WebView is not focused. Feed those changes into the encrypted client.
@@ -178,8 +189,8 @@ export function App() {
     const onNativeClipboard = (raw: string) => {
       const client = clientRef.current;
       if (!client || !client.getSnapshot().autoClipboardSync) return;
-      const text = String(raw ?? "").trim();
-      if (!text) return;
+      const text = String(raw ?? "");
+      if (!text.trim()) return;
       lastBrowserClipboardRef.current = text;
       client.handleDetectedLocalClipboard(text).catch(() => {});
     };
@@ -205,7 +216,7 @@ export function App() {
   };
 
   const markLocalCopyHandled = (text: string) => {
-    lastBrowserClipboardRef.current = text.trim();
+    lastBrowserClipboardRef.current = text;
     clientRef.current?.markClipboardSynced(text);
   };
 
@@ -238,8 +249,11 @@ export function App() {
         // Honor per-device receive toggle — already filtered in WarpClient, but guard UI echo
         if (!client.getSnapshot().clipboardReceiveEnabled) return;
         const displayText = item.contentType === 'image' && item.imageDataUrl ? `[Image] ${item.imageName || 'image'}` : item.text;
-        lastBrowserClipboardRef.current = (item.text || '').trim();
-        const copyToSystemClipboard = () => {
+        lastBrowserClipboardRef.current = item.text || '';
+        const copyToSystemClipboard = (explicit = false) => {
+          // Native snapshots are history, not commands: the service already
+          // wrote this beam, possibly while the UI was suspended for minutes.
+          if (!explicit && isNativeShell() && window.AirBridgeAndroid?.nativeEngineVersion?.() === 1) return;
           try {
             if (item.contentType === 'image' && item.imageDataUrl) {
               // Images: attempt to write as image if possible, fallback to no-op; keep toast with Save
@@ -279,7 +293,7 @@ export function App() {
               document.body.appendChild(a); a.click(); a.remove();
             } else {
               markLocalCopyHandled(item.text);
-              copyToSystemClipboard();
+              copyToSystemClipboard(true);
             }
             setToast(null);
           },
@@ -287,7 +301,7 @@ export function App() {
       },
 
       onOutgoingAutoClipboard: (item) => {
-        lastBrowserClipboardRef.current = (item.text || '').trim();
+        lastBrowserClipboardRef.current = item.text || '';
         playBeamSentPulse(soundMutedRef.current);
         const displayText = item.contentType === 'image' && item.imageDataUrl ? `[Image] ${item.imageName || 'image'}` : item.text;
         showToast({
@@ -374,7 +388,7 @@ export function App() {
       }
       if (shared.text) {
         if (client.getSnapshot().autoClipboardSync) {
-          lastBrowserClipboardRef.current = shared.text.trim();
+          lastBrowserClipboardRef.current = shared.text;
           client
             .handleDetectedLocalClipboard(shared.text)
             .then((sent) => {
@@ -457,12 +471,13 @@ export function App() {
         const raw = await navigator.clipboard.readText();
         const trimmed = raw.trim();
         if (mode === "seed" && !leftPageRef.current) {
-          lastBrowserClipboardRef.current = trimmed;
-          if (trimmed) client.markClipboardSynced(trimmed);
+          lastBrowserClipboardRef.current = raw;
+          if (trimmed) client.markClipboardSynced(raw);
           return;
         }
-        if (trimmed && trimmed !== lastBrowserClipboardRef.current) {
-          lastBrowserClipboardRef.current = trimmed;
+        if (raw !== lastBrowserClipboardRef.current) {
+          lastBrowserClipboardRef.current = raw;
+          if (!trimmed) return;
           await client.handleDetectedLocalClipboard(raw);
         }
       } catch {
@@ -486,7 +501,7 @@ export function App() {
       const fromSelection = window.getSelection?.()?.toString() || "";
       const candidate = fromData || fromSelection;
       if (candidate.trim()) {
-        lastBrowserClipboardRef.current = candidate.trim();
+        lastBrowserClipboardRef.current = candidate;
         client.handleDetectedLocalClipboard(candidate).catch(() => {});
         return;
       }
@@ -865,7 +880,7 @@ export function App() {
       {pairingOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPairingOpen(false); }}><section className="utility-modal pairing-modal" role="dialog" aria-modal="true" aria-labelledby="pair-title"><div className="modal-heading"><div><p className="section-kicker">PAIR DEVICES</p><h2 id="pair-title">Scan to pair</h2></div><button className="modal-close" aria-label="Close" onClick={() => setPairingOpen(false)}>×</button></div><p className="modal-explainer">Scan this code from AirBridge on your other device. Compare the verification code on both screens before accepting a transfer.</p>{isNativeShell() && <button type="button" className="secondary-button" onClick={() => scanPairingCode()}>Scan with this phone&apos;s camera</button>}<PairingDock pairCode={snap.pairCode} lanUrls={snap.lanUrls} transfers={snap.transfers} clipboardItems={snap.clipboardItems} onJoinPairCode={(code) => clientRef.current?.joinPairCode(code)} onRotatePairCode={() => clientRef.current?.rotatePairCode()} onCancelTransfer={(id) => clientRef.current?.cancelTransfer(id)} onMarkCopied={markLocalCopyHandled} /><button className="text-button advanced-toggle" onClick={() => setShowAdvanced((value) => !value)}>{showAdvanced ? "Hide network details" : "Having trouble pairing?"}</button>{showAdvanced && <div className="help-copy"><p>Both devices must be running the AirBridge app on the same local network. Guest Wi-Fi and some office networks block device-to-device connections.</p><p>Current service: {snap.connectionState}. {snap.lanUrls.length ? `Local address: ${snap.lanUrls[0]}` : "No local address was reported."}</p></div>}</section></div>}
       {downloadsOpen && <DownloadsModal onClose={() => setDownloadsOpen(false)} />}
       {recentOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setRecentOpen(false); }}><section className="utility-modal recent-modal" role="dialog" aria-modal="true" aria-labelledby="recent-title"><div className="modal-heading"><div><p className="section-kicker">HISTORY</p><h2 id="recent-title">Recent transfers</h2></div><button className="modal-close" aria-label="Close" onClick={() => setRecentOpen(false)}>×</button></div>{recentTransfers.length ? <div className="recent-list">{recentTransfers.map((transfer) => { const savedMacPath = transfer.receivedFiles.find((f) => f.savedToMacPath)?.savedToMacPath; const savedDiskPath = transfer.receivedFiles.find((f) => f.savedToDiskPath)?.savedToDiskPath; const isSavedToDisk = Boolean(savedMacPath || savedDiskPath); const canSave = transfer.status === "completed" && transfer.direction === "incoming" && transfer.receivedFiles.length > 0 && !isSavedToDisk; return <div className="recent-row" key={transfer.transferId}><span><strong>{transfer.files.map((file) => file.name).join(", ")}</strong><small>{transfer.direction === "incoming" ? "Received" : "Sent"} · {transfer.peerName} · {formatBytes(transfer.totalBytes)} {isSavedToDisk ? "· Saved to folder" : transfer.status === "completed" && transfer.direction === "incoming" ? "· Auto-saved to downloads" : ""}</small></span><span className="recent-actions">{transfer.direction === "incoming" && transfer.status === "completed" && (savedMacPath || receivedFolder) && <button type="button" className="icon-button folder-locate-button" aria-label={`Locate ${transfer.files[0]?.name ?? "received files"} in folder`} title="Locate in received-files folder" onClick={() => openReceivedFolder(savedMacPath)}><FolderOpen size={15} aria-hidden="true" /></button>}{canSave && <button type="button" className="text-button" onClick={() => saveReceivedTransferFiles(transfer)}>{transfer.receivedFiles.length > 1 ? "Save again" : "Save again"}</button>}<span className="recent-state">{transfer.status === "completed" ? "Complete" : transfer.status === "cancelled" ? "Cancelled" : transfer.status === "declined" ? "Declined" : "Failed"}</span></span></div>; })}</div> : <p className="empty-history">Completed transfers will appear here.</p>}</section></div>}
-      {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="utility-modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="modal-heading"><div><p className="section-kicker">PREFERENCES</p><h2 id="settings-title">Settings</h2></div><button className="modal-close" aria-label="Close" onClick={() => setSettingsOpen(false)}>×</button></div><label className="setting-field">Device name<input defaultValue={deviceName} maxLength={40} onBlur={(event) => { const name = event.target.value.trim(); if (name && name !== deviceName) handleRenameDevice(name); }} /></label>{isNativeShell() && <label className="setting-toggle"><span><strong>Background clipboard &amp; connection</strong><small>{connectionContinuity ? "A native foreground service transfers files and receives clipboard content when you switch apps or turn off the screen. Android may block reading other apps’ clipboards; use Share → AirBridge or the AirBridge selected-text action." : "Opt in to an ongoing notification to keep clipboard sharing and the encrypted session alive while you switch apps."}</small></span><input type="checkbox" checked={connectionContinuity} onChange={(event) => { const enabled = event.target.checked; if (setNativeConnectionContinuity(enabled)) setConnectionContinuity(enabled); }} /></label>}<label className="setting-toggle"><span><strong>Dark appearance</strong><small>Use a monochrome dark theme</small></span><input type="checkbox" checked={darkMode} onChange={() => setDarkMode((value) => !value)} /></label><label className="setting-toggle"><span><strong>Auto-beam copied text</strong><small>{snap.localDaemon.clipboardBridge ? "Automatically beam copied text in the background without returning to this page" : "Automatically beam newly copied or shared text to your connected device"}</small></span><input type="checkbox" checked={snap.autoClipboardSync} onChange={(event) => clientRef.current?.setAutoClipboardSync(event.target.checked)} /></label><label className="setting-toggle"><span><strong>Receive clipboard beams</strong><small>{snap.clipboardReceiveEnabled ? "Incoming clipboard text and images are copied by the native service, even without the app screen" : "Blocked — you still beam but won't receive (per-device)"}</small></span><input type="checkbox" checked={snap.clipboardReceiveEnabled} onChange={(event) => clientRef.current?.setClipboardReceiveEnabled(event.target.checked)} /></label>{receivedFolder ? (
+      {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="utility-modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="modal-heading"><div><p className="section-kicker">PREFERENCES</p><h2 id="settings-title">Settings</h2></div><button className="modal-close" aria-label="Close" onClick={() => setSettingsOpen(false)}>×</button></div><label className="setting-field">Device name<input defaultValue={deviceName} maxLength={40} onBlur={(event) => { const name = event.target.value.trim(); if (name && name !== deviceName) handleRenameDevice(name); }} /></label>{isNativeShell() && <label className="setting-toggle"><span><strong>Background clipboard &amp; connection</strong><small>{connectionContinuity ? "A native foreground service transfers files and receives clipboard content when you switch apps or turn off the screen. Android may block reading other apps’ clipboards; use Share → AirBridge or the AirBridge selected-text action." : "Opt in to an ongoing notification to keep clipboard sharing and the encrypted session alive while you switch apps."}</small></span><input type="checkbox" checked={connectionContinuity} onChange={(event) => { const enabled = event.target.checked; if (setNativeConnectionContinuity(enabled)) setConnectionContinuity(enabled); }} /></label>}<label className="setting-toggle"><span><strong>Dark appearance</strong><small>Use a monochrome dark theme</small></span><input type="checkbox" checked={darkMode} onChange={() => setDarkMode((value) => !value)} /></label><label className="setting-toggle"><span><strong>Auto-beam copied text</strong><small>{isNativeShell() ? "Beam text when Android permits clipboard access; incoming delivery and explicit Share work without this screen" : snap.localDaemon.clipboardBridge ? "Automatically beam copied text in the background without returning to this page" : "Automatically beam newly copied or shared text to your connected device"}</small></span><input type="checkbox" checked={snap.autoClipboardSync} onChange={(event) => clientRef.current?.setAutoClipboardSync(event.target.checked)} /></label><label className="setting-toggle"><span><strong>Receive clipboard beams</strong><small>{snap.clipboardReceiveEnabled ? "Incoming clipboard text and images are copied by the native service, even without the app screen" : "Blocked — you still beam but won't receive (per-device)"}</small></span><input type="checkbox" checked={snap.clipboardReceiveEnabled} onChange={(event) => clientRef.current?.setClipboardReceiveEnabled(event.target.checked)} /></label>{receivedFolder ? (
             <div className="setting-field received-folder-setting">
               <span><strong>Received files folder</strong></span>
               <small className="received-folder-current" role="button" tabIndex={0} title="Click to browse folders" onClick={() => setFolderPickerOpen(true)} onKeyDown={(e) => { if (e.key === 'Enter') setFolderPickerOpen(true); }}>{receivedFolder} <span className="folder-browse-hint">· Browse…</span></small>
@@ -880,8 +895,8 @@ export function App() {
           ) : (
             <div className="settings-info"><strong>Received files folder</strong><p>{isNativeShell() ? "Verified files are saved automatically to Downloads/AirBridge by the native service, even when this screen is closed." : "Received files are saved by your browser (auto-download to Downloads folder). On the device running AirBridge you can set an exact folder."}</p>{!isNativeShell() && <div className="received-folder-controls"><input aria-label="Received files folder path" value={receivedFolderInput} onChange={(e) => setReceivedFolderInput(e.target.value)} placeholder="~/Downloads/AirBridge" /><button type="button" className="secondary-button" onClick={() => setFolderPickerOpen(true)}>Browse</button><button type="button" className="secondary-button" disabled={folderSaving || !receivedFolderInput.trim()} onClick={saveReceivedFolder}>{folderSaving ? "Saving…" : "Set folder"}</button></div>}</div>
           )}
-          {isNativeShell() && <div className="settings-info accessibility-settings"><strong>Accessibility-assisted clipboard capture</strong><p>Off by default. Android 10+ can hide clipboard changes from background apps. Opting in lets AirBridge watch for copy and selection events through a service you enable in Android Settings, then beam plain text to your paired computer while this screen is hidden. AirBridge cannot enable the service for you, never reads other apps' text fields or keystrokes, and Android may still block hidden clipboard reads. Accessibility is not a clipboard-permission bypass. If a copy is blocked, use Share → AirBridge or select text → AirBridge in the other app.</p><label className="setting-toggle"><span><strong>Use Accessibility Service for hidden clipboard</strong><small>{accessibilityOptIn ? "Opted in. " : "Off. "}{accessibilityServiceEnabled ? "Service enabled in Android Settings." : "Service not enabled yet — open Android Settings below."}</small></span><input type="checkbox" checked={accessibilityOptIn} onChange={(event) => { const enabled = event.target.checked; if (setNativeAccessibilityOptIn(enabled)) { setAccessibilityOptIn(enabled); if (enabled && !accessibilityServiceEnabled) openNativeAccessibilitySettings(); } }} /></label><p className="accessibility-status" aria-live="polite"><strong>Android Settings:</strong> {accessibilityServiceEnabled ? "AirBridge clipboard bridge is enabled." : "AirBridge clipboard bridge is not enabled."}</p><button type="button" className="secondary-button" onClick={() => openNativeAccessibilitySettings()}>Open Accessibility settings</button></div>}<div className="settings-info"><strong>About connection status</strong><p>“Running” means this app is connected to its transfer service. “Nearby” means another device was discovered; a secure session is only ready after pairing completes.</p></div><div className="settings-info"><strong>Privacy and consent</strong><p>Incoming transfers ask before saving. Auto-accept is off. Revoke trusted devices in advanced trust management.</p></div>{isNativeShell() && <div className="settings-info"><strong>Paired computer</strong><p>The UI is bundled with this app. The native service connects to your paired computer independently of this screen. Changing computers ends active transfers and starts a fresh pairing.</p><button type="button" className="secondary-button" onClick={() => forgetNativeComputer()}>Change computer</button></div>}<a className="text-button advanced-toggle" href="https://github.com/DigantaDey/AirBridge#android-background-behavior" target="_blank" rel="noreferrer">About this version</a></section></div>}
-      <TransferModal offer={activeIncomingOffer} senderPublicKey={incomingSenderPubKey} onAccept={(transferId, trustSender) => { if (trustSender && incomingSenderPubKey) clientRef.current?.toggleTrustedPeer(incomingSenderPubKey, true); clientRef.current?.acceptIncomingTransfer(transferId); }} onDecline={(transferId) => clientRef.current?.declineIncomingTransfer(transferId)} />
+          {isNativeShell() && <div className="settings-info"><strong>Background battery access</strong><p>{batteryUnrestricted ? "Android battery optimization is disabled for AirBridge." : "Android battery optimization is enabled. For long screen-off transfers, choose AirBridge → Unrestricted or Don’t optimize in Android’s battery settings."} The native service keeps transfers independent of this screen; some manufacturers also require allowing background activity or auto-start. Force-stop and Android’s Stop action still end the service.</p><button type="button" className="secondary-button" onClick={() => openNativeBatterySettings()}>Open battery settings</button></div>}{isNativeShell() && <div className="settings-info accessibility-settings"><strong>Accessibility-assisted clipboard capture</strong><p>Off by default. Android 10+ can hide clipboard changes from background apps. Opting in lets AirBridge watch for copy and selection events through a service you enable in Android Settings, then beam plain text to your paired computer while this screen is hidden. AirBridge cannot enable the service for you, never reads other apps' text fields or keystrokes, and Android may still block hidden clipboard reads. Accessibility is not a clipboard-permission bypass. If a copy is blocked, use Share → AirBridge or select text → AirBridge in the other app.</p><label className="setting-toggle"><span><strong>Use Accessibility Service for hidden clipboard</strong><small>{accessibilityOptIn ? "Opted in. " : "Off. "}{accessibilityServiceEnabled ? "Service enabled in Android Settings." : "Service not enabled yet — open Android Settings below."}</small></span><input type="checkbox" checked={accessibilityOptIn} onChange={(event) => { const enabled = event.target.checked; if (setNativeAccessibilityOptIn(enabled)) { setAccessibilityOptIn(enabled); if (enabled && !accessibilityServiceEnabled) openNativeAccessibilitySettings(); } }} /></label><p className="accessibility-status" aria-live="polite"><strong>Android Settings:</strong> {accessibilityServiceEnabled ? "AirBridge clipboard bridge is enabled." : "AirBridge clipboard bridge is not enabled."}</p><button type="button" className="secondary-button" onClick={() => openNativeAccessibilitySettings()}>Open Accessibility settings</button></div>}<div className="settings-info"><strong>About connection status</strong><p>“Running” means this app is connected to its transfer service. “Nearby” means another device was discovered; a secure session is only ready after pairing completes.</p></div><div className="settings-info"><strong>Privacy and consent</strong><p>Incoming transfers ask before saving. Auto-accept is off. Revoke trusted devices in advanced trust management.</p></div>{isNativeShell() && <div className="settings-info"><strong>Paired computer</strong><p>The UI is bundled with this app. The native service connects to your paired computer independently of this screen. Changing computers ends active transfers and starts a fresh pairing.</p><button type="button" className="secondary-button" onClick={() => forgetNativeComputer()}>Change computer</button></div>}<a className="text-button advanced-toggle" href="https://github.com/DigantaDey/AirBridge#android-background-behavior" target="_blank" rel="noreferrer">About this version</a></section></div>}
+      <TransferModal offer={activeIncomingOffer} senderPublicKey={incomingSenderPubKey} onAccept={(transferId, trustSender) => { if (trustSender && incomingSenderPubKey) clientRef.current?.toggleTrustedPeer(incomingSenderPubKey, true); clientRef.current?.acceptIncomingTransfer(transferId).catch((error: unknown) => showToast({ id: "accept-error", title: "Could not accept transfer", body: error instanceof Error ? error.message : "Try accepting the offer again." })); }} onDecline={(transferId) => { clientRef.current?.declineIncomingTransfer(transferId).catch(() => {}); }} />
       {clipboardOpen && <ClipboardCenter peers={snap.peers} items={snap.clipboardItems} autoSync={snap.autoClipboardSync} hostClipboardActive={Boolean(snap.localDaemon.clipboardBridge)} receiveEnabled={snap.clipboardReceiveEnabled} initialPeerId={clipboardPeerId} prefill={clipboardPrefill} onToggleAutoSync={(enabled) => clientRef.current?.setAutoClipboardSync(enabled)} onToggleReceive={(enabled) => clientRef.current?.setClipboardReceiveEnabled(enabled)} onMarkCopied={markLocalCopyHandled} onSend={handleSendClipboard} onSendImage={handleSendClipboardImage} onClose={() => setClipboardOpen(false)} />}
       {folderPickerOpen && <FolderPickerModal initialPath={receivedFolder || receivedFolderInput || ''} onSelect={(p) => { setReceivedFolderInput(p); setFolderPickerOpen(false); }} onClose={() => setFolderPickerOpen(false)} />}
       {toast && <div className="utility-toast" role="status"><strong>{toast.title}</strong><span>{toast.body}</span>{toast.actionLabel && <button type="button" className="toast-action" onClick={toast.onAction}>{toast.actionLabel}</button>}<button aria-label="Dismiss notification" onClick={() => setToast(null)}>×</button></div>}

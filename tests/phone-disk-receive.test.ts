@@ -142,8 +142,11 @@ class MockFileHandle {
 class MockDirectoryHandle {
   name = 'AirBridge';
   private readonly files = new Map<string, MockFileHandle>();
-  async getFileHandle(name: string): Promise<MockFileHandle> {
-    if (!this.files.has(name)) this.files.set(name, new MockFileHandle(name));
+  async getFileHandle(name: string, options?: { create?: boolean }): Promise<MockFileHandle> {
+    if (!this.files.has(name)) {
+      if (!options?.create) throw new DOMException('Not found', 'NotFoundError');
+      this.files.set(name, new MockFileHandle(name));
+    }
     return this.files.get(name)!;
   }
   async removeEntry(name: string): Promise<void> {
@@ -377,7 +380,7 @@ describe('phone disk-backed receive (File System Access API)', () => {
     }
   });
 
-  it('overwrites a preexisting longer file exactly using absolute chunk positions', async () => {
+  it('preserves an existing file and saves a collision-free name with exact absolute chunk positions', async () => {
     const pair = await makePair();
     try {
       const size = CHUNK_SIZE * 2 + 123;
@@ -404,11 +407,37 @@ describe('phone disk-backed receive (File System Access API)', () => {
       expect(done.receivedFiles[0].verified).toBe(true);
       expect(done.receivedFiles[0].sha256).toBe(await refSha256(raw));
 
-      const written = mockDir.getFile('overwrite-long.bin')!.getBuffer();
+      expect(mockDir.getFile('overwrite-long.bin')!.getBuffer()).toEqual(stale);
+      const written = mockDir.getFile('overwrite-long (1).bin')!.getBuffer();
       expect(written.byteLength).toBe(size);
       expect(Buffer.compare(Buffer.from(written), Buffer.from(raw))).toBe(0);
     } finally {
       pair.stop();
     }
   });
+  it('marks cancellation immediately during a blocked disk write and never deletes an existing same-name file', async () => {
+    const pair = await makePair();
+    let entered = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    mockWriteHook = async () => { entered = true; await gate; };
+    const original = Uint8Array.of(9, 8, 7);
+    mockDir.seedFile('keep-original.bin', original);
+    const input: SendableFileInput = { name: 'keep-original.bin', size: CHUNK_SIZE, type: 'x',
+      sliceBytes: async (start, end) => new Uint8Array(end - start) };
+    const sending = pair.sender.sendFiles(pair.senderPeerTarget, [input]);
+    try {
+      await waitForCondition(() => entered);
+      const id = pair.receiver.getSnapshot().transfers.find((transfer) => transfer.direction === 'incoming')!.transferId;
+      const cancelling = pair.receiver.cancelTransfer(id);
+      expect(pair.receiver.getSnapshot().transfers.find((transfer) => transfer.transferId === id)?.status).toBe('cancelled');
+      release();
+      await cancelling;
+      await sending;
+      expect(mockDir.getFile('keep-original.bin')!.getBuffer()).toEqual(original);
+      expect(mockDir.getFile('keep-original (1).bin')).toBeUndefined();
+      expect(pair.getReceiverCompleted()).toBeNull();
+    } finally { release(); mockWriteHook = null; pair.stop(); await sending; }
+  }, 15_000);
+
 });

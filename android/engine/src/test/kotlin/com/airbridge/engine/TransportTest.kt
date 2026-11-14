@@ -91,6 +91,36 @@ fun main() {
     check(queue.take() == null)
     writer.join(); secondWriter.join()
 
+    // Empty frames are bounded by count; an oversized, valid clipboard
+    // envelope is admitted alone and cannot disable byte backpressure.
+    val tiny = ByteBoundedQueue<ByteArray>(8, maxItems = 2, timeoutMs = 40) { it.size }
+    tiny.put(ByteArray(0)); tiny.put(ByteArray(0))
+    check(runCatching { tiny.put(ByteArray(0)) }.exceptionOrNull() is IOException) { "Empty frames bypassed the item cap" }
+    tiny.clear()
+    val oversized = ByteArray(16)
+    tiny.put(oversized)
+    check(runCatching { tiny.put(ByteArray(0)) }.exceptionOrNull() is IOException) { "Oversized frame shared its budget" }
+    check(tiny.take() === oversized)
+    tiny.put(byteArrayOf(1)); tiny.put(byteArrayOf(2))
+    check(tiny.take()!!.single() == 1.toByte() && tiny.take()!!.single() == 2.toByte()) { "Queue reordered messages" }
+    tiny.close()
+    check(runCatching { tiny.put(ByteArray(0)) }.exceptionOrNull() is IOException)
+
+    // Range decryption reuses the routed socket buffer and a failed GCM tag
+    // must not poison the per-thread cipher for the next operation.
+    val rawKey = ByteArray(32) { it.toByte() }
+    val key = javax.crypto.spec.SecretKeySpec(rawKey, "AES")
+    val plaintext = ByteArray(123) { (it * 3).toByte() }
+    val (iv, ciphertext) = AirCrypto.encryptBinaryChunk(key, plaintext, 0, 0)
+    val routed = Frames.wrapRoutedRelayFrame("1111111111111111", "2222222222222222",
+        Frames.encodeEncryptedChunkFrame(Frames.EncryptedChunkFrame("abababababababab", 0, 0, iv, ciphertext)))
+    val (_, decoded) = Frames.decodeRoutedEncryptedChunkFrame(routed)
+    check(decoded.ciphertext === routed) { "Decoder copied the entire file chunk" }
+    check(AirCrypto.decryptBinaryChunk(key, decoded.iv, decoded.ciphertext, decoded.ciphertextOffset, decoded.ciphertextLength).contentEquals(plaintext))
+    val badTag = ciphertext.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 1).toByte() }
+    check(runCatching { AirCrypto.decryptBinaryChunk(key, iv, badTag) }.isFailure)
+    check(AirCrypto.decryptBinaryChunk(key, iv, ciphertext).contentEquals(plaintext))
+
     // A blocked system clipboard/snapshot consumer must retain only the latest
     // pending state, and yield to already queued commands between deliveries.
     val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
@@ -124,6 +154,8 @@ fun main() {
             TransferDirection.OUTGOING, TransferStatus.TRANSFERRING, files, files.sumOf { it.size }, 0)
         val send = SendState(session, emptyList())
         send.resumeFromChunks = mapOf(0 to 10, 1 to 20)
+        send.sentPrefixes[0] = 20
+        send.sentPrefixes[1] = 30
         val outgoing = engine.javaClass.getDeclaredField("outgoing").apply { isAccessible = true }
         @Suppress("UNCHECKED_CAST")
         (outgoing.get(engine) as MutableMap<String, SendState>)[session.transferId] = send
@@ -136,8 +168,102 @@ fun main() {
         acknowledge(session.peerId, 0, 19)
         check(send.ackedGlobalChunks == 20)
         acknowledge(session.peerId, 1, 999)
-        acknowledge("2222222222222222", 1, 99)
+        acknowledge(session.peerId, 0, 50) // valid index, but never sent
+        acknowledge(session.peerId, 1, 50)
+        acknowledge("2222222222222222", 1, 29)
         check(send.ackedGlobalChunks == 20) { "Invalid or forged ACK released the window" }
     } finally { engine.stop() }
-    println("TRANSPORT: ALL PASS (bounded frames, fragments, exactly-once close, byte queue, bounded latest-state work, per-file ACKs)")
+    // Relay IDs and claimed device IDs/names are not transfer authentication.
+    // Exercise real ECDH/AES envelopes from two identities with the same profile.
+    val identityEngine = AirBridgeEngine(EngineConfig("ws://127.0.0.1:9/ws", "Identity test"))
+    try {
+        val original = AirCrypto.generateIdentityKeyPair()
+        val impostor = AirCrypto.generateIdentityKeyPair()
+        val id = "3333333333333333"
+        val meta = FileManifestItem(0, "empty.bin", "original/empty.bin", 0, "x", 1, Limits.CHUNK_SIZE)
+        val transfer = TransferSession("cdcdcdcdcdcdcdcd", id, "same-device", "Same name", "macos", "123 · 456",
+            TransferDirection.OUTGOING, TransferStatus.TRANSFERRING, listOf(meta), 0, 0)
+        val send = SendState(transfer, emptyList(), original.publicKeyB64)
+        fun map(field: String): MutableMap<String, Any> {
+            val f = identityEngine.javaClass.getDeclaredField(field).apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            return f.get(identityEngine) as MutableMap<String, Any>
+        }
+        map("outgoing")[transfer.transferId] = send
+        map("transfers")[transfer.transferId] = transfer
+        val control = identityEngine.javaClass.getDeclaredMethod("handleIncomingControl", String::class.java, JsonValue.Obj::class.java).apply { isAccessible = true }
+        fun deliver(kind: String, identity: IdentityKeys, customize: (JsonValue.Obj) -> Unit = {}) {
+            map("peers")[id] = Peer(id, DeviceProfile("Same name", "macos", "Mac", "laptop", identity.publicKeyB64, "same-device"), "paired", 0)
+            val crypto = AirCrypto.derivePeerSession(identity.privateKey, identity.publicKeyB64, identityEngine.myPublicKeyB64)
+            val payload = JsonValue.Obj().put("kind", kind).put("transferId", transfer.transferId).put("verified", true)
+            customize(payload)
+            val encrypted = AirCrypto.encryptControlPayload(crypto.aesKey, payload.toJsonString().toByteArray(Charsets.UTF_8))
+            control.invoke(identityEngine, id, JsonValue.Obj().put("encrypted", true)
+                .put("iv", Base64Url.encode(encrypted.iv)).put("ciphertext", Base64Url.encode(encrypted.ciphertext)))
+        }
+        deliver("transfer-complete-ack", impostor)
+        deliver("transfer-cancel", impostor)
+        check(!send.completion.isDone && !send.cancelled) { "Changed key inherited the original transfer" }
+        deliver("transfer-complete-ack", original)
+        check(send.completion.get(1, TimeUnit.SECONDS))
+
+        map("outgoing").clear()
+        val received = TransferSession(transfer.transferId, id, "same-device", "Same name", "macos", "123 · 456",
+            TransferDirection.INCOMING, TransferStatus.COMPLETED, listOf(meta), 0, 0)
+        map("transfers")[received.transferId] = received
+        map("acceptedTransferKeys")[received.transferId] = original.publicKeyB64
+        deliver("transfer-complete", impostor) // must not even attempt an outbound receipt
+        deliver("transfer-offer", original) { payload ->
+            payload.put("totalBytes", 0L).put("files", JsonValue.JsonArr(mutableListOf(meta.copy(relativePath = "changed/empty.bin").toJson())))
+        }
+        val legitimate = runCatching { deliver("transfer-complete", original) }.exceptionOrNull()
+        check(legitimate?.cause?.message?.contains("Connection unavailable") == true) {
+            "The legitimate receipt should reach the intentionally disconnected socket, not be rejected as an impostor"
+        }
+    } finally { identityEngine.stop() }
+
+    // Slow flash/provider IO must not hold the engine-wide monitor: users
+    // can inspect progress and cancel without waiting for a blocked write.
+    val blockedEngine = AirBridgeEngine(EngineConfig("ws://127.0.0.1:9/ws", "Slow disk test"))
+    val diskEntered = CountDownLatch(1)
+    val diskRelease = CountDownLatch(1)
+    val discarded = CompletableFuture<Boolean>()
+    val diskWorker = java.util.concurrent.Executors.newSingleThreadExecutor()
+    val observer = java.util.concurrent.Executors.newSingleThreadExecutor()
+    try {
+        val meta = FileManifestItem(0, "slow.bin", null, plaintext.size.toLong(), "x", 1, Limits.CHUNK_SIZE)
+        val transfer = TransferSession("abababababababab", "2222222222222222", null, "Peer", "macos", "123 · 456",
+            TransferDirection.INCOMING, TransferStatus.TRANSFERRING, listOf(meta), meta.size, 0)
+        val sink = object : FileSink {
+            override fun resumeFrom() = 0
+            override fun hasReceived(chunkIndex: Int) = false
+            override fun receivedCount() = 0
+            override fun store(chunkIndex: Int, data: ByteArray) { diskEntered.countDown(); check(diskRelease.await(3, TimeUnit.SECONDS)) }
+            override fun markComplete() {}
+            override fun finalizeIfReady(declaredSha256: String?, force: Boolean): FileFinalize? = null
+            override fun discard() { discarded.complete(true) }
+            override fun lastError(): String? = null
+        }
+        fun install(field: String, id: String, value: Any) {
+            val f = blockedEngine.javaClass.getDeclaredField(field).apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            (f.get(blockedEngine) as MutableMap<String, Any>)[id] = value
+        }
+        install("incoming", transfer.transferId, RecvState(transfer, mapOf(0 to sink)))
+        install("transfers", transfer.transferId, transfer)
+        install("sessions", transfer.peerId, PeerCryptoSession(key, rawKey, "123 · 456", "test"))
+        install("peers", transfer.peerId, Peer(transfer.peerId, DeviceProfile("Peer", "macos", "Mac", "laptop", "test-key"), "paired", 0))
+        install("sessionKeyFingerprints", transfer.peerId, "test-key")
+        install("acceptedTransferKeys", transfer.transferId, "test-key")
+        val receive = blockedEngine.javaClass.getDeclaredMethod("handleBinaryFrame", ByteArray::class.java).apply { isAccessible = true }
+        val stored = diskWorker.submit { receive.invoke(blockedEngine, routed) }
+        check(diskEntered.await(1, TimeUnit.SECONDS))
+        check(observer.submit<TransferView?> { blockedEngine.transferView(transfer.transferId) }.get(1, TimeUnit.SECONDS)?.status == TransferStatus.TRANSFERRING)
+        observer.submit { runCatching { blockedEngine.cancelTransfer(transfer.transferId) } }.get(1, TimeUnit.SECONDS)
+        check(blockedEngine.transferView(transfer.transferId)?.status == TransferStatus.CANCELLED)
+        check(discarded.get(1, TimeUnit.SECONDS))
+        diskRelease.countDown()
+        stored.get(1, TimeUnit.SECONDS)
+    } finally { diskRelease.countDown(); blockedEngine.stop(); diskWorker.shutdownNow(); observer.shutdownNow() }
+    println("TRANSPORT: ALL PASS (bounded frames, fragments, exactly-once close, byte/item queues, range crypto, nonblocking cancel, bounded latest-state work, per-file ACKs, consent/receipt identity)")
 }

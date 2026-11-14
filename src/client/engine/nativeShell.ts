@@ -54,6 +54,8 @@ export interface AirBridgeNativeBridge {
   accessibilityServiceEnabled?(): boolean;
   /** Opens Android's Accessibility settings; cannot enable the service itself. */
   openAccessibilitySettings?(): boolean;
+  batteryOptimizationExempt?(): boolean;
+  openBatterySettings?(): boolean;
   /** Holds a native foreground service / partial wake lock only while a transfer is active. */
   setTransferActive?(active: boolean): boolean;
   /** Updates the foreground notification with the live Upload/Download rate. */
@@ -151,6 +153,15 @@ export function isNativeAccessibilityServiceEnabled(): boolean {
 /** Opens Android Settings; the app cannot grant this permission itself. */
 export function openNativeAccessibilitySettings(): boolean {
   try { return nativeBridge()?.openAccessibilitySettings?.() === true; } catch { return false; }
+}
+
+export function isNativeBatteryOptimizationExempt(): boolean {
+  try { return nativeBridge()?.batteryOptimizationExempt?.() === true; } catch { return false; }
+}
+
+/** Opens the OS list; only the user can choose Unrestricted / Don't optimize. */
+export function openNativeBatterySettings(): boolean {
+  try { return nativeBridge()?.openBatterySettings?.() === true; } catch { return false; }
 }
 
 /** Sync Android's system bars with the web app's light/dark appearance. */

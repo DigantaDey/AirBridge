@@ -276,4 +276,47 @@ describe('file transfer binary integrity', () => {
       pair.stop();
     }
   }, 15000);
+  it('continues processing clipboard controls from the same peer while file publication is blocked', async () => {
+    const pair = await makePair();
+    const receiver = pair.receiver as unknown as { runReceiveFinalization: (id: string, force: boolean) => Promise<void> };
+    const original = receiver.runReceiveFinalization.bind(pair.receiver);
+    let entered = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    receiver.runReceiveFinalization = async (id, force) => { entered = true; await gate; return original(id, force); };
+    const sending = pair.sender.sendFiles(pair.targetPeerId, [createOffsetViewFile('slow-publish.bin', CHUNK_SIZE + 17).input]);
+    try {
+      await waitForCondition(() => entered);
+      await pair.sender.sendClipboard(pair.targetPeerId, 'clipboard during publication');
+      await waitForCondition(() => pair.receiver.getSnapshot().clipboardItems.some((item) => item.text === 'clipboard during publication'), 2_000);
+      expect(pair.getCompleted()).toBeNull();
+      release();
+      await sending;
+      await waitForCondition(() => pair.getCompleted() !== null);
+      expect(pair.getCompleted()!.receivedFiles[0].verified).toBe(true);
+    } finally { release(); pair.stop(); await sending; }
+  }, 15_000);
+
+  it('never publishes a complete-looking file without the sender’s SHA-256 digest', async () => {
+    const pair = await makePair();
+    const sender = pair.sender as unknown as { sendControlMessage: (id: string, payload: unknown, encrypted: boolean) => Promise<void> };
+    const original = sender.sendControlMessage.bind(pair.sender);
+    sender.sendControlMessage = async (id, payload, encrypted) => {
+      if (payload && typeof payload === 'object' && (payload as { kind?: string }).kind === 'file-complete') {
+        const { sha256: _sha, ...rest } = payload as Record<string, unknown>;
+        payload = rest;
+      }
+      return original(id, payload, encrypted);
+    };
+    const sending = pair.sender.sendFiles(pair.targetPeerId, [createOffsetViewFile('missing-hash.bin', CHUNK_SIZE + 1).input]);
+    try {
+      await waitForCondition(() => pair.receiver.getSnapshot().transfers.some((transfer) => transfer.status === 'error'));
+      const failed = pair.receiver.getSnapshot().transfers.find((transfer) => transfer.direction === 'incoming')!;
+      expect(failed.receivedFiles).toEqual([]);
+      expect(failed.errorMessage).toMatch(/Missing SHA-256/);
+      expect(pair.getCompleted()).toBeNull();
+      await sending;
+    } finally { pair.stop(); await sending; }
+  }, 15_000);
+
 });

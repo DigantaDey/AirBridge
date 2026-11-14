@@ -78,17 +78,22 @@ class ShellBridge(private val activity: MainActivity) {
     }
 
     @JavascriptInterface
-    fun readClipboard(): String {
-        return try {
-            val manager = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            val clip = manager.primaryClip ?: return ""
-            if (clip.itemCount == 0 || !clip.description.hasMimeType("text/*")) return ""
-            if (clip.description.extras?.getBoolean("android.content.extra.IS_SENSITIVE", false) == true) return ""
-            clip.getItemAt(0)?.coerceToText(activity)?.toString().orEmpty()
-        } catch (e: Exception) {
-            Log.w(TAG, "clipboard read failed: ${e.message}")
-            ""
+    fun readClipboard(): String = ClipboardText.read(activity).orEmpty()
+
+    @JavascriptInterface
+    fun batteryOptimizationExempt(): Boolean =
+        (activity.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager)
+            .isIgnoringBatteryOptimizations(activity.packageName)
+
+    @JavascriptInterface
+    fun openBatterySettings(): Boolean {
+        activity.runOnUiThread {
+            try { activity.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+            catch (_: Exception) { runCatching {
+                activity.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${activity.packageName}")))
+            } }
         }
+        return true
     }
 
     // ------------------------------------------------------------------ saving
@@ -310,7 +315,8 @@ class ShellBridge(private val activity: MainActivity) {
             activity.runOnUiThread {
                 val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                activity.startActivity(intent)
+                runCatching { activity.startActivity(intent) }
+                    .onFailure { Log.w(TAG, "could not open accessibility settings: ${it.message}") }
             }
             true
         } catch (e: Exception) {

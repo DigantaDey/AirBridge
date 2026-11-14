@@ -10,7 +10,7 @@ const DEFAULT_MAX_BYTES = 512 * 1024; // 512 KB cap for background clipboard rea
 const CMD_TIMEOUT_MS = 1_500;
 
 function normalizeClipboardComparison(text: string): string {
-  return text.replace(/\r\n/g, '\n').trim();
+  return text.replace(/\r\n/g, '\n');
 }
 
 function runClipboardRead(
@@ -20,6 +20,7 @@ function runClipboardRead(
 ): Promise<{ ok: boolean; text: string | null; missingBinary?: boolean }> {
   return new Promise((resolve) => {
     let settled = false;
+    let timer: NodeJS.Timeout | undefined;
     let totalBytes = 0;
     let overflowed = false;
     const chunks: Buffer[] = [];
@@ -42,7 +43,7 @@ function runClipboardRead(
       return;
     }
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       try {
         child.kill('SIGKILL');
       } catch {
@@ -92,6 +93,7 @@ function runClipboardWrite(
 ): Promise<{ ok: boolean; missingBinary?: boolean }> {
   return new Promise((resolve) => {
     let settled = false;
+    let timer: NodeJS.Timeout | undefined;
     const finish = (res: { ok: boolean; missingBinary?: boolean }) => {
       if (settled) return;
       settled = true;
@@ -110,7 +112,7 @@ function runClipboardWrite(
       return;
     }
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       try {
         child.kill('SIGKILL');
       } catch {
@@ -304,6 +306,9 @@ export class HostClipboardMonitor {
   private pollingInFlight = false;
   private lastNormalized = '';
   private timer: NodeJS.Timeout | null = null;
+  private writing = false;
+  private writeRevision = 0;
+  private pendingWrite: { text: string; resolve: (written: boolean) => void } | null = null;
 
   constructor(opts: HostClipboardMonitorOptions) {
     this.provider = opts.provider;
@@ -335,17 +340,39 @@ export class HostClipboardMonitor {
     }
   }
 
-  public async writeClipboard(text: string): Promise<boolean> {
-    if (this.closed || !this.provider.isSupported()) return false;
-    const normalized = normalizeClipboardComparison(text);
-    this.lastNormalized = normalized;
-    this.seeded = true;
-    return this.provider.writeText(text);
+  public writeClipboard(text: string): Promise<boolean> {
+    if (this.closed || !this.provider.isSupported() || text.length > this.maxTextLength) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      this.pendingWrite?.resolve(false); // a superseded clipboard value is not an OS write
+      this.pendingWrite = { text, resolve };
+      void this.flushWrites();
+    });
+  }
+
+  private async flushWrites(): Promise<void> {
+    if (this.writing) return;
+    this.writing = true;
+    try {
+      while (this.pendingWrite && !this.closed) {
+        const write = this.pendingWrite;
+        this.pendingWrite = null;
+        this.writeRevision++;
+        let written = false;
+        try { written = await this.provider.writeText(write.text); } catch { /* OS/provider unavailable */ }
+        if (written) {
+          this.lastNormalized = normalizeClipboardComparison(write.text);
+          this.seeded = true;
+        }
+        write.resolve(written);
+      }
+    } finally { this.writing = false; }
   }
 
   public close(): void {
     this.closed = true;
     this.shouldWatch = false;
+    this.pendingWrite?.resolve(false);
+    this.pendingWrite = null;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -365,21 +392,19 @@ export class HostClipboardMonitor {
     if (this.closed || !this.shouldWatch || this.pollingInFlight) return;
     this.pollingInFlight = true;
     try {
+      if (this.writing) return;
+      const revision = this.writeRevision;
       const current = await this.provider.readText();
-      if (this.closed || !this.shouldWatch) return;
+      if (this.closed || !this.shouldWatch || this.writing || revision !== this.writeRevision) return;
 
       if (current !== null) {
         const normalized = normalizeClipboardComparison(current);
         if (!this.seeded) {
           this.lastNormalized = normalized;
           this.seeded = true;
-        } else if (
-          normalized.length > 0 &&
-          current.length <= this.maxTextLength &&
-          normalized !== this.lastNormalized
-        ) {
+        } else if (normalized !== this.lastNormalized) {
           this.lastNormalized = normalized;
-          this.onClipboardChange(current);
+          if (normalized.trim().length > 0 && current.length <= this.maxTextLength) this.onClipboardChange(current);
         }
       }
     } finally {

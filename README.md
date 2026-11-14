@@ -58,7 +58,7 @@ Download and install `AirBridge.apk` from the [Latest Release](https://github.co
 ## ✨ Features
 
 ### 📁 High-Speed Direct-to-Disk File Transfers
-* **Native Direct-to-Disk Streaming**: Android and the desktop daemon stream multi-gigabyte files without file-sized RAM buffers. Browser-only receivers use the File System Access API when available and otherwise need enough memory for the received file.
+* **Native Direct-to-Disk Streaming**: Android and the desktop daemon stream multi-gigabyte files without file-sized RAM buffers. Browser-only receivers use the File System Access API when available. The memory-only fallback is capped at 128 MiB across active receives and retained download payloads; use the native app or a disk-backed receive folder for larger files.
 * **Resume Interrupted Connections**: Append-only journals checkpoint private `.part` files. Both engines can resume a network interruption within a running session, reusing consent only for the same encrypted peer key and manifest. A force-stop/process death or changed identity requires a new send; final SHA-256 is always checked.
 * **SHA-256 Pre-Save Verification**: Every file is hashed with SHA-256 as it streams. The receiving device compares the computed hash against the declared hash **before** saving or publishing the file, preventing corrupted files from reaching your Downloads folder.
 * **Batch Operations**: Send up to 100 mixed-type files per transfer session. Image transfers automatically generate WebP previews for immediate inspection.
@@ -110,9 +110,9 @@ AirBridge operates over a dual-layer network pipeline:
 2. **Native Android Ownership**: The APK bundles its own UI; a metadata-only bridge attaches it to the service-owned Kotlin engine. File bytes go from ContentResolver streams to encrypted sockets, or from verified private staging to Downloads/AirBridge. A bounded loopback proxy serves desktop API requests only. Android pins the desktop’s local TLS CA on first use, validates subsequent chains/hostnames, and never silently downgrades HTTPS to HTTP. Compare the E2EE verification code on first contact. Explicit `http://` links remain available for intentionally plaintext servers.
 3. **Chunked Pipeline Tuning**:
    - **Chunk Size**: 256 KiB default (supports 16 KiB to 1 MiB bounds).
-   - **Pipelining**: Browser senders pipeline up to 8 read/encrypt operations; Kotlin uses a native sequential provider stream and a separate writer. Neither inserts a fixed-rate sleep between chunks.
-   - **Flow Control**: Browser socket watermarks are 4 MiB / 1 MiB; Kotlin’s outgoing queue is byte-bounded at 4 MiB (one oversized clipboard envelope may be admitted alone).
-   - **ACK Windows**: 64 in-flight chunks, ACK every 8 contiguous stored chunks; sender waits for receiver SHA-256/publication confirmation before declaring success.
+   - **Pipelining**: Browser senders pipeline up to 8 read/encrypt operations; Kotlin overlaps socket reads, ordered decryption/storage, and a separate network writer using bounded queues. Neither inserts a fixed-rate sleep between chunks.
+   - **Flow Control**: Browser socket watermarks are 4 MiB / 1 MiB; Kotlin’s incoming/outgoing queues are each byte-bounded at 4 MiB and 128 items (one oversized clipboard envelope may be admitted alone). Socket buffers are requested before connecting so TCP window scaling can use the available device/kernel capacity.
+   - **ACK Windows**: 64 in-flight chunks, ACK every 8 contiguous stored chunks or 200 ms on progress; a 60-second no-progress stall is timed only while the sender is waiting. The sender waits for receiver SHA-256/publication confirmation before declaring success.
    - **Safety Limits**: Up to 100 files and 262,144 chunks in a manifest (64 GiB total at the default 256 KiB chunk size). These are allocation/validation limits, not a bandwidth cap. Frames/messages are bounded at 16 MiB; clipboard text at 256,000 characters and image data at about 5 MiB binary.
 
 ---
@@ -120,13 +120,13 @@ AirBridge operates over a dual-layer network pipeline:
 ## Android background behavior
 
 1. Update both the APK and desktop to the current release, pair using the desktop QR, and compare the six-digit verification code.
-2. Keep **Settings → Connection continuity** enabled for idle discovery and incoming clipboard. Allow notifications to accept/decline offers without reopening the screen. An already-active transfer continues even if idle continuity is disabled.
+2. Keep **Settings → Background clipboard & connection** enabled for idle discovery and incoming clipboard. For long screen-off transfers, open **Settings → Background battery access → Open battery settings** and allow **Unrestricted / Don’t optimize** for AirBridge; some OEMs also require allowing background activity/auto-start. Allow notifications to accept/decline offers without reopening the screen. An already-active transfer continues even if idle continuity is disabled.
 3. Switching apps, Back, or a WebView renderer restart does not own/stop the native transfer. The foreground notification shows its state and speed. Android force-stop, the notification’s Stop action, reboot, revoked URI access, or aggressive OEM battery management can still terminate the service; no app can promise to survive those actions. This release does not auto-start at boot.
 4. **Android → desktop clipboard**: ordinary hidden clipboard reads may be blocked even with Accessibility enabled. Share text to AirBridge, or select text and choose AirBridge, for an explicit background send. Password-manager clips marked sensitive are excluded from automatic capture. **Desktop → Android** clipboard delivery is service-owned and does not need this screen open.
 5. Verified incoming files appear in **Downloads/AirBridge** on Android 10+. Android 8/9 falls back to app-specific Downloads when public-storage permission is unavailable; uninstalling removes app-specific files.
 6. If the desktop’s pinned TLS identity changes, verify the desktop, choose **Forget computer**, and scan its new QR. A TLS error is not permission to downgrade the connection. Plaintext desktops require an explicit `http://host:port` invitation.
 
-There is no 256 kbit/s or 256 KiB/s speed limiter. To diagnose a slow phone, compare the same large file in each direction, note **B/s versus bit/s**, test strong 5 GHz/6 GHz Wi-Fi with a wired desktop, and compare foreground versus screen-off behavior. Automated JVM/desktop tests do **not** establish real-phone throughput or OEM background behavior; see the [device validation checklist](docs/ANDROID_VALIDATION.md).
+There is no configured kbit/s or KiB/s speed limiter. To diagnose a slow phone, compare the same large file in each direction, note **B/s versus bit/s**, test strong 5 GHz/6 GHz Wi-Fi with a wired desktop, and compare foreground versus screen-off behavior. Automated JVM/desktop tests do **not** establish real-phone throughput or OEM background behavior; see the [device validation checklist](docs/ANDROID_VALIDATION.md).
 
 ---
 

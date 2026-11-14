@@ -137,7 +137,7 @@ export class SignalingHub {
    * explicit `?pair=`/`join-pair` is always honored. Scanning the terminal
    * QR requires the same physical access as reading the code on screen.
    */
-  private readonly defaultPairCode = generatePairCode(crypto.randomBytes(8));
+  private defaultPairCode = generatePairCode(crypto.randomBytes(8));
   private defaultPairCodeClaimed = false;
   /** Last pair code per peerId so reconnects rejoin their existing group. */
   private readonly pairCodeByPeer = new Map<string, string>();
@@ -148,6 +148,7 @@ export class SignalingHub {
   private readonly pingTimer: NodeJS.Timeout;
   private readonly clipboardMonitor: HostClipboardMonitor | null;
   private backgroundClipboardActive = false;
+  private backgroundClipboardSink: ((text: string) => void) | null = null;
   private getLanUrls: () => string[];
   private getDaemonStatus: () => LocalDaemonStatus;
 
@@ -201,6 +202,12 @@ export class SignalingHub {
   /** Pair code embedded in the startup QR (claimed by the first client). */
   getDefaultPairCode(): string {
     return this.defaultPairCode;
+  }
+
+  /** The daemon's persisted group must also be the startup QR's group. */
+  setDefaultPairCode(raw: string): void {
+    const code = normalizePairCode(raw);
+    if (isValidPairCode(code)) this.defaultPairCode = code;
   }
 
   private rememberPairCode(peerId: string, pairCode: string): void {
@@ -258,8 +265,9 @@ export class SignalingHub {
   }
 
   /** Keeps the OS clipboard watcher alive for the daemon's headless peer. */
-  public setBackgroundClipboardActive(active: boolean): void {
+  public setBackgroundClipboardActive(active: boolean, sink?: (text: string) => void): void {
     this.backgroundClipboardActive = active;
+    this.backgroundClipboardSink = active ? sink ?? this.backgroundClipboardSink : null;
     this.syncClipboardWatchState();
   }
 
@@ -281,6 +289,10 @@ export class SignalingHub {
   }
 
   private deliverHostClipboard(text: string): void {
+    if (this.backgroundClipboardActive && this.backgroundClipboardSink) {
+      this.backgroundClipboardSink(text);
+      return;
+    }
     let target: ConnectedClient | null = null;
     for (const client of this.clients.values()) {
       if (this.isHostDesktopClient(client) && client.ws.readyState === WebSocket.OPEN) {

@@ -8,6 +8,7 @@ import tlsModule from 'node:tls';
 import type { TLSSocket } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
+import { asyncRoute, isSameOriginRequest, requestErrorHandler } from './httpSafety.js';
 import { SignalingHub, isLocalMachineAddress } from './signalingHub.js';
 import { getLanUrls, startMdnsResponder, type MdnsHandle } from './mdnsService.js';
 import {
@@ -183,6 +184,14 @@ export async function createAirBridgeServer(
     next();
   });
 
+  // Loopback alone is not CSRF protection: a website can still POST to a
+  // daemon on this machine. CLI bearer downloads are intentionally shareable.
+  app.use('/api', (req, res, next) => {
+    if (req.method === 'GET' && req.path.startsWith('/beam/')) { next(); return; }
+    if (!isSameOriginRequest(req)) { res.status(403).json({ error: 'Cross-origin requests are not allowed.' }); return; }
+    next();
+  });
+
   const httpServer = http.createServer(app);
   const httpsServer = tls ? https.createServer({ key: tls.key, cert: tls.cert }, app) : null;
   // SecureContext for the dispatcher's explicit TLS termination (see below).
@@ -290,7 +299,7 @@ export async function createAirBridgeServer(
     res.json({ downloadDir: daemonCfg.downloadDir, autoSaveToDownloads: daemonCfg.enabled && daemonCfg.autoSaveToDownloads, enabled: daemonCfg.enabled });
   });
   app.use('/api/received-folder', express.json({ limit: '16kb' }));
-  app.put('/api/received-folder', async (req, res) => {
+  app.put('/api/received-folder', asyncRoute(async (req, res) => {
     if (!isLoopbackRequest(req)) { res.status(403).json({ error: 'Received-folder settings are restricted to this device.' }); return; }
     try {
       const downloadDir = await setDownloadDir(daemonCfg, (req.body as { downloadDir?: unknown })?.downloadDir);
@@ -299,8 +308,8 @@ export async function createAirBridgeServer(
       daemonCfg.enabled = true; daemonCfg.autoSaveToDownloads = true;
       res.json({ ok: true, downloadDir, autoSaveToDownloads: true, enabled: true });
     } catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid folder' }); }
-  });
-  app.post('/api/received-folder/open', async (req, res) => {
+  }));
+  app.post('/api/received-folder/open', asyncRoute(async (req, res) => {
     if (!isLoopbackRequest(req)) { res.status(403).json({ error: 'Opening folders is restricted to this device.' }); return; }
     try {
       const requested = (req.body as { path?: unknown } | undefined)?.path;
@@ -316,11 +325,11 @@ export async function createAirBridgeServer(
       await (options.openFolder ?? openFolderInFileManager)(target);
       res.json({ ok: true, path: target });
     } catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : 'Could not open folder' }); }
-  });
+  }));
 
   // Loopback-only filesystem browser for the "Browse…" path picker in Settings.
   // Exposes only directory listings, never file contents.
-  app.get('/api/fs/list', async (req, res) => {
+  app.get('/api/fs/list', asyncRoute(async (req, res) => {
     if (!isLoopbackRequest(req)) { res.status(403).json({ error: 'Filesystem browsing is restricted to this device.' }); return; }
     try {
       const raw = typeof req.query.path === 'string' ? req.query.path : daemonCfg.downloadDir;
@@ -343,8 +352,8 @@ export async function createAirBridgeServer(
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Cannot list directory' });
     }
-  });
-  app.post('/api/fs/mkdir', express.json({ limit: '16kb' }), async (req, res) => {
+  }));
+  app.post('/api/fs/mkdir', express.json({ limit: '16kb' }), asyncRoute(async (req, res) => {
     if (!isLoopbackRequest(req)) { res.status(403).json({ error: 'Restricted to this device.' }); return; }
     try {
       const { base, name } = req.body as { base?: unknown; name?: unknown };
@@ -358,7 +367,7 @@ export async function createAirBridgeServer(
       await fs.promises.mkdir(target, { recursive: true });
       res.json({ ok: true, path: target });
     } catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : 'Cannot create folder' }); }
-  });
+  }));
 
   // Health & runtime diagnostics endpoint
   app.get('/api/health', (req, res) => {
@@ -380,11 +389,18 @@ export async function createAirBridgeServer(
     });
   });
 
+  // Reject remote callers before any raw body parser can allocate a large
+  // buffer, not after an unauthorized upload has already occupied memory.
+  app.use('/api/daemon', (req, res, next) => {
+    if (!isLocalMachineRequest(req)) { res.status(403).json({ error: 'Daemon access is restricted to this machine.' }); return; }
+    next();
+  });
+
   // Optional local MacBook daemon direct-to-Downloads endpoint (strictly loopback + opt-in)
   app.post(
     '/api/daemon/save',
-    express.raw({ type: 'application/octet-stream', limit: '512mb' }),
-    async (req, res) => {
+    express.raw({ type: 'application/octet-stream', limit: '128mb' }),
+    asyncRoute(async (req, res) => {
       if (!daemonCfg.enabled) {
         res.status(403).json({ error: 'Local daemon mode is disabled.' });
         return;
@@ -407,7 +423,7 @@ export async function createAirBridgeServer(
           error: err instanceof Error ? err.message : 'Failed to save to local Downloads',
         });
       }
-    }
+    })
   );
 
   // Streaming, disk-backed chunk receive (loopback + opt-in daemon). The host
@@ -417,7 +433,7 @@ export async function createAirBridgeServer(
   app.post(
     '/api/daemon/receive-chunk',
     express.raw({ type: 'application/octet-stream', limit: '4mb' }),
-    async (req: Request, res: Response) => {
+    asyncRoute(async (req: Request, res: Response) => {
       if (!daemonCfg.enabled) {
         res.status(403).json({ error: 'Local daemon mode is disabled.' });
         return;
@@ -475,7 +491,7 @@ export async function createAirBridgeServer(
           error: err instanceof Error ? err.message : 'Failed to write chunk.',
         });
       }
-    }
+    })
   );
 
   // Query what a resumable receive has already landed on disk (loopback only).
@@ -488,7 +504,7 @@ export async function createAirBridgeServer(
   // ---------------------------------------------------------------------------
   const githubRepo = process.env.AIRBRIDGE_GITHUB_REPO || 'DigantaDey/AirBridge';
   const DOWNLOADABLE_NAME =
-    /^AirBridge-(macos|linux|windows)-(x64|arm64)(-musl)?(\.exe)?$|^AirBridge\.apk$|^SHA256SUMS\.txt$/;
+    /^AirBridge-(darwin|macos|linux|windows)-(x64|arm64)(-musl)?(\.exe)?$|^AirBridge\.apk$|^SHA256SUMS\.txt$/;
   const artifactDirs = (): string[] => {
     const dirs: string[] = [path.dirname(process.execPath), process.cwd()];
     if (process.env.AIRBRIDGE_ARTIFACTS_DIR) {
@@ -513,7 +529,7 @@ export async function createAirBridgeServer(
     return null;
   };
 
-  app.get('/api/downloads', async (_req: Request, res: Response) => {
+  app.get('/api/downloads', asyncRoute(async (_req: Request, res: Response) => {
     const names = new Set<string>();
     for (const dir of artifactDirs()) {
       try {
@@ -537,9 +553,9 @@ export async function createAirBridgeServer(
       githubRelease: `https://github.com/${githubRepo}/releases/latest`,
       files,
     });
-  });
+  }));
 
-  app.get('/downloads/:name', async (req: Request, res: Response) => {
+  app.get('/downloads/:name', asyncRoute(async (req: Request, res: Response) => {
     const name = req.params.name;
     if (!name || !DOWNLOADABLE_NAME.test(name)) {
       res.status(404).end();
@@ -560,9 +576,9 @@ export async function createAirBridgeServer(
     fs.createReadStream(found.abs)
       .on('error', () => res.destroy())
       .pipe(res);
-  });
+  }));
 
-  app.get('/api/daemon/received', async (req: Request, res: Response) => {
+  app.get('/api/daemon/received', asyncRoute(async (req: Request, res: Response) => {
     if (!daemonCfg.enabled) {
       res.status(403).json({ error: 'Local daemon mode is disabled.' });
       return;
@@ -579,13 +595,13 @@ export async function createAirBridgeServer(
       return;
     }
     res.json({ ok: true, ...summary });
-  });
+  }));
 
   // Finalize a complete .part file: verify, hash, rename, notify (loopback only).
   app.post(
     '/api/daemon/finalize',
     express.json({ limit: '16kb' }),
-    async (req: Request, res: Response) => {
+    asyncRoute(async (req: Request, res: Response) => {
       if (!daemonCfg.enabled) {
         res.status(403).json({ error: 'Local daemon mode is disabled.' });
         return;
@@ -617,14 +633,14 @@ export async function createAirBridgeServer(
           error: err instanceof Error ? err.message : 'Failed to finalize file.',
         });
       }
-    }
+    })
   );
 
   // Drop a partial receive (used when a transfer is cancelled/declined).
   app.post(
     '/api/daemon/discard',
     express.json({ limit: '16kb' }),
-    async (req: Request, res: Response) => {
+    asyncRoute(async (req: Request, res: Response) => {
       if (!daemonCfg.enabled) {
         res.status(403).json({ error: 'Local daemon mode is disabled.' });
         return;
@@ -642,7 +658,7 @@ export async function createAirBridgeServer(
       }
       await receiveStore.discard(transferId, fileIndex);
       res.json({ ok: true });
-    }
+    })
   );
 
   // The local browser tells the daemon which pairing group its headless
@@ -666,7 +682,16 @@ export async function createAirBridgeServer(
         res.status(400).json({ error: 'Invalid pair code.' });
         return;
       }
+      const body = req.body as { autoClipboard?: unknown; receiveClipboard?: unknown };
+      if ((body.autoClipboard !== undefined && typeof body.autoClipboard !== 'boolean') ||
+          (body.receiveClipboard !== undefined && typeof body.receiveClipboard !== 'boolean')) {
+        res.status(400).json({ error: 'Clipboard preferences must be booleans.' }); return;
+      }
       backgroundPeer?.setPairCode(clean);
+      hub.setDefaultPairCode(clean);
+      if (typeof body.autoClipboard === 'boolean' && typeof body.receiveClipboard === 'boolean') {
+        backgroundPeer?.setPreferences(body.autoClipboard, body.receiveClipboard);
+      }
       res.json({ ok: true });
     }
   );
@@ -686,6 +711,11 @@ export async function createAirBridgeServer(
       try {
         const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
         if (url.pathname === '/ws') {
+          if (!isSameOriginRequest(req)) {
+            socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+            socket.destroy();
+            return;
+          }
           hub.wss.handleUpgrade(req, socket, head, (ws) => {
             hub.wss.emit('connection', ws, req);
           });
@@ -771,6 +801,8 @@ export async function createAirBridgeServer(
     }
   }
 
+  app.use(requestErrorHandler);
+
   // When TLS is enabled, a single TCP listener peeks at the first byte of
   // each connection (0x16 starts a TLS ClientHello) and hands the socket to
   // the HTTPS or HTTP server. That keeps one port for both schemes: an old
@@ -846,7 +878,8 @@ export async function createAirBridgeServer(
         writeClipboard: (text) => hub.writeHostClipboard(text),
         storagePath: options.backgroundClipboardStoragePath,
       });
-      hub.setBackgroundClipboardActive(true);
+      hub.setDefaultPairCode(backgroundPeer.getPairCode());
+      hub.setBackgroundClipboardActive(true, (text) => backgroundPeer?.handleHostClipboard(text));
     } catch (err) {
       console.warn('Background clipboard peer could not start:', err instanceof Error ? err.message : err);
     }

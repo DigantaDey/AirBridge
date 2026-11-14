@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -110,23 +111,32 @@ export function sanitizeFilename(rawName: string): string {
 }
 
 /**
- * Pick a collision-free destination path inside `dir` for `safeName`,
- * creating "name (1).ext", "name (2).ext", … variants when needed. The name
- * must already be sanitized.
+ * Atomically claim a collision-free destination without overwriting another
+ * receive. Hard-link publication avoids copying large verified files; volumes
+ * without links use exclusive copying instead. Never exists()+rename().
  */
-export async function resolveFinalPath(dir: string, safeName: string): Promise<string> {
+export async function publishReceivedFile(partPath: string, dir: string, safeName: string): Promise<string> {
   await fs.promises.mkdir(dir, { recursive: true });
   const ext = path.extname(safeName);
   const stem = path.basename(safeName, ext);
-
-  let candidate = safeName;
-  let counter = 1;
-  while (fs.existsSync(path.join(dir, candidate))) {
-    candidate = `${stem} (${counter})${ext}`;
-    counter++;
+  for (let counter = 0; counter < 10_000; counter++) {
+    const candidate = path.join(dir, counter === 0 ? safeName : `${stem} (${counter})${ext}`);
+    try {
+      try { await fs.promises.link(partPath, candidate); }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (!['EXDEV', 'EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'].includes(code ?? '')) throw error;
+        await fs.promises.copyFile(partPath, candidate, fs.constants.COPYFILE_EXCL);
+      }
+      // Publication has succeeded: a failed staging cleanup is not a failed
+      // transfer, and must not prompt a retry that creates a duplicate file.
+      await fs.promises.rm(partPath, { force: true }).catch(() => {});
+      return candidate;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
   }
-
-  return path.join(dir, candidate);
+  throw new Error('Too many received files with this name.');
 }
 
 export async function saveBufferToLocalDownloads(
@@ -143,12 +153,13 @@ export async function saveBufferToLocalDownloads(
 
   const safeName = sanitizeFilename(filename);
 
-  const finalPath = await resolveFinalPath(config.downloadDir, safeName);
+  const tempPath = path.join(config.downloadDir, `.airbridge-${crypto.randomBytes(16).toString('hex')}.part`);
+  let finalPath: string;
+  try {
+    await fs.promises.writeFile(tempPath, data, { flag: 'wx', mode: 0o600 });
+    finalPath = await publishReceivedFile(tempPath, config.downloadDir, safeName);
+  } finally { await fs.promises.rm(tempPath, { force: true }).catch(() => {}); }
   const finalName = path.basename(finalPath);
-  const tempPath = `${finalPath}.airbridge.part`;
-
-  await fs.promises.writeFile(tempPath, data);
-  await fs.promises.rename(tempPath, finalPath);
 
   if (process.platform === 'darwin') {
     if (config.notifyOnReceive) {
