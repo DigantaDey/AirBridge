@@ -23,6 +23,7 @@ import android.webkit.WebChromeClient
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -83,7 +84,7 @@ class MainActivity : Activity() {
         buildContentView()
         registerSystemBackCallback()
         startDiscovery()
-        if (prefs.connectionContinuity && prefs.pairingLink() != null) startConnectionService()
+        if (prefs.pairingLink() != null) startConnectionService(ConnectionService.ACTION_UI_ATTACH)
 
         val fromIntent = pairingLinkFromIntent(intent)
         if (fromIntent != null) {
@@ -107,6 +108,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (::prefs.isInitialized && prefs.pairingLink() != null) ensureNativeConnection()
         if (::webView.isInitialized) {
             webView.onResume()
             webView.resumeTimers()
@@ -116,13 +118,17 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
-        if (::webView.isInitialized) {
-            webView.onResume()
+        if (::webView.isInitialized) webView.onPause()
+        if (::prefs.isInitialized && prefs.pairingLink() != null) {
+            startConnectionService(ConnectionService.ACTION_UI_DETACH)
         }
     }
 
     override fun onDestroy() {
-        if (transferActive) setTransferActive(false)
+        // The native foreground peer, not this Activity, owns active transfers.
+        pendingChooser?.onReceiveValue(null)
+        pendingChooser = null
+        if (::bridge.isInitialized) bridge.close()
         closeScanner()
         relay?.stop()
         relay = null
@@ -293,6 +299,30 @@ class MainActivity : Activity() {
 
     private inner class ShellWebViewClient : WebViewClient() {
         /** Inject as soon as the new document exists, before its scripts run. */
+        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+            val uri = request.url
+            if (uri.scheme != "http" || uri.host != "127.0.0.1" || uri.port != relay?.port || request.method != "GET") return null
+            val path = uri.path.orEmpty()
+            if (path.startsWith("/api/")) return null
+            val asset = when {
+                path == "/" || path == "/index.html" -> "ui/index.html"
+                path.startsWith("/assets/") && !path.contains("..") -> "ui$path"
+                path in setOf("/icon.svg", "/manifest.webmanifest") -> "ui$path"
+                else -> return null
+            }
+            return try {
+                val mime = when { path.endsWith(".js") -> "application/javascript"; path.endsWith(".css") -> "text/css";
+                    path.endsWith(".svg") -> "image/svg+xml"; path.endsWith(".webmanifest") -> "application/manifest+json"; else -> "text/html" }
+                WebResourceResponse(mime, "utf-8", 200, "OK", mapOf(
+                    "Cache-Control" to "no-store", "X-Content-Type-Options" to "nosniff",
+                    "Content-Security-Policy" to "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: content:; connect-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'",
+                ), assets.open(asset))
+            } catch (e: Exception) {
+                Log.e(TAG, "Bundled UI asset unavailable: $asset", e)
+                WebResourceResponse("text/plain", "utf-8", 503, "Unavailable", emptyMap(), "Reinstall AirBridge: bundled UI is missing.".byteInputStream())
+            }
+        }
+
         override fun onPageCommitVisible(view: WebView, url: String) {
             super.onPageCommitVisible(view, url)
             injectNativeShellShim(view)
@@ -379,7 +409,15 @@ class MainActivity : Activity() {
         data.clipData?.let { clip ->
             for (index in 0 until clip.itemCount) uris.add(clip.getItemAt(index).uri)
         } ?: data.data?.let { uris.add(it) }
-        callback.onReceiveValue(if (uris.isEmpty()) null else uris.toTypedArray())
+        Thread {
+            try {
+                for (uri in uris) runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                NativeFiles.remember(applicationContext, uris)
+                runOnUiThread { callback.onReceiveValue(if (uris.isEmpty()) null else uris.toTypedArray()) }
+            } catch (e: Exception) {
+                runOnUiThread { callback.onReceiveValue(null); toast("Could not open the selected files") }
+            }
+        }.apply { isDaemon = true; start() }
     }
 
     override fun onRequestPermissionsResult(
@@ -403,10 +441,11 @@ class MainActivity : Activity() {
      *  (GitHub release links, the CA download, mailto:) belongs in a real app. */
     private fun isShellPage(uri: Uri): Boolean {
         val scheme = uri.scheme?.lowercase() ?: return false
-        if (scheme == "about" || scheme == "data" || scheme == "blob") return true
+        if (scheme == "about") return uri.toString() == "about:blank"
         if (scheme != "http" && scheme != "https") return false
         val host = uri.host?.lowercase() ?: return false
-        return host == "127.0.0.1" || host == "localhost" || host == CONNECT_HOST
+        return (scheme == "http" && host == "127.0.0.1" && uri.port == relay?.port) ||
+            (scheme == "https" && host == CONNECT_HOST)
     }
 
     /** Best-effort file name for a download link. */
@@ -438,9 +477,8 @@ class MainActivity : Activity() {
     }
 
     /**
-     * Points the WebView at the paired computer. The relay hop is what makes the
-     * page a secure context; the pair code is replayed so the phone rejoins the
-     * desktop's pairing group on the first load.
+     * Opens the APK-bundled UI on a loopback origin. Only desktop API calls
+     * use the relay; native transfers never depend on this WebView.
      */
     private fun openApp(link: PairingLink) {
         val port = startRelay(link)
@@ -449,6 +487,7 @@ class MainActivity : Activity() {
             return
         }
         connectedLink = link
+        ensureNativeConnection()
         // Only a code that was just scanned is replayed; afterwards the web app
         // remembers its own pairing in localStorage.
         val code = prefs.consumePendingPairCode()
@@ -460,9 +499,23 @@ class MainActivity : Activity() {
         relay?.stop()
         relay = null
         return try {
-            val created = LoopbackRelay(link.host, link.port)
-            val port = created.start(prefs.relayPort)
+            // Old APKs registered a service worker for their desktop-served
+            // UI. Move to a fresh origin once so that stale worker cannot serve
+            // an old JavaScript transfer engine in front of the native bridge.
+            val local = getSharedPreferences("airbridge", MODE_PRIVATE)
+            val migration = !local.getBoolean("nativeUiOrigin", false)
+            val oldPort = prefs.relayPort
+            var created = LoopbackRelay(link.host.removePrefix("[").removeSuffix("]"), link.port, link.secure, prefs.tlsTrust(link))
+            var port = created.start(if (migration) 0 else oldPort)
+            var attempts = 0
+            while (migration && port == oldPort && attempts++ < 8) {
+                created.stop()
+                created = LoopbackRelay(link.host.removePrefix("[").removeSuffix("]"), link.port, link.secure, prefs.tlsTrust(link))
+                port = created.start(0)
+            }
+            if (migration && port == oldPort) { created.stop(); throw java.io.IOException("No fresh UI origin available") }
             prefs.relayPort = port
+            local.edit().putBoolean("nativeUiOrigin", true).apply()
             relay = created
             port
         } catch (e: Exception) {
@@ -726,11 +779,7 @@ class MainActivity : Activity() {
                 return false
             }
             startConnectionService()
-        } else if (transferActive) {
-            startConnectionService(ConnectionService.ACTION_TRANSFER_START)
-        } else {
-            stopService(Intent(this, ConnectionService::class.java).setAction(ConnectionService.ACTION_STOP))
-        }
+        } else { startConnectionService(ConnectionService.ACTION_UI_ATTACH) }
         return true
     }
 
@@ -752,6 +801,23 @@ class MainActivity : Activity() {
         return true
     }
 
+    fun ensureNativeConnection(): Boolean {
+        runOnUiThread {
+            if (prefs.pairingLink() != null) {
+                startConnectionService(ConnectionService.ACTION_UI_ATTACH)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                    val state = getSharedPreferences("airbridge", MODE_PRIVATE)
+                    if (!state.getBoolean("notificationPermissionAsked", false)) {
+                        state.edit().putBoolean("notificationPermissionAsked", true).apply()
+                        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFICATIONS)
+                    }
+                }
+            }
+        }
+        return prefs.pairingLink() != null
+    }
+
     private fun stopConnectionService() {
         val intent = Intent(this, ConnectionService::class.java).setAction(ConnectionService.ACTION_STOP)
         try {
@@ -770,7 +836,7 @@ class MainActivity : Activity() {
     private fun startConnectionService(action: String = ConnectionService.ACTION_START): Boolean {
         val intent = Intent(this, ConnectionService::class.java).setAction(action)
         return try {
-            if (action == ConnectionService.ACTION_TRANSFER_STOP) {
+            if (action == ConnectionService.ACTION_TRANSFER_STOP || action == ConnectionService.ACTION_UI_DETACH) {
                 // The foreground service is already running; use a regular
                 // start so Android does not treat this background stop/update
                 // as a fresh foreground-service launch.
@@ -792,7 +858,7 @@ class MainActivity : Activity() {
     /** Validates a typed/scanned address; returns an error message or null. */
     fun connectToAddress(address: String): String? {
         val link = PairingLink.parse(address)
-            ?: return "Enter your computer's address, e.g. 192.168.1.5:3411"
+            ?: return "Enter your computer's address, e.g. 192.168.1.5:3000"
         runOnUiThread { applyPairing(link) }
         return null
     }
@@ -858,6 +924,7 @@ class MainActivity : Activity() {
         private const val CONNECT_ORIGIN = "https://$CONNECT_HOST/"
         private const val REQ_PICK = 41
         private const val REQ_CAMERA = 42
+        private const val REQ_NOTIFICATIONS = 43
         private const val BACK_CALLBACK_TIMEOUT_MS = 250L
 
         @Volatile

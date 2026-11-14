@@ -4,9 +4,8 @@ package com.airbridge.engine
  * A pairing invitation: the desktop address a phone should talk to, plus the
  * optional six-character pair code baked into the QR the desktop prints.
  *
- * The Android app is a shell around the desktop's web UI, so everything it
- * needs to know to open the UI is "which computer, over which scheme, port and
- * pair code". QRs are produced as `https://<host>:<port>/?pair=ABC-DEF`
+ * The Android service connects directly to this endpoint; the bundled UI only
+ * observes it. Invitations specify the computer, transport, port and pair code. QRs are produced as `https://<host>:<port>/?pair=ABC-DEF`
  * (see packaging/desktop-entry.ts) but the parser also accepts the
  * `ws://host:port/ws` form older builds printed, bare `host:port` typed by
  * hand, and an `airbridge://` link.
@@ -23,8 +22,9 @@ data class PairingLink(
 ) {
     val secure: Boolean get() = scheme == "https"
 
-    /** `host:port`, omitting the default port so URLs look hand-typed. */
-    val authority: String get() = if (port == DEFAULT_PORT) host else "$host:$port"
+    // AirBridge's 3000 (or a custom port) is NOT HTTP's 80/HTTPS's 443. Dropping it
+    // silently sent the native WebSocket to the wrong port after QR pairing.
+    val authority: String get() = "$host:$port"
 
     /** Base URL of the desktop's web UI, e.g. `https://192.168.1.5:3411`. */
     val baseUrl: String get() = "$scheme://$authority"
@@ -38,7 +38,7 @@ data class PairingLink(
 
     companion object {
         /** Port the desktop server binds unless told otherwise. */
-        const val DEFAULT_PORT = 3411
+        const val DEFAULT_PORT = 3000
 
         /** Parses a scanned QR payload or a manually typed address. Null when unusable. */
         fun parse(raw: String): PairingLink? {
@@ -61,13 +61,13 @@ data class PairingLink(
                     "https", "wss" -> "https"
                     "http", "ws" -> "http"
                     // Not printed today, but a scheme makes the QR unambiguous.
-                    "airbridge" -> "http"
+                    "airbridge" -> "https"
                     else -> return null
                 }
                 withoutScheme = text.substring(schemeEnd + 3)
             } else {
-                // A bare "host:port" keeps whatever the user typed; the shell
-                // tries TLS first and falls back to plaintext on its own.
+                // Bare addresses use TLS. Plain HTTP must be requested
+                // explicitly; a TLS failure must never downgrade a pairing.
                 scheme = "https"
                 withoutScheme = text.removePrefix("//")
             }

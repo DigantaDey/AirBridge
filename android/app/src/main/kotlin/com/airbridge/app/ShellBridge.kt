@@ -44,6 +44,22 @@ class ShellBridge(private val activity: MainActivity) {
     private val saves = HashMap<Int, SaveSession>()
     private var nextHandle = 1
 
+    @JavascriptInterface
+    fun nativeEngineVersion(): Int = 1
+    @JavascriptInterface
+    fun engineAttach(): Boolean = activity.ensureNativeConnection()
+    @JavascriptInterface
+    fun engineSnapshot(version: Long, clipboardVersion: Long): String = ConnectionService.nativeSnapshot(version, clipboardVersion)
+    @JavascriptInterface
+    fun engineCommand(raw: String): String = ConnectionService.nativeCommand(raw)
+    @JavascriptInterface
+    fun claimPickedFile(name: String, size: Long): String = NativeFiles.claim(name, size)
+
+    fun close() {
+        val handles = synchronized(lock) { saves.keys.toList() }
+        handles.forEach { abortSave(it) }
+    }
+
     // ---------------------------------------------------------------- clipboard
 
     @JavascriptInterface
@@ -66,7 +82,8 @@ class ShellBridge(private val activity: MainActivity) {
         return try {
             val manager = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clip = manager.primaryClip ?: return ""
-            if (clip.itemCount == 0) return ""
+            if (clip.itemCount == 0 || !clip.description.hasMimeType("text/*")) return ""
+            if (clip.description.extras?.getBoolean("android.content.extra.IS_SENSITIVE", false) == true) return ""
             clip.getItemAt(0)?.coerceToText(activity)?.toString().orEmpty()
         } catch (e: Exception) {
             Log.w(TAG, "clipboard read failed: ${e.message}")
@@ -112,11 +129,11 @@ class ShellBridge(private val activity: MainActivity) {
     @JavascriptInterface
     fun appendSave(handle: Int, base64Chunk: String): Boolean {
         val session = synchronized(lock) { saves[handle] } ?: return false
+        if (base64Chunk.length > 2 * 1024 * 1024) return false
         return try {
             val bytes = Base64.decode(base64Chunk, Base64.DEFAULT)
             synchronized(session) {
                 session.stream.write(bytes)
-                session.stream.flush()
             }
             true
         } catch (e: Exception) {
@@ -147,6 +164,7 @@ class ShellBridge(private val activity: MainActivity) {
             location
         } catch (e: Exception) {
             Log.w(TAG, "could not finish ${session.name}: ${e.message}")
+            cleanupSave(session)
             ""
         }
     }
@@ -154,16 +172,16 @@ class ShellBridge(private val activity: MainActivity) {
     @JavascriptInterface
     fun abortSave(handle: Int) {
         val session = synchronized(lock) { saves.remove(handle) } ?: return
-        try {
-            session.stream.close()
-        } catch (_: Exception) {
-        }
-        try {
+        cleanupSave(session)
+    }
+
+    private fun cleanupSave(session: SaveSession) {
+        runCatching { session.stream.close() }
+        runCatching {
             when {
                 session.pendingUri != null -> activity.contentResolver.delete(session.pendingUri, null, null)
                 session.file != null -> session.file.delete()
             }
-        } catch (_: Exception) {
         }
     }
 

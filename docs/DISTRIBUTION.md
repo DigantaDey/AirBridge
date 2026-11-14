@@ -57,9 +57,14 @@ lieu of paid code-signing certificates.
   over the previous version because CI signs with the **same committed
   sideload key** (`android/ci.keystore`, override via
   `AIRBRIDGE_KEYSTORE_*` env vars for your own key).
-* Play Store (optional, one-time ~$25 accepted by the project owner): upload
-  the same APK as an AAB later; nothing in the app conflicts with Play policy
-  (LAN-only transfers, no sensitive permissions).
+* Play Store distribution is a separate packaging/policy task: produce an AAB,
+  use a private production signing key, and review foreground-service,
+  Accessibility, camera and clipboard disclosures. This repository does not
+  claim Play policy approval.
+* **The committed sideload key is public**, so its signature does not prove an
+  APK came from the maintainer. Download only from the project's release page
+  and compare the release checksum. Use your own private key for controlled
+  distribution (changing keys breaks in-place upgrades).
 
 ## In-app Download center
 
@@ -106,7 +111,7 @@ single-file binaries print the same thing from a terminal:
 | macOS | `install.sh` → `~/.local/bin/AirBridge` + `~/Applications/AirBridge.app` (browser launcher) | `--autostart` → `~/Library/LaunchAgents/com.airbridge.daemon.plist` + `launchctl bootstrap` |
 | Linux | `install.sh` → `~/.local/bin/AirBridge` + `~/Applications/AirBridge.app` (browser launcher) | `--autostart` → `~/.config/autostart/airbridge.desktop` |
 | Windows | `install.ps1` → `%LOCALAPPDATA%\AirBridge` | `-Autostart` → `HKCU\…\Run` |
-| Android | sideload APK | none (transfers run while the app is in the foreground, like a browser tab) |
+| Android | sideload APK with bundled UI + native engine | foreground connection service after pairing; active transfers do not depend on the screen; no boot auto-start |
 
 Nothing writes outside the user's home/profile; no `sudo`, no UAC, no admin.
 
@@ -125,8 +130,9 @@ A release **must** exist: `install.sh` and `install.ps1` resolve
    * **linux-windows** job: `build-desktop.mjs --only linux` and
      `--only windows --skip-client` (bun cross-compiles from Linux);
    * **darwin** job: `--only darwin` then `codesign --force -s -`;
-   * **android** job: `gradle :app:assembleRelease` (versionCode = run number)
-     plus the TypeScript-reference vector tests (`:engine:vectorTest`);
+   * **android** job: Node 22 + `npm ci`, then `gradle :engine:check :app:assembleRelease`
+     (versionCode = run number). `preBuild` embeds the UI in the APK; engine
+     checks cover vectors, pairing, disk integrity and transport regressions;
    * **publish** job: downloads all artifacts, writes `SHA256SUMS.txt`,
      `gh release create` with every binary + APK.
 3. Users run `install.sh` / `install.ps1` or grab files from the release page.
@@ -148,7 +154,18 @@ release, is why `curl … | bash` failed on a Mac.
 
 ```bash
 npm ci
-npm run build:desktop            # all 8 desktop targets
-bash android/scripts/verify.sh   # engine + vectors + app typecheck (no Gradle)
-gradle -p android assembleRelease  # APK, same as CI
+npm run build:desktop              # all 8 desktop targets (network needed)
+bash android/scripts/verify.sh     # optional SDK-jar preflight, NOT an APK build
+gradle -p android :engine:check :app:assembleDebug
+npx tsx scripts/test-native-interop.ts  # after engine:check writes its classpath
+gradle -p android :engine:check :app:assembleRelease  # signed APK
 ```
+
+
+Android builds require JDK 17, Gradle 8.14.3, platform SDK 35, build-tools
+35.0.0 and the npm dependencies. Generated Vite assets live under
+`android/app/build/generated/clientAssets/ui` and are not committed. A missing
+bundle fails visibly instead of silently loading old desktop JavaScript.
+
+For Android OS restrictions, Downloads behavior and device-only checks, see
+[Android validation](ANDROID_VALIDATION.md) and the README's background section.

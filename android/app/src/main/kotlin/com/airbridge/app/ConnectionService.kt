@@ -3,6 +3,7 @@ package com.airbridge.app
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.ClipboardManager
 import android.content.Context
@@ -14,14 +15,33 @@ import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import org.json.JSONObject
+import com.airbridge.engine.ConnectionState
+import com.airbridge.engine.TransferView
+import com.airbridge.engine.TransferStatus
+import com.airbridge.engine.TransferDirection
+import java.util.concurrent.Executors
 import java.util.Locale
 import kotlin.math.floor
 import kotlin.math.log
 import kotlin.math.pow
 
-/** Background clipboard/connection anchor and short-lived transfer wake-lock owner. */
+/** Owns the native encrypted peer independently of any Activity or WebView. */
 class ConnectionService : Service() {
     private var transferActive = false
+    private var uiAttached = false
+    private var pendingOffers = false
+    private var shareUntil = 0L
+    private var nativeState = ConnectionState.CONNECTING
+    private val offerIds = HashSet<String>()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val actions = Executors.newSingleThreadExecutor()
+    @Volatile private var engineHost: NativeEngineHost? = null
+    private var engineTarget = ""
+    private val lockRefresh = object : Runnable {
+        override fun run() {
+            if (transferActive) updateTransferWakeLock()
+        }
+    }
     private var transferWakeLock: PowerManager.WakeLock? = null
     private var transferSpeed: TransferSpeedSnapshot? = null
     private var clipboardListener: ClipboardManager.OnPrimaryClipChangedListener? = null
@@ -53,7 +73,7 @@ class ConnectionService : Service() {
                 "AirBridge connection and transfers",
                 NotificationManager.IMPORTANCE_LOW,
             ).apply { description = "Keeps AirBridge connected and shows live transfer speed" }
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+            getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }
     }
 
@@ -67,26 +87,15 @@ class ConnectionService : Service() {
                 stopSelf()
                 return START_NOT_STICKY
             }
-            ACTION_TRANSFER_START -> {
-                transferActive = true
-                transferSpeed = null
+            ACTION_SHARE_TEXT -> {
+                shareUntil = android.os.SystemClock.elapsedRealtime() + 30_000
+                mainHandler.postDelayed({ if (shouldStopWhenIdle()) stopSelf() }, 30_100)
             }
-            ACTION_TRANSFER_STOP -> {
-                transferActive = false
-                transferSpeed = null
-            }
-            ACTION_TRANSFER_PROGRESS ->
-                applyTransferSpeed(intent?.getStringExtra(EXTRA_TRANSFER_PROGRESS).orEmpty())
-            null -> {
-                // A sticky restart is only useful for the explicitly opted-in
-                // connection service; transfers themselves resume from the
-                // receiver's durable chunks after the app reconnects.
-                if (!Prefs(this).connectionContinuity) {
-                    releaseTransferWakeLock()
-                    stopSelf()
-                    return START_NOT_STICKY
-                }
-            }
+            ACTION_UI_ATTACH -> uiAttached = true
+            ACTION_UI_DETACH -> uiAttached = false
+            ACTION_TRANSFER_START -> if (engineHost == null) { transferActive = true; transferSpeed = null }
+            ACTION_TRANSFER_STOP -> if (engineHost == null) { transferActive = false; transferSpeed = null }
+            ACTION_TRANSFER_PROGRESS -> if (engineHost == null) applyTransferSpeed(intent.getStringExtra(EXTRA_TRANSFER_PROGRESS).orEmpty())
         }
 
         updateTransferWakeLock()
@@ -101,12 +110,22 @@ class ConnectionService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
-        if (!transferActive && !Prefs(this).connectionContinuity) {
+        ensureEngine()
+        when (intent?.action) {
+            ACTION_ACCEPT, ACTION_DECLINE -> {
+                val id = intent.getStringExtra(EXTRA_TRANSFER_ID).orEmpty()
+                val method = if (intent.action == ACTION_ACCEPT) "accept" else "decline"
+                getSystemService(NotificationManager::class.java)?.cancel(offerNotificationId(id))
+                actions.execute { engineHost?.command(JSONObject().put("method", method).put("transferId", id).toString()) }
+            }
+            ACTION_SHARE_TEXT -> engineHost?.publishLocalClipboard(intent.getStringExtra(EXTRA_CLIPBOARD_TEXT).orEmpty(), explicit = true)
+        }
+        if (shouldStopWhenIdle()) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
-        return START_STICKY
+        return if (Prefs(this).connectionContinuity) START_STICKY else START_NOT_STICKY
     }
 
     /**
@@ -117,8 +136,9 @@ class ConnectionService : Service() {
     private fun publishSystemClipboard(clipboard: ClipboardManager) {
         val text = try {
             val clip = clipboard.primaryClip
-            if (clip == null || clip.itemCount == 0) return
-            clip.getItemAt(0)?.coerceToText(this)?.toString()?.trim().orEmpty()
+            if (clip == null || clip.itemCount == 0 || !clip.description.hasMimeType("text/*")) return
+            if (clip.description.extras?.getBoolean("android.content.extra.IS_SENSITIVE", false) == true) return
+            clip.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
         } catch (e: SecurityException) {
             return
         } catch (e: Exception) {
@@ -132,7 +152,7 @@ class ConnectionService : Service() {
     private fun applyTransferSpeed(payloadJson: String) {
         transferSpeed = parseTransferSpeed(payloadJson)
         getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification())
+            ?.notify(NOTIFICATION_ID, buildNotification())
     }
 
     private fun parseTransferSpeed(payloadJson: String): TransferSpeedSnapshot? {
@@ -180,7 +200,8 @@ class ConnectionService : Service() {
             }
         } ?: 0
         val title = when {
-            !transferActive -> "AirBridge is connected"
+            !transferActive && nativeState == ConnectionState.CONNECTED -> "AirBridge is connected"
+            !transferActive -> "AirBridge is reconnecting"
             speed == null -> "AirBridge transfer in progress"
             speed.uploading -> "AirBridge upload in progress"
             else -> "AirBridge download in progress"
@@ -191,16 +212,17 @@ class ConnectionService : Service() {
             ClipboardAccessibilityService.isEnabled(this)
         val clipboardLine = when {
             accessibilityEnabled ->
-                "Background clipboard is on with your Accessibility Service opt-in."
+                "Native connection active. Android may block clipboard reads; use Share → AirBridge when needed."
             accessibilityOptIn ->
                 "Accessibility opt-in is on. Enable the AirBridge service in Android Settings."
             else ->
-                "Background clipboard is on. Hidden clipboard reads may pause; opt in to Accessibility assistance in Settings."
+                "Native connection active. Incoming clipboard works here; Android may restrict copying from other apps."
         }
         val text = when {
+            !transferActive && nativeState != ConnectionState.CONNECTED -> "Waiting for your paired computer on the same network."
             !transferActive -> clipboardLine
             speed == null ->
-                "Keeping the transfer active while the screen is off. Keep AirBridge open until it completes."
+                "Native transfer continues when you switch apps or turn the screen off."
             else -> {
                 val label = if (speed.uploading) "Upload" else "Download"
                 val eta = speed.etaSeconds?.let { " · ${it}s left" }.orEmpty()
@@ -209,6 +231,8 @@ class ConnectionService : Service() {
         }
 
         builder
+            .setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
             .setContentTitle(title)
             .setContentText(text)
@@ -228,12 +252,12 @@ class ConnectionService : Service() {
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
     private fun updateTransferWakeLock() {
-        val continuity = Prefs(this).connectionContinuity
-        val shouldHold = transferActive || continuity
+        val shouldHold = transferActive
         if (!shouldHold) {
             releaseTransferWakeLock()
             return
         }
+        if (transferWakeLock?.isHeld == true) transferWakeLock?.acquire(10 * 60_000L)
         if (transferWakeLock?.isHeld != true) {
             val powerManager = getSystemService(POWER_SERVICE) as PowerManager
             transferWakeLock = powerManager.newWakeLock(
@@ -241,10 +265,10 @@ class ConnectionService : Service() {
                 "$packageName:AirBridgeTransfer",
             ).apply {
                 setReferenceCounted(false)
-                acquire()
+                acquire(10 * 60_000L)
             }
         }
-        if (wifiLock?.isHeld != true) {
+        if (wifiLock?.isHeld != true) try {
             val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
             @Suppress("DEPRECATION")
             wifiLock = wifiManager.createWifiLock(
@@ -254,21 +278,36 @@ class ConnectionService : Service() {
                 setReferenceCounted(false)
                 acquire()
             }
+        } catch (e: SecurityException) {
+            Log.w("AirBridgePower", "Wi-Fi performance lock unavailable: ${e.message}")
+            wifiLock = null
         }
+        mainHandler.removeCallbacks(lockRefresh)
+        mainHandler.postDelayed(lockRefresh, 60_000)
     }
 
     private fun releaseTransferWakeLock() {
+        mainHandler.removeCallbacks(lockRefresh)
         val cpuLock = transferWakeLock
-        if (cpuLock?.isHeld == true) cpuLock.release()
+        if (cpuLock?.isHeld == true) runCatching { cpuLock.release() }
         transferWakeLock = null
 
         val lock = wifiLock
-        if (lock?.isHeld == true) lock.release()
+        if (lock?.isHeld == true) runCatching { lock.release() }
         wifiLock = null
     }
 
     override fun onDestroy() {
         if (instance === this) instance = null
+        val host = engineHost
+        engineHost = null
+        // Shutdown is potentially waiting on disk IO. Never block the main
+        // thread or retain an Activity while descriptors and sockets close.
+        actions.execute { host?.close() }
+        actions.shutdown()
+        mainHandler.removeCallbacksAndMessages(null)
+        for (id in offerIds) getSystemService(NotificationManager::class.java)?.cancel(offerNotificationId(id))
+        offerIds.clear()
         clipboardListener?.let { listener ->
             try {
                 (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
@@ -284,7 +323,78 @@ class ConnectionService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun shouldStopWhenIdle(): Boolean = !transferActive && !pendingOffers && !uiAttached &&
+        !Prefs(this).connectionContinuity && android.os.SystemClock.elapsedRealtime() >= shareUntil
+
+    private fun ensureEngine() {
+        val target = Prefs(this).target
+        if (target.isEmpty()) return
+        if (engineHost != null && engineTarget == target) return
+        val old = engineHost
+        if (old != null) actions.execute { old.close() }
+        engineTarget = target
+        engineHost = NativeEngineHost(applicationContext, { transfers ->
+            mainHandler.post {
+                if (instance !== this || engineTarget != target) return@post
+                transferActive = transfers.any { it.status == TransferStatus.TRANSFERRING || it.status == TransferStatus.CONNECTING }
+                pendingOffers = transfers.any { it.status == TransferStatus.PENDING_ACCEPT }
+                val active = transfers.firstOrNull { it.status == TransferStatus.TRANSFERRING }
+                transferSpeed = active?.let { TransferSpeedSnapshot(it.direction == TransferDirection.OUTGOING,
+                    it.speedBytesPerSec, it.transferredBytes, it.totalBytes, it.etaSeconds) }
+                for (view in transfers) if (view.status != TransferStatus.PENDING_ACCEPT && offerIds.remove(view.transferId)) {
+                    getSystemService(NotificationManager::class.java)?.cancel(offerNotificationId(view.transferId))
+                }
+                updateTransferWakeLock()
+                getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, buildNotification())
+                if (shouldStopWhenIdle()) stopSelf()
+            }
+        }, { offer ->
+            mainHandler.post {
+                if (instance !== this || engineTarget != target) return@post
+                pendingOffers = true
+                showIncomingOffer(offer)
+            }
+        }, { state ->
+            mainHandler.post {
+                if (instance === this && engineTarget == target) {
+                    nativeState = state
+                    getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, buildNotification())
+                }
+            }
+        })
+    }
+
+    private fun showIncomingOffer(offer: TransferView) {
+        offerIds.add(offer.transferId)
+        fun decision(action: String): PendingIntent = PendingIntent.getService(
+            this, offer.transferId.hashCode(), Intent(this, ConnectionService::class.java)
+                .setAction(action).putExtra(EXTRA_TRANSFER_ID, offer.transferId),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(this, CHANNEL_ID)
+            else @Suppress("DEPRECATION") Notification.Builder(this)
+        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val notification = builder.setSmallIcon(android.R.drawable.stat_sys_download)
+            .setContentTitle("Files from ${offer.peerName}")
+            .setContentText("${offer.files.size} file(s) · ${com.airbridge.engine.formatBytes(offer.totalBytes)} · Verify ${offer.sasCode}")
+            .setContentIntent(open).setAutoCancel(true)
+            .addAction(Notification.Action.Builder(null, "Accept", decision(ACTION_ACCEPT)).build())
+            .addAction(Notification.Action.Builder(null, "Decline", decision(ACTION_DECLINE)).build())
+            .build()
+        getSystemService(NotificationManager::class.java)?.notify(offerNotificationId(offer.transferId), notification)
+    }
+
+    private fun offerNotificationId(id: String): Int = id.hashCode() or 0x40000000
+
     companion object {
+        const val ACTION_UI_ATTACH = "com.airbridge.app.connection.UI_ATTACH"
+        const val ACTION_UI_DETACH = "com.airbridge.app.connection.UI_DETACH"
+        const val ACTION_ACCEPT = "com.airbridge.app.connection.ACCEPT"
+        const val ACTION_DECLINE = "com.airbridge.app.connection.DECLINE"
+        const val ACTION_SHARE_TEXT = "com.airbridge.app.connection.SHARE_TEXT"
+        const val EXTRA_TRANSFER_ID = "transferId"
+        const val EXTRA_CLIPBOARD_TEXT = "clipboardText"
         const val ACTION_START = "com.airbridge.app.connection.START"
         const val ACTION_STOP = "com.airbridge.app.connection.STOP"
         const val ACTION_TRANSFER_START = "com.airbridge.app.connection.TRANSFER_START"
@@ -296,6 +406,11 @@ class ConnectionService : Service() {
 
         @Volatile
         private var instance: ConnectionService? = null
+
+        fun nativeSnapshot(version: Long, clipboardVersion: Long): String =
+            instance?.engineHost?.snapshotSince(version, clipboardVersion) ?: "{\"ready\":false}"
+        fun nativeCommand(raw: String): String = instance?.engineHost?.command(raw)
+            ?: "{\"ok\":false,\"error\":\"Native connection is starting\"}"
 
         private const val OWN_WRITE_ECHO_WINDOW_MS = 1_500L
         private const val DUPLICATE_EVENT_WINDOW_MS = 400L
@@ -344,7 +459,8 @@ class ConnectionService : Service() {
             }
             lastPublishedClipboardText = trimmed
             lastPublishedClipboardAt = now
-            MainActivity.publishLocalClipboard(trimmed)
+            val host = instance?.engineHost ?: return false
+            host.publishLocalClipboard(text)
             return true
         }
 

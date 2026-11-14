@@ -48,15 +48,53 @@ ECDH session. Summary of the audit (and fixes) behind the current code:
 8. `/api/health` leaked the host's local download path to the LAN; zip
    entries could contain `../` path segments. Both fixed.
 
+## Native Android and reliability hardening (2.2.0)
+
+- File GCM IVs now use **all 96 bits of fresh cryptographic randomness**.
+  The previous layout stored repeating file/chunk coordinates in 64 bits and
+  left only 32 random bits for the same position under a reused peer key.
+  Wire framing is unchanged; old recordings/vectors can still decrypt.
+- Android no longer loads application scripts from the desktop. Its bundled
+  UI has a restrictive CSP and only exchanges metadata/capability tokens with
+  the foreground service. URI file bytes do not cross the JavaScript bridge.
+- Native TLS validates chains and hostnames against the desktop CA (or
+  self-signed leaf) **pinned on first use** per host/port. Subsequent identity
+  changes fail closed; leaf renewal under the same CA is supported. Unpairing
+  explicitly removes that pin. TLS errors never trigger plaintext fallback;
+  plaintext transport requires an explicit `http://` invitation.
+- Resume consent binds the transfer ID, original peer public key and exact
+  manifest. Missing/truncated `.part` files invalidate the resume ledger.
+  Private staging is SHA-256 verified before Downloads publication, and
+  senders wait for verified receiver completion. Publication/hashing does not
+  hold the engine monitor or stop its network reader.
+- Queues, message/fragment sizes, histories and concurrent native transfers
+  are bounded. Invalid integer/chunk arithmetic is rejected before allocation.
+  Relay overload disconnects explicitly instead of silently losing chunks;
+  sockets without hello and repeated registrations cannot evade limits.
+- Clipboard auto-send targets paired peers only. Native automatic capture
+  excludes clips marked sensitive and never scrapes window content. Explicit
+  Share/selected-text actions work when the OS denies hidden clipboard reads.
+
 ## Known residual risks
 
 - Nearby (unpaired) devices can still *offer* transfers/beams and see
-  device names/keys; offers require receiver consent, but spam/DoS at the
-  signalling layer is only rate-limited, not eliminated. Use
-  paired-only/hidden visibility on untrusted networks.
-- Identity keys are ephemeral and SAS comparison is optional in the UI
-  flow; a first-contact MITM on a hostile network is detectable via the
-  SAS/fingerprint but not prevented. Verify the code before trusting a
-  device for auto-accept.
-- The local CA bootstrap download is plain HTTP by necessity; always
-  compare its SHA-256 fingerprint with the host terminal output.
+  device names/keys; file offers require consent, while clipboard receive is
+  an independent user setting. Use paired-only/hidden visibility on untrusted
+  networks. Signaling abuse/DoS is bounded, not eliminated.
+- ECDH identity keys are ephemeral and SAS comparison is optional in the UI.
+  **First-use TLS pinning is not out-of-band authentication.** A first-contact
+  MITM can establish its own pin, and explicit HTTP exposes metadata/pair
+  codes. Compare the SAS before trusting a device or accepting content;
+  application payload encryption does not authenticate first discovery.
+- The browser's local CA bootstrap download is plain HTTP; compare its
+  SHA-256 fingerprint with the host terminal output. Native pinning is
+  per host/port, so connecting to a different address is a new first use.
+- Local processes/apps may reach loopback services; loopback is a host trust
+  boundary, not an OS-level access-control mechanism. Only grant the native
+  bridge to bundled local documents and do not run untrusted host software.
+- The committed Android sideload signing key is public. It preserves update
+  compatibility, not publisher authenticity. Obtain APKs/checksums from this
+  repository's official releases, or distribute with your own private key.
+- Android's background clipboard privacy rules, force-stop and OEM battery
+  management cannot be bypassed by Accessibility or a foreground service.
+  Process-death resume and automatic image capture are not guaranteed.

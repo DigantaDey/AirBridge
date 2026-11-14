@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   createAirBridgeServer,
   type AirBridgeServerInstance,
@@ -533,5 +533,48 @@ describe('disk-backed streaming receive (end-to-end)', () => {
     } finally {
       pair.stop();
     }
+  });
+});
+
+
+describe('disk receiver resource and recovery regressions', () => {
+  it('handles short filesystem writes and releases completed promise chains', async () => {
+    const downloadDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'airbridge-short-write-'));
+    const store = new PartialReceiveStore({ enabled: true, downloadDir, autoSaveToDownloads: true, notifyOnReceive: false, revealInFinder: false });
+    const meta = { transferId: 'dededededededede', fileIndex: 0, name: 'short.bin', size: 128, chunkSize: 64, totalChunks: 2 };
+    const bytes = Uint8Array.from({ length: 128 }, (_, i) => i);
+    try {
+      await store.writeChunk(meta, 0, bytes.subarray(0, 64));
+      const state = await store.ensure(meta);
+      const fd = state.fd!;
+      const write = fd.write.bind(fd);
+      const spy = vi.spyOn(fd, 'write').mockImplementation(((data: Uint8Array, offset: number, length: number, position: number) =>
+        write(data, offset, Math.min(length, 7), position)) as typeof fd.write);
+      await store.writeChunk(meta, 1, bytes.subarray(64));
+      expect(spy.mock.calls.length).toBeGreaterThan(1);
+      const result = await store.finalize(meta.transferId, 0);
+      expect([...await fs.promises.readFile(result.savedPath)]).toEqual([...bytes]);
+      await Promise.resolve();
+      expect((store as unknown as { chains: Map<string, unknown> }).chains.size).toBe(0);
+      spy.mockRestore();
+    } finally { await store.dispose(); await fs.promises.rm(downloadDir, { recursive: true, force: true }); }
+  });
+
+  it('does not resume nonexistent part bytes and rejects oversized manifests before allocation', async () => {
+    const downloadDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'airbridge-orphan-'));
+    const config = { enabled: true, downloadDir, autoSaveToDownloads: true, notifyOnReceive: false, revealInFinder: false };
+    const store = new PartialReceiveStore(config);
+    const meta = { transferId: 'ababcdcdababcdcd', fileIndex: 0, name: 'orphan.bin', size: 64, chunkSize: 64, totalChunks: 1 };
+    try {
+      await expect(store.ensure({ ...meta, totalChunks: 1_000_000_000 })).rejects.toThrow('Invalid receive manifest');
+      await store.writeChunk(meta, 0, new Uint8Array(64));
+      await store.dispose();
+      await fs.promises.unlink(path.join(downloadDir, '.airbridge-partial', `${meta.transferId}-0.part`));
+      const recovered = new PartialReceiveStore(config);
+      try {
+        expect(await recovered.listReceived(meta.transferId, 0)).toBeNull();
+        expect((await recovered.ensure(meta)).receivedCount).toBe(0);
+      } finally { await recovered.dispose(); }
+    } finally { await store.dispose(); await fs.promises.rm(downloadDir, { recursive: true, force: true }); }
   });
 });

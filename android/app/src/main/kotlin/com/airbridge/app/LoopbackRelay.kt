@@ -8,46 +8,33 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
-import java.security.cert.X509Certificate
 import java.util.Collections
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.RejectedExecutionException
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
-import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.X509TrustManager
 import kotlin.concurrent.thread
 
 /**
- * Loopback pipe between the WebView and the desktop AirBridge server.
- *
- * The app shows the *real* web UI, so the browser APIs it depends on
- * (`crypto.subtle`, `localStorage`, service workers) must live in a secure
- * context. A WebView cannot be talked into trusting the desktop's self-signed
- * certificate for anything beyond the main frame — subresources, `fetch` and
- * `wss` all keep failing — so instead of fighting TLS trust, the shell serves
- * the UI from `http://127.0.0.1:<port>` (which every browser engine treats as
- * trustworthy) and copies the raw bytes over an ordinary socket to the
- * desktop, wrapping them in TLS when the desktop serves HTTPS.
- *
- * The desktop already speaks HTTP and HTTPS on the same port (it sniffs the
- * first byte), so this pipe is transparent: the WebView never learns it is
- * remote, `window.location.host` inside the page is loopback, and the web app's
- * own "localhost → use the LAN address for the QR" behaviour kicks in exactly
- * as it does for the desktop's own browser.
- *
- * Every WebView connection gets its own upstream socket, so HTTP keep-alive and
- * WebSocket upgrades both work without any protocol parsing here.
+ * Bounded loopback proxy for desktop API requests only. UI scripts ship in the
+ * APK and file/clipboard traffic goes straight through the service's engine.
+ * Honor the pairing's transport exactly; never downgrade TLS after an error.
  */
 class LoopbackRelay(
     private val remoteHost: String,
     private val remotePort: Int,
+    private val useTls: Boolean,
+    trustManager: X509TrustManager,
 ) {
-    // TLS is attempted first whatever scheme the QR declared: the desktop serves
-    // HTTPS by default, and a plaintext desktop rejects the handshake so the next
-    // connection falls back automatically.
-    @Volatile private var useTls: Boolean = true
+    private val tlsContext = SSLContext.getInstance("TLS").apply { init(null, arrayOf(trustManager), null) }
     @Volatile private var running = false
     private var server: ServerSocket? = null
     private val sockets: MutableSet<Socket> = Collections.synchronizedSet(HashSet())
+    private val workers = ThreadPoolExecutor(0, 16, 30, TimeUnit.SECONDS,
+        SynchronousQueue(), { r -> Thread(r, "airbridge-relay-conn").apply { isDaemon = true } })
 
     /** The loopback port the WebView should load, or 0 before [start]. */
     val port: Int get() = server?.localPort ?: 0
@@ -75,20 +62,23 @@ class LoopbackRelay(
         } catch (_: IOException) {
         }
         server = null
+        workers.shutdownNow()
         synchronized(sockets) {
             for (socket in sockets.toList()) closeQuietly(socket)
             sockets.clear()
         }
     }
 
-    private fun bind(port: Int): ServerSocket? = try {
-        ServerSocket().apply {
-            reuseAddress = true
-            bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), BACKLOG)
-        }
-    } catch (_: IOException) {
-        null
+    private fun bind(port: Int): ServerSocket? {
+        val socket = ServerSocket()
+        return try {
+            socket.reuseAddress = true
+            socket.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), BACKLOG)
+            socket
+        } catch (_: IOException) { closeServer(socket); null }
     }
+
+    private fun closeServer(socket: ServerSocket) { runCatching { socket.close() } }
 
     private fun acceptLoop(serverSocket: ServerSocket) {
         while (running) {
@@ -97,13 +87,16 @@ class LoopbackRelay(
             } catch (_: IOException) {
                 break
             }
-            thread(name = "airbridge-relay-conn", isDaemon = true) { handle(client) }
+            sockets.add(client)
+            try { workers.execute { handle(client) } }
+            catch (_: RejectedExecutionException) { sockets.remove(client); closeQuietly(client) }
         }
     }
 
     private fun handle(client: Socket) {
         var remote: Socket? = null
         try {
+            if (!running) return
             client.tcpNoDelay = true
             client.keepAlive = true
             remote = openRemote()
@@ -131,42 +124,33 @@ class LoopbackRelay(
         }
     }
 
-    /**
-     * Opens the upstream socket. TLS is tried first (the desktop's default);
-     * when the handshake fails the desktop is running plaintext (`--http`), so
-     * the next connection — and this one — go over a bare socket.
-     */
-    private fun openRemote(): Socket {
-        if (useTls) {
-            try {
-                return openTls()
-            } catch (e: Exception) {
-                Log.i(TAG, "TLS handshake with $remoteHost failed (${e.message}); using plaintext")
-                useTls = false
-            }
-        }
-        return openPlain()
-    }
+    private fun openRemote(): Socket = if (useTls) openTls() else openPlain()
 
-    private fun openPlain(): Socket = Socket().apply {
-        keepAlive = true
-        connect(InetSocketAddress(remoteHost, remotePort), CONNECT_TIMEOUT_MS)
-        soTimeout = 0
+    private fun openPlain(): Socket {
+        val socket = Socket()
+        sockets.add(socket)
+        return try {
+            if (!running) throw IOException("Relay stopped")
+            socket.keepAlive = true
+            socket.connect(InetSocketAddress(remoteHost, remotePort), CONNECT_TIMEOUT_MS)
+            socket.soTimeout = 0
+            socket
+        } catch (e: Exception) { sockets.remove(socket); closeQuietly(socket); throw e }
     }
 
     private fun openTls(): Socket {
-        val factory = TLS_CONTEXT.socketFactory as SSLSocketFactory
-        val socket = factory.createSocket() as SSLSocket
-        socket.keepAlive = true
-        socket.connect(InetSocketAddress(remoteHost, remotePort), CONNECT_TIMEOUT_MS)
-        // The desktop's certificate is self-signed by its own local CA. Payload
-        // confidentiality does not depend on it: every control message and chunk
-        // is already end-to-end encrypted between the two devices.
-        socket.sslParameters = socket.sslParameters.apply { endpointIdentificationAlgorithm = null }
-        socket.soTimeout = CONNECT_TIMEOUT_MS
-        socket.startHandshake()
-        socket.soTimeout = 0
-        return socket
+        val socket = tlsContext.socketFactory.createSocket() as SSLSocket
+        sockets.add(socket)
+        return try {
+            if (!running) throw IOException("Relay stopped")
+            socket.keepAlive = true
+            socket.connect(InetSocketAddress(remoteHost, remotePort), CONNECT_TIMEOUT_MS)
+            socket.sslParameters = socket.sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+            socket.soTimeout = CONNECT_TIMEOUT_MS
+            socket.startHandshake()
+            socket.soTimeout = 0
+            socket
+        } catch (e: Exception) { sockets.remove(socket); closeQuietly(socket); throw e }
     }
 
     private fun copy(from: Socket, to: Socket) {
@@ -199,14 +183,5 @@ class LoopbackRelay(
         const val CONNECT_TIMEOUT_MS = 8_000
         const val BUFFER_BYTES = 64 * 1024
 
-        /** Trust manager for the desktop's self-signed local CA (see openTls). */
-        val TLS_CONTEXT: SSLContext by lazy {
-            val trustAll = object : X509TrustManager {
-                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-            }
-            SSLContext.getInstance("TLS").apply { init(null, arrayOf(trustAll), null) }
-        }
     }
 }

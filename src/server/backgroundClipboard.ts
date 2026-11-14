@@ -159,8 +159,8 @@ export class BackgroundClipboardPeer {
       autoClipboardSync: true,
       onIncomingClipboard: (item: ClipboardBeamItem) => {
         if (item.contentType === 'image' || !item.text) return;
-        const text = item.text.trim();
-        if (!text) return;
+        const text = item.text;
+        if (!text.trim()) return;
         client.markClipboardSynced(text);
         void this.opts.writeClipboard(text).catch(() => {});
       },

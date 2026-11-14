@@ -102,7 +102,7 @@ class FakeSocket {
                     formFactor: "phone",
                     publicKey: peerPublicKeyB64,
                   },
-                  discoveryScope: "nearby",
+                  discoveryScope: "paired",
                   connectedAt: Date.now(),
                 },
               ],

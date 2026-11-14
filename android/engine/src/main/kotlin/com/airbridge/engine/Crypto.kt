@@ -188,25 +188,10 @@ object AirCrypto {
         ciphertext: ByteArray,
     ): ByteArray = aesGcm(aesKey, iv, ciphertext, encrypt = false)
 
-    /** Chunk IV = 4 random bytes + fileIndex(BE u32) + chunkIndex(BE u32). */
-    fun chunkIv(fileIndex: Int, chunkIndex: Int): ByteArray {
-        val iv = ByteArray(Frames.GCM_IV_LENGTH)
-        // Randomize the whole IV, then overwrite bytes 4..11 with the
-        // (fileIndex, chunkIndex) counters — identical distribution to the
-        // TypeScript side (4 random bytes + 2 big-endian u32 counters), and
-        // avoids Random#nextBytes(byte[],int,int), which older Android APIs lack.
-        random.nextBytes(iv)
-        putU32Be(iv, 4, fileIndex)
-        putU32Be(iv, 8, chunkIndex)
-        return iv
-    }
-
-    private fun putU32Be(out: ByteArray, offset: Int, value: Int) {
-        out[offset] = ((value ushr 24) and 0xff).toByte()
-        out[offset + 1] = ((value ushr 16) and 0xff).toByte()
-        out[offset + 2] = ((value ushr 8) and 0xff).toByte()
-        out[offset + 3] = (value and 0xff).toByte()
-    }
+    /** Full 96-bit random nonce; indexes repeat on every new transfer/resume. */
+    @Suppress("UNUSED_PARAMETER")
+    fun chunkIv(fileIndex: Int, chunkIndex: Int): ByteArray =
+        ByteArray(Frames.GCM_IV_LENGTH).also { random.nextBytes(it) }
 
     fun encryptBinaryChunk(
         aesKey: SecretKeySpec,

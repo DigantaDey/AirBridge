@@ -174,14 +174,14 @@ export async function decryptControlPayload(
 export async function encryptBinaryChunk(
   aesKey: CryptoKey,
   plaintext: Uint8Array,
-  fileIndex: number,
-  chunkIndex: number
+  _fileIndex: number,
+  _chunkIndex: number
 ): Promise<{ iv: Uint8Array; ciphertext: Uint8Array }> {
+  // File/chunk indexes repeat across transfers and reconnects. Encoding them
+  // in 8 nonce bytes left just 32 random bits for the same position under a
+  // long-lived peer key. All 96 bits must be fresh randomness instead.
   const iv = new Uint8Array(12);
-  globalThis.crypto.getRandomValues(iv.subarray(0, 4));
-  const view = new DataView(iv.buffer);
-  view.setUint32(4, fileIndex >>> 0, false);
-  view.setUint32(8, chunkIndex >>> 0, false);
+  globalThis.crypto.getRandomValues(iv);
 
   const cipherBuf = await globalThis.crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: toArrayBuffer(iv) },

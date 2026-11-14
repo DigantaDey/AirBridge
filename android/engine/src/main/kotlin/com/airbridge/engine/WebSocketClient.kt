@@ -18,20 +18,14 @@ import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 
-/**
- * Minimal RFC 6455 WebSocket client — text + binary frames, continuation
- * reassembly, ping/pong, client masking, optional plain-TLS with trust-all
- * (the AirBridge threat model authenticates peers via ECDH + the six-digit
- * SAS code; TLS over the LAN protects metadata only, so accepting the
- * server's self-signed certificate is equivalent to the web client's
- * "install our CA" step minus the manual install).
- */
+/** Minimal bounded RFC 6455 client; TLS uses platform trust or an explicit LAN CA pin. */
 class WebSocketClient(
     url: String,
     private val listener: Listener,
-    private val trustAllTls: Boolean = true,
+    private val trustAllTls: Boolean = false,
+    private val tlsTrustManager: X509TrustManager? = null,
     private val connectTimeoutMs: Int = 10_000,
-    private val maxMessageBytes: Int = 34 * 1024 * 1024,
+    private val maxMessageBytes: Int = 16 * 1024 * 1024,
 ) {
     interface Listener {
         fun onText(text: String)
@@ -58,36 +52,37 @@ class WebSocketClient(
     var isOpen = false
         private set
 
-    private var socket: Socket? = null
+    @Volatile private var socket: Socket? = null
     private var input: InputStream? = null
     private var output: OutputStream? = null
     private val writeLock = Any()
     private val closeLock = Any()
-    private var closed = false
+    @Volatile private var closed = false
+    private val maskBuffer = ByteArray(64 * 1024)
     private val random = SecureRandom()
 
     /** Blocking connect + HTTP upgrade. Throws on any handshake failure. */
     fun connectBlocking() {
+        if (closed) throw IOException("Socket already closed")
         val raw: Socket = if (secure) {
             val ctx = SSLContext.getInstance("TLS")
-            ctx.init(null, if (trustAllTls) arrayOf<TrustManager>(TrustAllManager) else null, null)
-            val s = ctx.socketFactory.createSocket() as SSLSocket
-            s.useClientMode = true
-            s.connect(InetSocketAddress(host, port), connectTimeoutMs)
-            s.soTimeout = connectTimeoutMs
-            s.startHandshake()
-            s.soTimeout = 0
-            s
-        } else {
-            val s = Socket()
-            s.connect(InetSocketAddress(host, port), connectTimeoutMs)
-            s.soTimeout = connectTimeoutMs
-            s
-        }
+            ctx.init(null, when { tlsTrustManager != null -> arrayOf<TrustManager>(tlsTrustManager);
+                trustAllTls -> arrayOf<TrustManager>(TrustAllManager); else -> null }, null)
+            (ctx.socketFactory.createSocket() as SSLSocket).apply {
+                useClientMode = true
+                if (!trustAllTls) sslParameters = sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+            }
+        } else Socket()
         socket = raw
+        if (closed) { raw.close(); throw IOException("Socket closed during connect") }
+        try {
         raw.tcpNoDelay = true
-        val out = BufferedOutputStream(raw.getOutputStream())
-        val inp = BufferedInputStream(raw.getInputStream())
+        raw.keepAlive = true
+        raw.connect(InetSocketAddress(host, port), connectTimeoutMs)
+        raw.soTimeout = connectTimeoutMs
+        if (raw is SSLSocket) raw.startHandshake()
+        val out = BufferedOutputStream(raw.getOutputStream(), 64 * 1024)
+        val inp = BufferedInputStream(raw.getInputStream(), 64 * 1024)
         output = out
         input = inp
 
@@ -95,7 +90,7 @@ class WebSocketClient(
         val key = Base64Url.encodeStandard(keyBytes)
         val handshake = buildString {
             append("GET ").append(resource).append(" HTTP/1.1\r\n")
-            append("Host: ").append(host).append(':').append(port).append("\r\n")
+            append("Host: ").append(if (host.contains(':')) "[$host]" else host).append(':').append(port).append("\r\n")
             append("Upgrade: websocket\r\n")
             append("Connection: Upgrade\r\n")
             append("Sec-WebSocket-Key: ").append(key).append("\r\n")
@@ -115,8 +110,11 @@ class WebSocketClient(
         if (code != 101) throw IOException("WebSocket upgrade rejected: $statusLine")
         var acceptHeader = ""
         var sawUpgrade = false
+        var headerBytes = 0
         while (true) {
             val line = readLine(inp)
+            headerBytes += line.length
+            if (headerBytes > 64 * 1024) throw IOException("Upgrade headers too large")
             if (line.isEmpty()) break
             val idx = line.indexOf(':')
             if (idx > 0) {
@@ -130,7 +128,12 @@ class WebSocketClient(
         val expected = expectedAccept(key)
         if (acceptHeader != expected) throw IOException("Bad Sec-WebSocket-Accept")
         raw.soTimeout = 0
+        if (closed) throw IOException("Socket closed during upgrade")
         isOpen = true
+        } catch (e: Exception) {
+            closeInternal(1006, e.message ?: "Connect failed", notify = true)
+            throw e
+        }
     }
 
     private fun readLine(inp: InputStream): String {
@@ -140,6 +143,7 @@ class WebSocketClient(
             if (b == -1) throw EOFException("Connection closed during handshake")
             if (b == '\n'.code) break
             if (b != '\r'.code) sb.append(b.toChar())
+            if (sb.length > 16 * 1024) throw IOException("Upgrade line too long")
         }
         return sb.toString()
     }
@@ -165,6 +169,7 @@ class WebSocketClient(
                 if (b0 == -1) throw EOFException("remote closed")
                 val fin = (b0 and 0x80) != 0
                 val opcode = b0 and 0x0f
+                if (b0 and 0x70 != 0) throw IOException("Unexpected WebSocket extensions")
                 val b1 = inp.read()
                 if (b1 == -1) throw EOFException("remote closed")
                 val masked = (b1 and 0x80) != 0
@@ -178,7 +183,13 @@ class WebSocketClient(
                     len = 0
                     for (b in ext) len = (len shl 8) or (b.toLong() and 0xff)
                 }
-                if (len > maxMessageBytes) throw IOException("frame too large: $len")
+                if (len < 0 || len > maxMessageBytes) throw IOException("frame too large: $len")
+                if (masked) throw IOException("Server frames must not be masked")
+                if (opcode >= 8 && (!fin || len > 125)) throw IOException("Invalid control frame")
+                if (opcode == 0 && fragments.size().toLong() + len > maxMessageBytes) {
+                    throw IOException("Fragmented message too large")
+                }
+                if (opcode in 1..2 && fragmentOp != -1) throw IOException("Interleaved data fragments")
                 val maskKey = if (masked) readExact(inp, 4) else null
                 val payload = if (len > 0) readExact(inp, len.toInt()) else ByteArray(0)
                 if (maskKey != null) {
@@ -248,9 +259,10 @@ class WebSocketClient(
         val out = output ?: throw IOException("not connected")
         if (!isOpen || closed) throw IOException("socket closed")
         synchronized(writeLock) {
+            if (!isOpen || closed) throw IOException("socket closed")
             val maskKey = ByteArray(4).also { random.nextBytes(it) }
-            val header = ByteArrayOutputStream(payload.size + 14)
-            header.write(0x80 or opcode) // FIN + opcode
+            val header = ByteArrayOutputStream(14)
+            header.write(0x80 or opcode)
             val len = payload.size
             when {
                 len < 126 -> header.write(0x80 or len)
@@ -261,47 +273,35 @@ class WebSocketClient(
                 }
                 else -> {
                     header.write(0x80 or 127)
-                    var v = len.toLong()
-                    for (shift in 56 downTo 0 step 8) header.write(((v ushr shift) and 0xff).toInt())
+                    for (shift in 56 downTo 0 step 8) header.write(((len.toLong() ushr shift) and 0xff).toInt())
                 }
             }
             header.write(maskKey)
-            val masked = ByteArray(len)
-            for (i in 0 until len) masked[i] = (payload[i].toInt() xor maskKey[i % 4].toInt()).toByte()
             out.write(header.toByteArray())
-            out.write(masked)
+            var offset = 0
+            while (offset < len) {
+                val count = minOf(maskBuffer.size, len - offset)
+                for (i in 0 until count) maskBuffer[i] =
+                    (payload[offset + i].toInt() xor maskKey[(offset + i) and 3].toInt()).toByte()
+                out.write(maskBuffer, 0, count)
+                offset += count
+            }
             out.flush()
         }
     }
 
     fun close() = closeInternal(1000, "client close", notify = true)
 
-    private fun closeInternal(code: Int, reason: String, notify: Boolean) {
-        val wasOpen: Boolean
+    private fun closeInternal(@Suppress("UNUSED_PARAMETER") code: Int, reason: String, notify: Boolean) {
         synchronized(closeLock) {
-            wasOpen = !closed
+            if (closed) return
             closed = true
+            isOpen = false
         }
-        isOpen = false
-        try {
-            if (wasOpen && output != null) {
-                val reasonBytes = reason.toByteArray(Charsets.UTF_8).let { if (it.size > 120) it.copyOf(120) else it }
-                val payload = ByteArray(2 + reasonBytes.size)
-                payload[0] = ((code ushr 8) and 0xff).toByte()
-                payload[1] = (code and 0xff).toByte()
-                reasonBytes.copyInto(payload, 2)
-                try {
-                    sendFrame(0x8, payload)
-                } catch (_: Exception) {
-                }
-            }
-        } finally {
-            try {
-                socket?.close()
-            } catch (_: Exception) {
-            }
-            if (notify) listener.onClosed(reason)
-        }
+        // Never wait for writeLock here: the writer may be blocked on a dead
+        // network. Closing the socket is what unblocks it.
+        try { socket?.close() } catch (_: Exception) {}
+        if (notify) listener.onClosed(reason)
     }
 
     private fun String?.ifNullOrEmpty(fallback: String): String =

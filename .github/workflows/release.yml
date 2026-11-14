@@ -86,6 +86,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -118,7 +123,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          gradle -p android :engine:vectorTest :app:assembleRelease --no-daemon 2>&1 | tee gradle-build.log || {
+          gradle -p android :engine:check :app:assembleRelease --no-daemon 2>&1 | tee gradle-build.log || {
             echo "::error title=Android release build failed::$(tail -n 40 gradle-build.log | tr '\n' '|' | cut -c1-3000)"
             exit 1
           }

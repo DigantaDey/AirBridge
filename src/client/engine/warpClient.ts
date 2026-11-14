@@ -37,22 +37,22 @@ export const CHUNK_SIZE = 256 * 1024; // 256 KiB — 4× fewer read/encrypt/fram
 export const MIN_CHUNK_SIZE = 16 * 1024; // smallest per-file chunk size a peer may declare (legacy peers use 64 KiB)
 export const MAX_CHUNK_SIZE = 1024 * 1024; // largest per-file chunk size a peer may declare
 export const MAX_FILES_PER_TRANSFER = 100;
-export const MAX_CHUNKS_PER_TRANSFER = 262_144; // 64 GiB at 256 KiB chunks — a manifest sanity ceiling, not a product limit
+export const MAX_CHUNKS_PER_TRANSFER = 262_144; // Manifest safety ceiling: 64 GiB total at default 256 KiB chunks
 export const MAX_CLIPBOARD_TEXT = 256_000;
 export const MAX_CLIPBOARD_IMAGE_DATAURL_LENGTH = MAX_CLIPBOARD_IMAGE_DATAURL;
 
 export function isValidFileManifest(files: unknown, totalBytes: unknown): files is FileManifestItem[] {
   if (!Array.isArray(files) || files.length === 0 || files.length > MAX_FILES_PER_TRANSFER) return false;
-  if (typeof totalBytes !== 'number' || !Number.isFinite(totalBytes) || totalBytes < 0) return false;
+  if (typeof totalBytes !== 'number' || !Number.isSafeInteger(totalBytes) || totalBytes < 0) return false;
   let sum = 0; let chunks = 0;
   for (let i = 0; i < files.length; i++) {
     const f = files[i] as FileManifestItem;
     if (!f || f.index !== i || typeof f.name !== 'string' || f.name.length === 0 || f.name.length > 512) return false;
-    if (typeof f.size !== 'number' || !Number.isFinite(f.size) || f.size < 0) return false;
+    if (typeof f.size !== 'number' || !Number.isSafeInteger(f.size) || f.size < 0) return false;
     // Honor the sender's declared chunk size (bounded) instead of demanding
     // our own: legacy 64 KiB peers and future larger-chunk peers both work,
     // and the receiver sizes/validates every chunk against this declaration.
-    if (typeof f.chunkSize !== 'number' || f.chunkSize < MIN_CHUNK_SIZE || f.chunkSize > MAX_CHUNK_SIZE) return false;
+    if (typeof f.chunkSize !== 'number' || !Number.isSafeInteger(f.chunkSize) || f.chunkSize < MIN_CHUNK_SIZE || f.chunkSize > MAX_CHUNK_SIZE) return false;
     const expectedChunks = Math.max(1, Math.ceil(f.size / f.chunkSize));
     if (f.totalChunks !== expectedChunks) return false;
     if (f.previewDataUrl !== undefined && (typeof f.previewDataUrl !== 'string' || f.previewDataUrl.length > 16_000 || !f.previewDataUrl.startsWith('data:image/'))) return false;
@@ -117,6 +117,8 @@ const MAX_BUFFER_HIGH_WATER = 4 * 1024 * 1024; // cap queued bytes so other apps
 const BUFFER_LOW_WATER = 1024 * 1024; // resume after the socket has drained below 1 MiB
 
 export interface SendableFileInput {
+  /** Opaque Android URI capability, never a path supplied by a peer. */
+  nativeSourceId?: string;
   name: string;
   relativePath?: string;
   size: number;
@@ -127,6 +129,7 @@ export interface SendableFileInput {
 
 export function wrapBrowserFile(file: File, relativePath?: string): SendableFileInput {
   return {
+    nativeSourceId: typeof window === 'undefined' ? undefined : window.AirBridgeAndroid?.claimPickedFile?.(file.name, file.size) || undefined,
     name: file.name,
     relativePath: relativePath || (file.webkitRelativePath ? file.webkitRelativePath : undefined),
     size: file.size,
@@ -208,6 +211,7 @@ export interface PeerSecurityInfo {
 
 export interface WarpClientSnapshot {
   connectionState: 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
+  connectionError?: string;
   peerId: string;
   pairCode: string;
   formattedPairCode: string;
@@ -855,6 +859,7 @@ export class WarpClient {
             this.clipboardItems = parsedClips
               .filter((c) => c && typeof c.beamId === 'string' && typeof c.text === 'string')
               .slice(0, 50);
+            this.pruneClipboardHistory();
             for (const c of this.clipboardItems) {
               this.seenBeamIds.add(c.beamId);
             }
@@ -1129,8 +1134,8 @@ export class WarpClient {
   }
 
   /**
-   * Automatically beams newly copied clipboard text to connected peer(s)
-   * (preferring paired devices when present) without requiring manual interaction.
+   * Automatically beams newly copied clipboard text only to paired devices.
+   * Nearby discovery alone must never opt another machine into clipboard access.
    */
   public async handleDetectedLocalClipboard(rawText: string): Promise<ClipboardBeamItem[]> {
     if (!this.autoClipboardSync || this.destroyed) return [];
@@ -1138,11 +1143,10 @@ export class WarpClient {
     if (!trimmed || trimmed.length > 256_000) return [];
     if (trimmed === this.lastSyncedClipboardText) return [];
 
-    const pairedPeers = this.peers.filter((p) => p.discoveryScope === 'paired');
-    const targets = pairedPeers.length > 0 ? pairedPeers : [...this.peers];
+    const targets = this.peers.filter((p) => p.discoveryScope === 'paired');
 
     if (this.connectionState !== 'connected' || targets.length === 0) {
-      this.pendingAutoClipboard = { text: trimmed, capturedAt: Date.now() };
+      this.pendingAutoClipboard = { text: rawText, capturedAt: Date.now() };
       return [];
     }
 
@@ -1152,7 +1156,7 @@ export class WarpClient {
     const results: ClipboardBeamItem[] = [];
     for (const peer of targets) {
       try {
-        const sent = await this.sendClipboard(peer.peerId, trimmed, { isAuto: true });
+        const sent = await this.sendClipboard(peer.peerId, rawText, { isAuto: true });
         results.push(sent);
       } catch {
         // ignore transient send failure on individual peer
@@ -1178,7 +1182,7 @@ export class WarpClient {
     if (!trimmed) {
       throw new Error('Cannot beam empty text.');
     }
-    if (trimmed.length > MAX_CLIPBOARD_TEXT && !isValidClipboardImageDataUrl(trimmed)) {
+    if (text.length > MAX_CLIPBOARD_TEXT && !isValidClipboardImageDataUrl(trimmed)) {
       throw new Error('Text too large to beam.');
     }
 
@@ -1191,13 +1195,14 @@ export class WarpClient {
     const isImage = isValidClipboardImageDataUrl(trimmed) || contentType === 'image';
     this.lastSyncedClipboardText = trimmed;
     this.seenBeamIds.add(beamId);
+    if (this.seenBeamIds.size > 200) this.seenBeamIds.delete(this.seenBeamIds.values().next().value!);
 
     await this.sendControlMessage(
       peerId,
       {
         kind: 'clipboard-beam',
         beamId,
-        text: isImage ? undefined : trimmed,
+        text: isImage ? undefined : text,
         imageDataUrl: isImage ? trimmed : undefined,
         imageName: isImage ? `clipboard-image-${Date.now()}.png` : undefined,
         contentType,
@@ -1211,13 +1216,14 @@ export class WarpClient {
       peerId,
       peerName: peer.device.name,
       direction: 'outgoing',
-      text: trimmed,
+      text: isImage ? trimmed : text,
       imageDataUrl: isImage ? trimmed : undefined,
       contentType,
       timestamp,
       sasCode: cryptoSession.sasCode,
     };
-    this.clipboardItems = [item, ...this.clipboardItems].slice(0, 50);
+    this.clipboardItems = [item, ...this.clipboardItems];
+    this.pruneClipboardHistory();
     this.persistClipboardHistory();
     this.emit();
     if (options?.isAuto) {
@@ -1242,6 +1248,7 @@ export class WarpClient {
     const beamId = randomHex16();
     const timestamp = Date.now();
     this.seenBeamIds.add(beamId);
+    if (this.seenBeamIds.size > 200) this.seenBeamIds.delete(this.seenBeamIds.values().next().value!);
     // Use the image data as the deduplication key as well
     this.lastSyncedClipboardText = imageDataUrl.slice(0, 1024);
 
@@ -1269,7 +1276,8 @@ export class WarpClient {
       timestamp,
       sasCode: cryptoSession.sasCode,
     };
-    this.clipboardItems = [item, ...this.clipboardItems].slice(0, 50);
+    this.clipboardItems = [item, ...this.clipboardItems];
+    this.pruneClipboardHistory();
     this.persistClipboardHistory();
     this.emit();
     return item;
@@ -2563,7 +2571,8 @@ export class WarpClient {
           timestamp: payload.timestamp,
           sasCode: session?.sasCode ?? '··· ···',
         };
-        this.clipboardItems = [item, ...this.clipboardItems].slice(0, 50);
+        this.clipboardItems = [item, ...this.clipboardItems];
+        this.pruneClipboardHistory();
         this.persistClipboardHistory();
         this.emit();
         this.opts.onIncomingClipboard?.(item);
@@ -3685,9 +3694,12 @@ export class WarpClient {
       const bTs = b.completedAt ?? b.startedAt;
       return bTs - aTs;
     });
-    if (this.transfers.length > 60) {
-      this.transfers = this.transfers.slice(0, 60);
+    const active = this.transfers.filter((transfer) => !isTerminalTransferStatus(transfer.status));
+    const terminal = this.transfers.filter((transfer) => isTerminalTransferStatus(transfer.status));
+    for (const old of terminal.slice(60)) {
+      for (const file of old.receivedFiles) if (file.blobUrl) URL.revokeObjectURL(file.blobUrl);
     }
+    this.transfers = [...active, ...terminal.slice(0, 60)];
   }
 
   private persistTransferHistory(): void {
@@ -3712,13 +3724,29 @@ export class WarpClient {
     }
   }
 
+  private pruneClipboardHistory(): void {
+    // A count alone allowed fifty 5 MiB image data URLs (plus their JSON
+    // copies) to accumulate. Keep a byte budget as well, admitting one large
+    // newest item so an otherwise valid image still reaches the user.
+    let chars = 0;
+    this.clipboardItems = this.clipboardItems.filter((item, index) => {
+      if (index >= 50) return false;
+      const cost = item.text.length + (item.imageDataUrl?.length ?? 0);
+      if (index > 0 && chars + cost > 8_000_000) return false;
+      chars += cost;
+      return true;
+    });
+  }
+
   private persistClipboardHistory(): void {
     try {
       const storage = getSafeLocalStorage();
       if (storage) {
         const serializable = this.clipboardItems
           .filter((c) => {
-            if (c.contentType === 'image') return (c.imageDataUrl?.length ?? c.text.length) <= MAX_CLIPBOARD_IMAGE_DATAURL_LENGTH;
+            // Do not stringify multi-megabyte images into synchronous
+            // localStorage on every clipboard event (quota and UI stalls).
+            if (c.contentType === 'image') return (c.imageDataUrl?.length ?? c.text.length) <= 128_000;
             return c.text.length <= 32_000;
           })
           .slice(0, 50);

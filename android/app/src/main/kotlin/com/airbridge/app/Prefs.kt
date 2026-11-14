@@ -77,9 +77,45 @@ class Prefs(context: Context) {
     /** The paired computer, or null when this phone is unpaired. */
     fun pairingLink(): PairingLink? = PairingLink.parse(target)
 
+    var deviceId: String
+        get() = sp.getString("nativeDeviceId", null) ?: com.airbridge.engine.AirCrypto.randomHex16().also { deviceId = it }
+        set(value) = sp.edit().putString("nativeDeviceId", value).apply()
+    var peerId: String
+        get() = sp.getString("nativePeerId", "") ?: ""
+        set(value) = sp.edit().putString("nativePeerId", value).apply()
+    var deviceName: String
+        get() = sp.getString("nativeDeviceName", android.os.Build.MODEL) ?: "Android"
+        set(value) = sp.edit().putString("nativeDeviceName", value).apply()
+    var visibility: String
+        get() = sp.getString("nativeVisibility", "nearby") ?: "nearby"
+        set(value) = sp.edit().putString("nativeVisibility", value).apply()
+    var autoClipboard: Boolean
+        get() = sp.getBoolean("nativeAutoClipboard", true)
+        set(value) = sp.edit().putBoolean("nativeAutoClipboard", value).apply()
+    var receiveClipboard: Boolean
+        get() = sp.getBoolean("nativeReceiveClipboard", true)
+        set(value) = sp.edit().putBoolean("nativeReceiveClipboard", value).apply()
+    var trustedKeys: Set<String>
+        get() = sp.getStringSet("nativeTrustedKeys", emptySet())?.toSet() ?: emptySet()
+        set(value) = sp.edit().putStringSet("nativeTrustedKeys", value).apply()
+
+    private fun tlsKey(link: PairingLink) = "tlsAnchor:" + link.authority.lowercase(java.util.Locale.ROOT)
+
+    fun tlsTrust(link: PairingLink): com.airbridge.engine.PinnedTlsTrust = com.airbridge.engine.PinnedTlsTrust(
+        loadAnchor = { sp.getString(tlsKey(link), null)?.let { android.util.Base64.decode(it, android.util.Base64.NO_WRAP) } },
+        saveAnchor = { certificate ->
+            check(sp.edit().putString(tlsKey(link), android.util.Base64.encodeToString(certificate, android.util.Base64.NO_WRAP)).commit()) {
+                "Could not save the computer's TLS identity"
+            }
+        },
+    )
+
     fun forget() {
+        pairingLink()?.let { sp.edit().remove(tlsKey(it)).commit() }
         sp.edit()
             .remove("target")
+            .remove("nativeTrustedKeys")
+            .remove("nativePeerId")
             .remove("serverUrl")
             .remove("pairCode")
             .remove("pendingPairCode")

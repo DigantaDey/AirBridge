@@ -50,6 +50,8 @@ private class Listener(
 ) : EngineListener {
     @Volatile var state = ConnectionState.DISCONNECTED
     val clips: MutableList<String> = Collections.synchronizedList(mutableListOf())
+    var progress: ((TransferView) -> Unit)? = null
+    override fun onTransferChanged(transfer: TransferView) { progress?.invoke(transfer) }
 
     override fun onConnectionState(state: ConnectionState) {
         this.state = state
@@ -68,18 +70,21 @@ private fun engine(
     sinkDir: File?,
     autoAccept: Boolean,
     listener: Listener,
+    factory: FileSinkFactory? = null,
 ): AirBridgeEngine {
+    var anchor: ByteArray? = null
     val e = AirBridgeEngine(
         EngineConfig(
             serverUrl = serverUrl,
             deviceName = name,
             autoAcceptAll = autoAccept,
-            trustAllTls = true,
-            defaultSinkFactory = sinkDir?.let { DirectoryFileSinkFactory(it) },
+            tlsTrustManager = PinnedTlsTrust({ anchor }, { anchor = it }),
+            defaultSinkFactory = factory ?: sinkDir?.let { DirectoryFileSinkFactory(it) },
         ),
     )
     e.addListener(listener)
     e.start()
+    e.start() // idempotent: UI remounts must not open duplicate sockets/pumps
     return e
 }
 
@@ -125,7 +130,16 @@ private fun runKk(serverUrl: String, base: File) {
     val listenerA = Listener(accept = { t -> /* A is the accepting side for reverse */ })
     val listenerB = Listener()
     val a = engine(serverUrl, "Kotlin A", dirA, autoAccept = false, listener = listenerA)
-    val b = engine(serverUrl, "Kotlin B", dirB, autoAccept = true, listener = listenerB)
+    val publishing = java.util.concurrent.CountDownLatch(1)
+    val allowPublish = java.util.concurrent.CountDownLatch(1)
+    val b = engine(serverUrl, "Kotlin B", dirB, autoAccept = true, listener = listenerB,
+        factory = DirectoryFileSinkFactory(dirB) { file, name ->
+            if (name == "k2k-big.bin") {
+                publishing.countDown()
+                check(allowPublish.await(10, java.util.concurrent.TimeUnit.SECONDS)) { "Publishing blocked the reader" }
+            }
+            file
+        })
 
     try {
         await("both engines connected") {
@@ -143,7 +157,7 @@ private fun runKk(serverUrl: String, base: File) {
         results.add("discovery + matching SAS ($sasA)")
 
         // A -> B: multi-chunk + tiny file
-        val bigRaw = patternBytes(3 * 1024 * 1024 + 12345)
+        val bigRaw = patternBytes(32 * 1024 * 1024 + 12345)
         val smallRaw = "tiny!!!".toByteArray()
         val bigSha = sha256Hex(bigRaw)
         a.sendFiles(
@@ -151,11 +165,19 @@ private fun runKk(serverUrl: String, base: File) {
             listOf(
                 ByteArrayFileSource("k2k-big.bin", bigRaw),
                 ByteArrayFileSource("k2k-small.txt", smallRaw),
+                ByteArrayFileSource("empty.txt", ByteArray(0)),
             ),
         )
+        check(publishing.await(20, java.util.concurrent.TimeUnit.SECONDS)) { "File never reached publication" }
+        a.sendClipboardText(idOfB, "clipboard-during-publish")
+        try {
+            await("clipboard delivered while a large file is publishing", 5_000) {
+                listenerB.clips.contains("clipboard-during-publish")
+            }
+        } finally { allowPublish.countDown() }
         waitTransfer(a, TransferDirection.OUTGOING, "A outgoing completed")
         val inB = waitTransfer(b, TransferDirection.INCOMING, "B incoming completed")
-        check(inB.receivedFiles.size == 2 && inB.receivedFiles.all { it.verified }) {
+        check(inB.receivedFiles.size == 3 && inB.receivedFiles.all { it.verified }) {
             "B incoming not fully verified: ${inB.receivedFiles}"
         }
         val savedBig = inB.receivedFiles.first { it.name == "k2k-big.bin" }
@@ -164,7 +186,7 @@ private fun runKk(serverUrl: String, base: File) {
             "big file missing/short"
         }
         check(sha256File(savedBigFile) == bigSha) { "big file sha mismatch on disk" }
-        results.add("A -> B: 2 files completed + disk sha256 verified")
+        results.add("A -> B: 3 files (including empty) completed + disk sha256 verified")
 
         // B -> A reverse (A accepts manually)
         val revRaw = patternBytes(512 * 1024, seed = 91)
@@ -207,6 +229,22 @@ private fun runK(serverUrl: String, base: File) {
     val dirK = File(base, "kts-k").apply { deleteRecursively(); mkdirs() }
     val listener = Listener()
     val k = engine(serverUrl, "Kotlin Bridge", dirK, autoAccept = true, listener = listener)
+    var dropped = false
+    var droppedOutgoing = false
+    listener.progress = { transfer ->
+        if (!dropped && transfer.direction == TransferDirection.INCOMING &&
+            transfer.status == TransferStatus.TRANSFERRING && transfer.transferredBytes >= 4 * 1024 * 1024 &&
+            transfer.transferredBytes < transfer.totalBytes) {
+            dropped = true
+            k.reconnect() // real socket drop, then automatic same-key resume
+        }
+        if (!droppedOutgoing && transfer.direction == TransferDirection.OUTGOING &&
+            transfer.status == TransferStatus.TRANSFERRING && transfer.transferredBytes >= 4 * 1024 * 1024 &&
+            transfer.transferredBytes < transfer.totalBytes) {
+            droppedOutgoing = true
+            k.reconnect()
+        }
+    }
     try {
         await("kotlin engine connected", 30_000) { listener.state == ConnectionState.CONNECTED }
         val tsPeer = singlePeer(k, "kotlin side")
@@ -223,19 +261,25 @@ private fun runK(serverUrl: String, base: File) {
         check(incoming.receivedFiles.isNotEmpty() && incoming.receivedFiles.all { it.verified }) {
             "incoming from TS not verified"
         }
-        val f = File(incoming.receivedFiles.first().savedPath)
-        check(f.exists() && f.length() > 0) { "incoming file missing" }
+        check(dropped && incoming.receivedFiles.size == 3) { "multi-file reconnect/resume was not exercised" }
+        val f = File(incoming.receivedFiles.first { it.name == "e2e-kts-ts.bin" }.savedPath)
+        check(f.exists() && f.length() == 32L * 1024 * 1024 + 1536 + 777) { "incoming file missing or truncated" }
+        check(sha256File(f) == sha256Hex(patternBytes(f.length().toInt()))) { "Resumed disk bytes differ" }
+        println("  ok: native receiver resumed a multi-file transfer after a real socket drop")
 
         // Leg 2: Kotlin -> TS
-        val raw = patternBytes(600 * 1024)
-        k.sendFiles(tsPeer, listOf(ByteArrayFileSource("e2e-kts-k.bin", raw)))
+        val raw = patternBytes(20 * 1024 * 1024 + 73)
+        k.sendFiles(tsPeer, listOf(ByteArrayFileSource("native-prefix.bin", patternBytes(128 * 1024)),
+            ByteArrayFileSource("e2e-kts-k.bin", raw), ByteArrayFileSource("native-empty.bin", ByteArray(0))))
         waitTransfer(k, TransferDirection.OUTGOING, "K's file completed at TS")
+        check(droppedOutgoing) { "Native sender socket-drop resume was not exercised" }
+        println("  ok: native sender resumed a multi-file transfer after a real socket drop")
 
         // Leg 3: clipboard both directions
-        await("K received TS clipboard", 45_000) { listener.clips.contains("hello-from-ts-456") }
-        k.sendClipboardText(tsPeer, "hello-from-kotlin-123")
-        await("K's clipboard dispatched", 10_000) {
-            k.transfersSnapshot().isNotEmpty() && listener.clips.contains("hello-from-ts-456")
+        await("K received TS clipboard", 45_000) { listener.clips.contains("  hello-from-ts-456\n") }
+        k.sendClipboardText(tsPeer, "  hello-from-kotlin-123\n")
+        await("TS acknowledged K's clipboard", 10_000) {
+            File(base, "ts-clipboard-received").exists()
         }
 
         println("\nK side of K<->TS E2E PASSED (waiting for TS to finish)")

@@ -379,7 +379,7 @@ export class HostClipboardMonitor {
           normalized !== this.lastNormalized
         ) {
           this.lastNormalized = normalized;
-          this.onClipboardChange(current.trim());
+          this.onClipboardChange(current);
         }
       }
     } finally {

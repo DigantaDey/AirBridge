@@ -112,15 +112,14 @@ fun main(args: Array<String>) {
         fun be(b: ByteArray, off: Int): Long =
             ((b[off].toLong() and 0xff) shl 24) or ((b[off + 1].toLong() and 0xff) shl 16) or
                 ((b[off + 2].toLong() and 0xff) shl 8) or (b[off + 3].toLong() and 0xff)
-        check("chunk[$i].iv-layout", iv.size == 12 && be(iv, 4) == fileIndex.toLong() &&
-            be(iv, 8) == chunkIndex.toLong(), "iv=${Base64Url.encode(iv)}")
+        check("chunk[$i].iv-length", iv.size == 12, "iv=${Base64Url.encode(iv)}")
 
         val decrypted = AirCrypto.decryptBinaryChunk(session.aesKey, iv, ct)
         check("chunk[$i].ts-decrypt", decrypted.contentEquals(plain))
 
         val (ourIv, ourCt) = AirCrypto.encryptBinaryChunk(session.aesKey, plain, fileIndex, chunkIndex)
-        check("chunk[$i].iv-layout-local", be(ourIv, 4) == fileIndex.toLong() &&
-            be(ourIv, 8) == chunkIndex.toLong())
+        check("chunk[$i].iv-entropy-local", ourIv.size == 12 &&
+            !ourIv.contentEquals(AirCrypto.chunkIv(fileIndex, chunkIndex)))
         val roundtrip = AirCrypto.decryptBinaryChunk(session.aesKey, ourIv, ourCt)
         check("chunk[$i].roundtrip", roundtrip.contentEquals(plain))
     }

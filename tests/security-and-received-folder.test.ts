@@ -2,13 +2,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { webcrypto } from 'node:crypto';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import { createAirBridgeServer, type AirBridgeServerInstance } from '../src/server/index.js';
 import { createCliBeamSession } from '../src/server/cliSendSession.js';
-import { sanitizeDeviceProfile } from '../src/server/signalingHub.js';
+import { sanitizeDeviceProfile, MAX_RELAY_BUFFERED_BYTES } from '../src/server/signalingHub.js';
 import { isValidFileManifest, CHUNK_SIZE } from '../src/client/engine/warpClient.js';
-import { bytesToBase64Url } from '../src/shared/protocol.js';
+import { bytesToBase64Url, wrapRoutedRelayFrame } from '../src/shared/protocol.js';
 import { buildZipArchiveParts } from '../src/shared/zipStore.js';
 
 async function validPublicKey(): Promise<string> {
@@ -79,6 +79,33 @@ describe('security hardening', () => {
     const zip = Buffer.concat(buildZipArchiveParts([{ path: '../../evil.txt', chunks: [new Uint8Array([65])] }]).map((p) => Buffer.from(p)));
     expect(zip.toString('latin1')).not.toContain('../evil.txt');
     expect(zip.toString('latin1')).toContain('evil.txt');
+  });
+
+  it('rejects a second hello instead of leaking a second registered peer', async () => {
+    const srv = await createAirBridgeServer({ port: 0, host: '127.0.0.1', mode: 'test', enableMdns: false, hostClipboard: false, receivedFolderSettingsPath: null });
+    try {
+      const a = await connect(`ws://127.0.0.1:${srv.port}/ws`, await device('A'), []);
+      expect(srv.hub.getStats().connectedPeers).toBe(1);
+      const closed = new Promise<number>((resolve) => a.once('close', (code) => resolve(code)));
+      a.send(JSON.stringify({ type: 'hello', device: await device('A again'), peerId: 'abababababababab' }));
+      expect(await closed).toBe(1008);
+      await vi.waitFor(() => expect(srv.hub.getStats().connectedPeers).toBe(0));
+    } finally { await srv.close(); }
+  });
+
+  it('explicitly disconnects an overloaded receiver rather than silently dropping chunks', async () => {
+    const srv = await createAirBridgeServer({ port: 0, host: '127.0.0.1', mode: 'test', enableMdns: false, hostClipboard: false, receivedFolderSettingsPath: null });
+    try {
+      const a = await connect(`ws://127.0.0.1:${srv.port}/ws`, await device('A'), []);
+      const bMessages: unknown[] = [];
+      const b = await connect(`ws://127.0.0.1:${srv.port}/ws`, await device('B'), bMessages);
+      const id = (bMessages.find((m) => (m as { type: string }).type === 'welcome') as { peerId: string }).peerId;
+      const receiver = [...srv.hub.wss.clients][1];
+      vi.spyOn(receiver, 'bufferedAmount', 'get').mockReturnValue(MAX_RELAY_BUFFERED_BYTES + 1);
+      const closed = new Promise<number>((resolve) => b.once('close', (code) => resolve(code)));
+      a.send(wrapRoutedRelayFrame(id, 'ffffffffffffffff', new Uint8Array([1, 2, 3])));
+      expect(await closed).toBe(1006);
+    } finally { await srv.close(); }
   });
 
   it('expires CLI beam sessions', async () => {

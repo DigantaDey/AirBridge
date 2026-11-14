@@ -234,7 +234,7 @@
           <form class="address-form" id="form">
             <input
               id="address"
-              placeholder="192.168.1.5:3411"
+              placeholder="192.168.1.5:3000"
               inputmode="url"
               autocomplete="off"
               autocapitalize="off"
@@ -291,7 +291,7 @@
         function connect(address) {
           var trimmed = String(address || "").trim();
           if (!trimmed) {
-            showError("Enter your computer's address, e.g. 192.168.1.5:3411");
+            showError("Enter your computer's address, e.g. 192.168.1.5:3000");
             return;
           }
           if (!bridge) {

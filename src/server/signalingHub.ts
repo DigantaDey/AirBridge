@@ -72,6 +72,7 @@ const PLATFORMS = new Set(['macos', 'android', 'ios', 'windows', 'linux', 'unkno
 const FORM_FACTORS = new Set(['laptop', 'phone', 'tablet', 'desktop']);
 export const MAX_CLIENTS = 128;
 export const MAX_CLIENTS_PER_NETWORK = 32;
+export const MAX_RELAY_BUFFERED_BYTES = 64 * 1024 * 1024;
 const JOIN_PAIR_WINDOW_MS = 60_000;
 const MAX_JOIN_PAIR_PER_WINDOW = 6; // pair codes are only 30 bits; slow guessing to a crawl
 
@@ -143,6 +144,7 @@ export class SignalingHub {
 
   public readonly wss: WebSocketServer;
   private readonly clients = new Map<string, ConnectedClient>();
+  private readonly connectionsPerNetwork = new Map<string, number>();
   private readonly pingTimer: NodeJS.Timeout;
   private readonly clipboardMonitor: HostClipboardMonitor | null;
   private backgroundClipboardActive = false;
@@ -216,9 +218,9 @@ export class SignalingHub {
   public close(): void {
     clearInterval(this.pingTimer);
     this.clipboardMonitor?.close();
-    for (const client of this.clients.values()) {
+    for (const ws of this.wss.clients) {
       try {
-        client.ws.close();
+        ws.terminate();
       } catch {
         // ignore
       }
@@ -300,10 +302,21 @@ export class SignalingHub {
     const networkKey = deriveNetworkKey(req);
     const isLoopback = isLocalMachineAddress(req.socket.remoteAddress);
     let registeredClient: ConnectedClient | null = null;
-    if (this.clients.size >= MAX_CLIENTS) { ws.close(1013, 'Server busy'); return; }
-    let perNetwork = 0;
-    for (const c of this.clients.values()) if (c.networkKey === networkKey) perNetwork++;
-    if (perNetwork >= MAX_CLIENTS_PER_NETWORK) { ws.close(1013, 'Too many connections from this network'); return; }
+    // Count even sockets which have not sent hello; otherwise an idle client
+    // can bypass both limits and retain unbounded upgraded connections.
+    const perNetwork = this.connectionsPerNetwork.get(networkKey) ?? 0;
+    if (this.wss.clients.size > MAX_CLIENTS || perNetwork >= MAX_CLIENTS_PER_NETWORK) {
+      ws.close(1013, 'Server busy'); return;
+    }
+    this.connectionsPerNetwork.set(networkKey, perNetwork + 1);
+    const helloTimeout = setTimeout(() => { if (!registeredClient) ws.terminate(); }, 10_000);
+    helloTimeout.unref();
+    ws.once('close', () => {
+      clearTimeout(helloTimeout);
+      const remaining = (this.connectionsPerNetwork.get(networkKey) ?? 1) - 1;
+      if (remaining > 0) this.connectionsPerNetwork.set(networkKey, remaining);
+      else this.connectionsPerNetwork.delete(networkKey);
+    });
 
     ws.on('pong', () => {
       if (registeredClient) {
@@ -332,6 +345,8 @@ export class SignalingHub {
       }
 
       if (msg.type === 'hello') {
+        if (registeredClient) { ws.close(1008, 'Already registered'); return; }
+        clearTimeout(helloTimeout);
         const device = sanitizeDeviceProfile(msg.device);
         if (!device) {
           this.sendJson(ws, { type: 'error', code: 'INVALID_DEVICE', message: 'Device profile or public key is invalid.' });
@@ -548,7 +563,13 @@ export class SignalingHub {
     // senders cap unacknowledged receiver work at 16 MiB and their own socket
     // queue at 4 MiB, so this 64 MiB last-resort valve stays well above the
     // honest pipeline while still stopping a runaway client.
-    if (target.ws.bufferedAmount > 64 * 1024 * 1024) return;
+    if (target.ws.bufferedAmount > MAX_RELAY_BUFFERED_BYTES) {
+      // Never silently drop a frame: ACKs would stall with a seemingly live
+      // socket. Release the runaway queue and make interruption explicit so
+      // clients can report it or reconnect/resume from durable chunks.
+      target.ws.terminate();
+      return;
+    }
     // Stamp authenticated sender peerId in-place so sourcePeerId can never be forged
     overwriteRoutedSourcePeerId(bytes, sender.peerId);
 
@@ -627,6 +648,7 @@ export class SignalingHub {
 
   private sendJson(ws: WebSocket, msg: ServerToClientMessage): void {
     if (ws.readyState === WebSocket.OPEN) {
+      if (ws.bufferedAmount > MAX_RELAY_BUFFERED_BYTES) { ws.terminate(); return; }
       ws.send(JSON.stringify(msg));
     }
   }

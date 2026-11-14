@@ -16,7 +16,7 @@ import android.view.accessibility.AccessibilityEvent
  * foreground. When the user has opted in inside AirBridge *and* enabled this
  * service in Android's Accessibility settings, copy/selection-like events give
  * the app a chance to attempt a plain-text clipboard read and forward it to the
- * WebView even while AirBridge is not on screen. This remains best effort: the
+ * native peer even while AirBridge is not on screen. This remains best effort: the
  * OS or an OEM may still deny the read, and the service never retrieves window
  * content, reads text fields, records keystrokes or performs gestures.
  */
@@ -34,8 +34,9 @@ class ClipboardAccessibilityService : AccessibilityService() {
         val text = try {
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clip = clipboard.primaryClip ?: return
-            if (clip.itemCount == 0) return
-            clip.getItemAt(0)?.coerceToText(this)?.toString()?.trim().orEmpty()
+            if (clip.itemCount == 0 || !clip.description.hasMimeType("text/*")) return
+            if (clip.description.extras?.getBoolean("android.content.extra.IS_SENSITIVE", false) == true) return
+            clip.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
         } catch (e: SecurityException) {
             // Android 10+ can still refuse a background clipboard read.
             return
