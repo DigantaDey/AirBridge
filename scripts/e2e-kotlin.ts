@@ -67,6 +67,7 @@ async function main(): Promise<void> {
     deviceOverride: { name: 'TS Bridge', platform: 'macos', model: 'Mac', formFactor: 'laptop' },
     onIncomingClipboard: (item) => {
       tsClip = item;
+      fs.writeFileSync(path.join(baseDir, 'ts-clipboard-received'), 'ok');
     },
     onIncomingTransfer: (t) => {
       tsIncoming = t;
@@ -110,7 +111,7 @@ async function main(): Promise<void> {
   console.log(`  ok: discovery + matching SAS (${tsSas})`);
 
   // Leg 1: TS -> Kotlin
-  const toK = makeFile('e2e-kts-ts.bin', 1024 * 1024 + 1536 + 777);
+  const toK = makeFile('e2e-kts-ts.bin', 32 * 1024 * 1024 + 1536 + 777);
   const toKSha = crypto.createHash('sha256').update(Buffer.from(toK.raw)).digest('hex');
   const outDone = new Promise<void>((resolve, reject) => {
     const t = setInterval(() => {
@@ -133,13 +134,13 @@ async function main(): Promise<void> {
       reject(new Error('TS -> K timed out'));
     }, 90_000);
   });
-  await ts.sendFiles(kPeer, [toK.input]);
+  await ts.sendFiles(kPeer, [makeFile('prefix.bin', 128 * 1024).input, toK.input, makeFile('empty.bin', 0).input]);
   await outDone;
   console.log(`  ok: TS -> Kotlin transfer completed (sha ${toKSha.slice(0, 12)}…)`);
   if (toKSha.length !== 64) throw new Error('bad sha');
 
   // Leg 3a: clipboard TS -> Kotlin (Kotlin waits for this before sending back)
-  await ts.sendClipboard(kPeer, 'hello-from-ts-456');
+  await ts.sendClipboard(kPeer, '  hello-from-ts-456\n');
   console.log('  ok: clipboard TS -> Kotlin dispatched');
 
   // Leg 2: Kotlin -> TS (auto-accepted; daemon should persist to expectDownloadDir)
@@ -173,7 +174,9 @@ async function main(): Promise<void> {
   console.log('  ok: Kotlin -> TS transfer completed + verified');
 
   if (expectDownloadDir) {
+    if (incoming.receivedFiles.length !== 3) throw new Error('native multi-file resume lost a file');
     const saved = incoming.receivedFiles
+      .filter((file) => file.name === 'e2e-kts-k.bin')
       .map((f) => f.savedToMacPath)
       .filter(Boolean) as string[];
     if (saved.length === 0) throw new Error('no daemon-saved path for TS receiver');
@@ -181,7 +184,7 @@ async function main(): Promise<void> {
     // Kotlin harness sends pattern (i*31+17)&0xff — identical to makeFile()
     const expectSha = crypto
       .createHash('sha256')
-      .update(Buffer.from(makeFile('e2e-kts-k.bin', 600 * 1024).raw))
+      .update(Buffer.from(makeFile('e2e-kts-k.bin', 20 * 1024 * 1024 + 73).raw))
       .digest('hex');
     if (onDisk !== expectSha) throw new Error(`daemon sha mismatch: ${onDisk} vs ${expectSha}`);
     if (!saved[0].startsWith(expectDownloadDir)) {
@@ -193,7 +196,7 @@ async function main(): Promise<void> {
   // Leg 3b: clipboard Kotlin -> TS
   await waitFor(() => tsClip !== null, 'TS received Kotlin clipboard');
   const gotClip = tsClip as ClipboardBeamItem | null;
-  if (gotClip?.text !== 'hello-from-kotlin-123') {
+  if (gotClip?.text !== '  hello-from-kotlin-123\n') {
     throw new Error(`clipboard mismatch: ${gotClip?.text}`);
   }
   console.log('  ok: clipboard Kotlin -> TS verified');

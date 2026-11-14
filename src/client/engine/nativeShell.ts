@@ -23,6 +23,12 @@ const SAVE_CHUNK_BYTES = 256 * 1024;
 
 /** The interface Android injects with `addJavascriptInterface`. */
 export interface AirBridgeNativeBridge {
+  /** Versioned native engine capability; absent on legacy APKs. */
+  nativeEngineVersion?(): number;
+  engineAttach?(): boolean;
+  engineSnapshot?(version?: number, clipboardVersion?: number): string;
+  engineCommand?(commandJson: string): string;
+  claimPickedFile?(name: string, size: number): string;
   /** Writes text to the device clipboard. Returns false when it could not. */
   copyText(text: string): boolean;
   /** Reads the device clipboard ('' when empty or unavailable). */
@@ -154,6 +160,7 @@ export function setNativeDarkTheme(enabled: boolean): boolean {
 
 /** Keep the Android CPU awake while the WebView is actively sending or receiving a transfer. */
 export function setNativeTransferActive(active: boolean): boolean {
+  if (window.AirBridgeAndroid?.nativeEngineVersion?.() === 1) return true;
   try { return nativeBridge()?.setTransferActive?.(active) === true; } catch { return false; }
 }
 
@@ -168,6 +175,7 @@ export function publishNativeTransferSpeed(
   // A speed-only bridge is enough here; do not require the clipboard/save
   // methods that `nativeBridge()` uses to identify the full Android shell.
   const bridge = typeof window === "undefined" ? undefined : window.AirBridgeAndroid;
+  if (bridge?.nativeEngineVersion?.() === 1) return true;
   if (!bridge || typeof bridge.updateTransferSpeed !== "function") return false;
   const active =
     snapshot !== null && (snapshot.status === undefined || snapshot.status === "transferring");
@@ -260,7 +268,7 @@ export function installNativeShellBridge(): boolean {
     },
     readText: async (): Promise<string> => {
       const native = bridge.readClipboard();
-      if (native) return native;
+      if (native || bridge.nativeEngineVersion?.() === 1) return native;
       if (existing?.readText) return existing.readText();
       return "";
     },

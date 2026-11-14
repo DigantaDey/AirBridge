@@ -16,7 +16,7 @@ object Limits {
     // Match the web client: 16 MiB is enough to cover LAN RTT without
     // allowing a fast sender to build a device-wide latency queue.
     const val MAX_UNACKED_CHUNKS = 64
-    const val ACK_INTERVAL_CHUNKS = 32
+    const val ACK_INTERVAL_CHUNKS = 8
     const val MAX_HISTORY = 50
 }
 
@@ -188,7 +188,7 @@ fun isValidFileManifest(filesValue: JsonValue?, totalBytes: Long?): Boolean {
         val name = f.optStr("name") ?: return false
         if (name.isEmpty() || name.length > 512) return false
         val size = f.optLong("size") ?: return false
-        if (size < 0) return false
+        if (size < 0 || size > Limits.MAX_CHUNKS_PER_TRANSFER.toLong() * Limits.MAX_CHUNK_SIZE) return false
         val chunkSize = f.optLong("chunkSize") ?: return false
         if (chunkSize < Limits.MIN_CHUNK_SIZE || chunkSize > Limits.MAX_CHUNK_SIZE) return false
         val expectedChunks = maxOf(1L, (size + chunkSize - 1) / chunkSize)
@@ -207,7 +207,7 @@ fun isValidFileManifest(filesValue: JsonValue?, totalBytes: Long?): Boolean {
 
 internal fun JsonValue.asLongOrNull(): Long? = when (this) {
     is JsonValue.JsonLong -> value
-    is JsonValue.JsonDouble -> value.toLong()
+    is JsonValue.JsonDouble -> value.takeIf { it.isFinite() && it % 1.0 == 0.0 && it >= 0 && it <= 9_007_199_254_740_991.0 }?.toLong()
     else -> null
 }
 

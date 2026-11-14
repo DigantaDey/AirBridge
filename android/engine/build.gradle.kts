@@ -34,3 +34,24 @@ val pairingLinkTest by tasks.registering(JavaExec::class) {
 tasks.named("check") {
     dependsOn(vectorTest, pairingLinkTest)
 }
+
+val filesTest by tasks.registering(JavaExec::class) {
+    group = "verification"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "com.airbridge.engine.FilesTestKt"
+    outputs.upToDateWhen { false }
+}
+val transportTest by tasks.registering(JavaExec::class) {
+    group = "verification"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "com.airbridge.engine.TransportTestKt"
+    outputs.upToDateWhen { false }
+}
+val interopClasspath by tasks.registering {
+    dependsOn(tasks.named("testClasses"))
+    doLast {
+        layout.buildDirectory.file("interop-classpath.txt").get().asFile
+            .writeText(sourceSets["test"].runtimeClasspath.asPath)
+    }
+}
+tasks.named("check") { dependsOn(filesTest, transportTest, interopClasspath) }

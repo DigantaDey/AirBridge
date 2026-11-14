@@ -14,7 +14,7 @@ android {
         // Releases re-stamp this from the CI run number so every build is an
         // upgrade over the previous sideloaded APK.
         versionCode = System.getenv("AIRBRIDGE_VERSION_CODE")?.toIntOrNull() ?: 1
-        versionName = "1.1.0"
+        versionName = "2.2.0"
     }
 
     signingConfigs {
@@ -63,3 +63,17 @@ dependencies {
     // Play Services, works offline).
     implementation("com.google.zxing:core:3.5.3")
 }
+
+// The native service must not depend on JavaScript served by a possibly older
+// desktop release. CI installs npm dependencies before invoking Gradle.
+val prepareWebClient by tasks.registering(Exec::class) {
+    workingDir(rootProject.projectDir.parentFile)
+    commandLine("node", "scripts/build-android-client.mjs")
+    inputs.dir(rootProject.file("../src/client"))
+    inputs.dir(rootProject.file("../src/shared"))
+    inputs.dir(rootProject.file("../public"))
+    inputs.files(rootProject.file("../package-lock.json"), rootProject.file("../vite.config.ts"), rootProject.file("../index.html"), rootProject.file("../scripts/build-android-client.mjs"))
+    outputs.dir(layout.buildDirectory.dir("generated/clientAssets"))
+}
+android.sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/clientAssets"))
+tasks.named("preBuild") { dependsOn(prepareWebClient) }

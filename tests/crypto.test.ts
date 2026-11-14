@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   decryptBinaryChunk,
   decryptControlPayload,
@@ -134,5 +134,21 @@ describe('E2EE WebCrypto ECDH P-256 + AES-256-GCM', () => {
     const tampered = new Uint8Array(ciphertext);
     tampered[10] ^= 0xff;
     await expect(decryptBinaryChunk(androidSession.aesKey, iv, tampered)).rejects.toThrow();
+  });
+});
+
+
+describe('AES-GCM nonce entropy', () => {
+  it('randomizes all twelve bytes even when file/chunk indexes repeat', async () => {
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const random = vi.spyOn(globalThis.crypto, 'getRandomValues').mockImplementation((array) => {
+      new Uint8Array(array!.buffer, array!.byteOffset, array!.byteLength).fill(0x42);
+      return array;
+    });
+    try {
+      const encrypted = await encryptBinaryChunk(key, new Uint8Array([1, 2, 3]), 3, 7);
+      expect([...encrypted.iv]).toEqual(Array(12).fill(0x42));
+      expect([...await decryptBinaryChunk(key, encrypted.iv, encrypted.ciphertext)]).toEqual([1, 2, 3]);
+    } finally { random.mockRestore(); }
   });
 });

@@ -71,16 +71,17 @@ const JOURNAL_FLUSH_CHUNKS = 32;
 function isValidMeta(meta: PartialReceiveMeta): boolean {
   return (
     TRANSFER_ID_RE.test(meta.transferId) &&
-    Number.isInteger(meta.fileIndex) &&
-    meta.fileIndex >= 0 &&
+    Number.isSafeInteger(meta.fileIndex) &&
+    meta.fileIndex >= 0 && meta.fileIndex < 100 &&
     typeof meta.name === 'string' &&
-    meta.name.length > 0 &&
-    Number.isInteger(meta.size) &&
+    meta.name.length > 0 && meta.name.length <= 512 &&
+    Number.isSafeInteger(meta.size) &&
     meta.size >= 0 &&
-    Number.isInteger(meta.chunkSize) &&
-    meta.chunkSize > 0 &&
+    Number.isSafeInteger(meta.chunkSize) &&
+    meta.chunkSize > 0 && meta.chunkSize <= 1024 * 1024 &&
     Number.isInteger(meta.totalChunks) &&
-    meta.totalChunks >= 1
+    meta.totalChunks >= 1 && meta.totalChunks <= 262_144 &&
+    meta.totalChunks === Math.max(1, Math.ceil(meta.size / meta.chunkSize))
   );
 }
 
@@ -119,13 +120,11 @@ export class PartialReceiveStore {
     );
     // The stored chain must never reject, otherwise one failed write would
     // poison every later write to the same file.
-    this.chains.set(
-      key,
-      run.then(
-        () => undefined,
-        () => undefined,
-      ),
-    );
+    const tail = run.then(() => undefined, () => undefined);
+    this.chains.set(key, tail);
+    // Completed per-file promises used to accumulate for the daemon's entire
+    // lifetime. Only remove our own tail; a later queued write still owns it.
+    void tail.then(() => { if (this.chains.get(key) === tail) this.chains.delete(key); });
     return run;
   }
 
@@ -213,6 +212,17 @@ export class PartialReceiveStore {
       // An orphaned journal has no trustworthy dimensions without its manifest.
       await fs.promises.rm(journalPath, { force: true });
     }
+    if (hasSnapshot) {
+      const part = await fs.promises.stat(tempPath).catch(() => null);
+      if (!part?.isFile() || part.size !== meta.size) {
+        // A ledger without its exact-sized .part is not a valid resume hint.
+        state.receivedChunks.fill(false);
+        state.receivedCount = 0;
+        state.hasSnapshot = false;
+        await fs.promises.rm(journalPath, { force: true });
+        await fs.promises.rm(metaPath, { force: true });
+      }
+    }
     this.recountReceivedBytes(state);
     this.states.set(key, state);
     return state;
@@ -227,7 +237,8 @@ export class PartialReceiveStore {
       const raw = await fs.promises.readFile(metaPath, 'utf8');
       const parsed = JSON.parse(raw) as PartialReceiveState;
       if (
-        parsed &&
+        parsed && isValidMeta(parsed) &&
+        parsed.transferId === transferId && parsed.fileIndex === fileIndex &&
         TRANSFER_ID_RE.test(parsed.transferId || '') &&
         Number.isInteger(parsed.fileIndex) &&
         Array.isArray(parsed.receivedChunks) &&
@@ -238,6 +249,8 @@ export class PartialReceiveStore {
         Number.isInteger(parsed.size) &&
         parsed.size >= 0
       ) {
+        const part = await fs.promises.stat(tempPath).catch(() => null);
+        if (!part?.isFile() || part.size !== parsed.size) return null;
         const receivedChunks = new Array<boolean>(parsed.totalChunks).fill(false);
         for (let i = 0; i < parsed.totalChunks; i++) receivedChunks[i] = parsed.receivedChunks[i] === true;
         const state: PartialReceiveState = {
@@ -361,7 +374,7 @@ export class PartialReceiveStore {
     const key = this.key(meta.transferId, meta.fileIndex);
     await this.serialized(key, async () => {
       const state = await this.ensure(meta);
-      if (chunkIndex < 0 || chunkIndex >= state.totalChunks) {
+      if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= state.totalChunks) {
         throw new Error('Chunk index out of range.');
       }
       if (state.receivedChunks[chunkIndex]) return; // idempotent re-delivery
@@ -371,7 +384,12 @@ export class PartialReceiveStore {
         throw new Error('Chunk byte length does not match the declared manifest.');
       }
       const fd = await this.ensureFd(state);
-      await fd.write(data, 0, data.byteLength, chunkIndex * state.chunkSize);
+      let written = 0;
+      while (written < data.byteLength) {
+        const result = await fd.write(data, written, data.byteLength - written, chunkIndex * state.chunkSize + written);
+        if (result.bytesWritten <= 0) throw new Error('Disk write made no progress.');
+        written += result.bytesWritten;
+      }
       state.receivedChunks[chunkIndex] = true;
       state.receivedCount++;
       state.receivedBytes += data.byteLength;
@@ -395,24 +413,26 @@ export class PartialReceiveStore {
     if (!TRANSFER_ID_RE.test(transferId) || !Number.isInteger(fileIndex) || fileIndex < 0) {
       return null;
     }
-    const state = await this.getOrRecover(transferId, fileIndex);
-    if (!state) return null;
-    const receivedChunks: number[] = [];
-    for (let i = 0; i < state.receivedChunks.length; i++) {
-      if (state.receivedChunks[i]) receivedChunks.push(i);
-    }
-    return {
-      transferId: state.transferId,
-      fileIndex: state.fileIndex,
-      name: state.name,
-      size: state.size,
-      chunkSize: state.chunkSize,
-      totalChunks: state.totalChunks,
-      receivedCount: state.receivedCount,
-      receivedBytes: state.receivedBytes,
-      complete: state.receivedCount === state.totalChunks,
-      receivedChunks,
-    };
+    return this.serialized(this.key(transferId, fileIndex), async () => {
+      const state = await this.getOrRecover(transferId, fileIndex);
+      if (!state) return null;
+      const receivedChunks: number[] = [];
+      for (let i = 0; i < state.receivedChunks.length; i++) {
+        if (state.receivedChunks[i]) receivedChunks.push(i);
+      }
+      return {
+        transferId: state.transferId,
+        fileIndex: state.fileIndex,
+        name: state.name,
+        size: state.size,
+        chunkSize: state.chunkSize,
+        totalChunks: state.totalChunks,
+        receivedCount: state.receivedCount,
+        receivedBytes: state.receivedBytes,
+        complete: state.receivedCount === state.totalChunks,
+        receivedChunks,
+      };
+    });
   }
 
   private async hashFile(filePath: string): Promise<string> {

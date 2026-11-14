@@ -72,12 +72,12 @@ sealed class JsonValue {
     fun optLong(key: String): Long? = (this as? Obj)?.map?.get(key)?.let {
         when (it) {
             is JsonLong -> it.value
-            is JsonDouble -> it.value.toLong()
+            is JsonDouble -> it.value.takeIf { value -> value.isFinite() && value % 1.0 == 0.0 && value >= Long.MIN_VALUE.toDouble() && value < Long.MAX_VALUE.toDouble() }?.toLong()
             else -> null
         }
     }
 
-    fun optInt(key: String): Int? = optLong(key)?.toInt()
+    fun optInt(key: String): Int? = optLong(key)?.takeIf { it in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }?.toInt()
 
     fun optBool(key: String): Boolean? = ((this as? Obj)?.map?.get(key) as? JsonBool)?.value
 

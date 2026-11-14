@@ -30,3 +30,5 @@ android/build/
 android/app/build/
 android/engine/build/
 build/verify/
+
+.cache/
