@@ -45,7 +45,11 @@ class NativeEngineHost(
     private val clips = ArrayDeque<ClipboardItem>()
     private var clipBytes = 0
     private var lastSynced = ""
-    private data class PendingClipboard(val text: String, val at: Long, val explicit: Boolean)
+    private var lastSyncedAt = 0L
+    private data class PendingClipboard(val text: String, val at: Long, val explicit: Boolean,
+        val deliveredTo: MutableSet<String> = HashSet())
+    private data class ClipboardCapture(val text: String, val explicit: Boolean,
+        val at: Long = android.os.SystemClock.elapsedRealtime())
     private var pendingClipboard: PendingClipboard? = null
 
     private val snapshotWork = LatestTask<Unit>(worker) {
@@ -54,8 +58,7 @@ class NativeEngineHost(
     private val clipboardWork = LatestTask<ClipboardItem>(worker) { item ->
         // The OS clipboard is a latest value, not a reliable event log. If it
         // is slow to write, superseded images must not pile up in the heap.
-        if (!closed) {
-            synchronized(stateLock) { lastSynced = item.text.trim() }
+        if (!closed && prefs.receiveClipboard) {
             try {
                 val image = item.imageDataUrl
                 if (image != null) ClipboardImageProvider.copyImage(context, image)
@@ -64,8 +67,22 @@ class NativeEngineHost(
                     (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
                         .setPrimaryClip(ClipData.newPlainText("AirBridge", item.text))
                 }
+                synchronized(stateLock) { lastSynced = item.text; lastSyncedAt = android.os.SystemClock.elapsedRealtime() }
             } catch (e: Exception) { Log.w(TAG, "System clipboard write failed: ${e.message}") }
             addClip(item)
+        }
+    }
+
+    private val captureWork = LatestTask<ClipboardCapture>(worker) { capture ->
+        val text = capture.text
+        if (!closed && (capture.explicit || prefs.autoClipboard) && text.isNotBlank() && text.length <= Limits.MAX_CLIPBOARD_TEXT) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            val echo = synchronized(stateLock) { !capture.explicit && text == lastSynced && now - lastSyncedAt < 1_500 }
+            if (now - capture.at >= 60_000) return@LatestTask
+            if (!echo) {
+                synchronized(stateLock) { pendingClipboard = PendingClipboard(text, capture.at, capture.explicit) }
+                flushPendingClipboard()
+            }
         }
     }
 
@@ -136,41 +153,43 @@ class NativeEngineHost(
 
     /** A real native clipboard event, including the opt-in accessibility path. */
     fun publishLocalClipboard(text: String, explicit: Boolean = false) {
-        if (closed || (!explicit && !prefs.autoClipboard)) return
-        enqueue {
-            val trimmed = text.trim()
-            if (trimmed.isEmpty() || trimmed.length > Limits.MAX_CLIPBOARD_TEXT) return@enqueue
-            synchronized(stateLock) {
-                if (!explicit && trimmed == lastSynced) return@enqueue
-                pendingClipboard = PendingClipboard(text, System.currentTimeMillis(), explicit)
-            }
-            flushPendingClipboard()
-        }
+        if (closed || (!explicit && !prefs.autoClipboard) || text.length > Limits.MAX_CLIPBOARD_TEXT) return
+        captureWork.offer(ClipboardCapture(text, explicit))
     }
 
     private fun flushPendingClipboard() {
         val current = engine ?: return
         val pending = synchronized(stateLock) { pendingClipboard } ?: return
-        if (System.currentTimeMillis() - pending.at > 30_000) {
+        if (android.os.SystemClock.elapsedRealtime() - pending.at > 60_000) {
             synchronized(stateLock) { pendingClipboard = null }; return
         }
-        if (!pending.explicit && !prefs.autoClipboard) return
+        if (!pending.explicit && !prefs.autoClipboard) {
+            synchronized(stateLock) { pendingClipboard = null }; return
+        }
         // Clipboard contents must not leak to arbitrary nearby LAN devices.
         val targets = current.peersSnapshot().filter { it.discoveryScope == "paired" }
         if (targets.isEmpty() || current.currentState != ConnectionState.CONNECTED) return
-        var sent = false
         for (peer in targets) {
-            try { current.sendClipboardText(peer.peerId, pending.text); sent = true }
-            catch (e: Exception) { Log.w(TAG, "Clipboard send deferred: ${e.message}") }
+            if (pending.deliveredTo.contains(peer.device.publicKey)) continue
+            try {
+                current.sendClipboardText(peer.peerId, pending.text)
+                pending.deliveredTo.add(peer.device.publicKey)
+            } catch (e: Exception) { Log.w(TAG, "Clipboard send deferred: ${e.message}") }
         }
-        if (sent) synchronized(stateLock) { lastSynced = pending.text.trim(); pendingClipboard = null }
+        if (targets.all { pending.deliveredTo.contains(it.device.publicKey) }) synchronized(stateLock) {
+            lastSynced = pending.text
+            lastSyncedAt = android.os.SystemClock.elapsedRealtime()
+            if (pendingClipboard === pending) pendingClipboard = null
+        }
     }
 
     /** Commands are small, bounded and executed away from Android's main thread. */
     fun command(raw: String): String {
         if (closed || raw.length > 7_100_000) return failure("Native connection unavailable")
-        return try {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        val task = try {
             worker.submit<String> {
+                if (closed || System.nanoTime() >= deadline) return@submit failure("Native operation timed out; try again")
                 val current = engine ?: return@submit failure("Native connection is starting. Try again.")
                 try {
                     val command = JSONObject(raw)
@@ -190,7 +209,7 @@ class NativeEngineHost(
                             null
                         }
                         "receiveClipboard" -> { prefs.receiveClipboard = command.getBoolean("value"); current.clipboardReceiveEnabled = prefs.receiveClipboard; null }
-                        "markClipboard" -> { synchronized(stateLock) { lastSynced = command.getString("text").trim() }; null }
+                        "markClipboard" -> { synchronized(stateLock) { lastSynced = command.getString("text"); lastSyncedAt = android.os.SystemClock.elapsedRealtime() }; null }
                         "detectedClipboard" -> { publishLocalClipboard(command.getString("text")); JSONArray() }
                         "clipboard" -> clipJson(current.sendClipboardText(command.getString("peerId"), command.getString("text")))
                         "clipboardImage" -> clipJson(current.sendClipboardImageDataUrl(command.getString("peerId"), command.getString("dataUrl")))
@@ -209,8 +228,10 @@ class NativeEngineHost(
                     refresh()
                     JSONObject().put("ok", true).put("result", result ?: JSONObject.NULL).toString()
                 } catch (e: Exception) { failure(e.message ?: "Native operation failed") }
-            }.get(10, TimeUnit.SECONDS)
-        } catch (e: Exception) { failure(e.message ?: "Native operation timed out") }
+            }
+        } catch (e: Exception) { return failure(e.message ?: "Native service stopped") }
+        return try { task.get(10, TimeUnit.SECONDS) }
+        catch (e: Exception) { task.cancel(false); failure(e.message ?: "Native operation timed out") }
     }
 
     private fun enqueue(task: () -> Unit) {

@@ -36,21 +36,7 @@ import java.lang.ref.WeakReference
 /** A computer that announced itself over mDNS. */
 data class NearbyHost(val name: String, val address: String)
 
-/**
- * The Android app *is* the web app.
- *
- * The desktop server already ships this exact UI, so the phone renders the same
- * page in a WebView instead of re-implementing it. The shell injects a small
- * compatibility shim because the desktop binary can be an older release than
- * the APK. [LoopbackRelay] puts that page on a
- * `http://127.0.0.1:<port>` origin, which is why the browser APIs the UI needs
- * (WebCrypto, storage) are available without trusting a certificate.
- *
- * On first run — an unpaired phone — a QR scanner opens on top of the connect
- * screen so the user can scan the code the desktop prints. Closing the scanner
- * leaves the connect screen usable: mDNS-discovered computers, or a typed
- * address.
- */
+/** Bundled metadata-only UI. ConnectionService owns all native transfer work. */
 class MainActivity : Activity() {
 
     private lateinit var prefs: Prefs
@@ -113,6 +99,15 @@ class MainActivity : Activity() {
             webView.onResume()
             webView.resumeTimers()
             publishAccessibilityServiceState()
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && ::prefs.isInitialized && prefs.pairingLink() != null) {
+            // Android grants the focused app clipboard access. Catch up here,
+            // even if its background listener was suppressed while hidden.
+            mainHandler.post { ConnectionService.captureClipboard(applicationContext) }
         }
     }
 
@@ -897,8 +892,8 @@ class MainActivity : Activity() {
             onFound = { url, name ->
                 val link = PairingLink.parse(url)
                 if (link != null) {
-                    // mDNS does not say whether the desktop serves TLS; the relay
-                    // tries TLS first and falls back, so advertise the https form.
+                    // mDNS does not encode the scheme. Advertise the secure
+                    // default; explicit HTTP addresses remain available manually.
                     val address = link.copy(scheme = "https").baseUrl
                     synchronized(nearby) { nearby[address] = NearbyHost(name, address) }
                 }

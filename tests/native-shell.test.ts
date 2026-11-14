@@ -8,6 +8,8 @@ import {
   isNativeAccessibilityServiceEnabled,
   isNativeShell,
   openNativeAccessibilitySettings,
+  isNativeBatteryOptimizationExempt,
+  openNativeBatterySettings,
   publishNativeTransferSpeed,
   setNativeAccessibilityOptIn,
   setNativeDarkTheme,
@@ -160,6 +162,18 @@ describe("native shell detection", () => {
     expect(forgetNativeComputer()).toBe(true);
     expect(scanQr).toHaveBeenCalledTimes(1);
     expect(forgetComputer).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens user-controlled battery guidance without claiming exemption on unsupported bridges", () => {
+    const bridge = new FakeBridge();
+    window.AirBridgeAndroid = bridge;
+    expect(isNativeBatteryOptimizationExempt()).toBe(false);
+    expect(openNativeBatterySettings()).toBe(false);
+    const open = vi.fn(() => true);
+    Object.assign(bridge, { batteryOptimizationExempt: () => true, openBatterySettings: open });
+    expect(isNativeBatteryOptimizationExempt()).toBe(true);
+    expect(openNativeBatterySettings()).toBe(true);
+    expect(open).toHaveBeenCalledTimes(1);
   });
 
   it("notifies the Android shell when an active transfer starts and ends", () => {
@@ -328,6 +342,26 @@ describe("saveBlobToDevice", () => {
 });
 
 describe("received file downloads", () => {
+  it("revokes temporary single-file and ZIP URLs, but never transfer-owned URLs", () => {
+    vi.useFakeTimers();
+    const originalRevoke = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL');
+    const revoke = vi.fn();
+    Object.defineProperty(URL, 'revokeObjectURL', { value: revoke, configurable: true });
+    try {
+      triggerSingleFileDownload(receivedRecord('temporary.txt', [1]));
+      triggerSingleFileDownload({ ...receivedRecord('owned.txt', [2]), blobUrl: 'blob:owned' });
+      triggerBatchZipDownload([receivedRecord('zip.txt', [3])]);
+      expect(revoke).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(10_000);
+      expect(revoke).toHaveBeenCalledTimes(2);
+      expect(revoke).not.toHaveBeenCalledWith('blob:owned');
+    } finally {
+      vi.useRealTimers();
+      if (originalRevoke) Object.defineProperty(URL, 'revokeObjectURL', originalRevoke);
+      else Reflect.deleteProperty(URL, 'revokeObjectURL');
+    }
+  });
+
   it("uses the native writer inside the Android shell", async () => {
     const bridge = new FakeBridge();
     (window as { AirBridgeAndroid?: unknown }).AirBridgeAndroid = bridge;

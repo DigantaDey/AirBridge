@@ -24,6 +24,8 @@ object Frames {
         val chunkIndex: Int,
         val iv: ByteArray,
         val ciphertext: ByteArray,
+        val ciphertextOffset: Int = 0,
+        val ciphertextLength: Int = ciphertext.size,
     )
 
     data class RoutedRelayFrame(
@@ -59,13 +61,13 @@ object Frames {
         require(frame.iv.size == GCM_IV_LENGTH) {
             "Invalid IV length: expected $GCM_IV_LENGTH, got ${frame.iv.size}"
         }
-        val out = ByteArray(CHUNK_HEADER_LENGTH + frame.ciphertext.size)
+        val out = ByteArray(CHUNK_HEADER_LENGTH + frame.ciphertextLength)
         out[0] = FRAME_ENCRYPTED_CHUNK.toByte()
         writeFixedAsciiId(out, 1, frame.transferId)
         putU32Be(out, 17, frame.fileIndex)
         putU32Be(out, 21, frame.chunkIndex)
         System.arraycopy(frame.iv, 0, out, 25, GCM_IV_LENGTH)
-        System.arraycopy(frame.ciphertext, 0, out, CHUNK_HEADER_LENGTH, frame.ciphertext.size)
+        System.arraycopy(frame.ciphertext, frame.ciphertextOffset, out, CHUNK_HEADER_LENGTH, frame.ciphertextLength)
         return out
     }
 
@@ -80,6 +82,19 @@ object Frames {
         val iv = bytes.copyOfRange(25, 37)
         val ciphertext = bytes.copyOfRange(CHUNK_HEADER_LENGTH, bytes.size)
         return EncryptedChunkFrame(transferId, fileIndex, chunkIndex, iv, ciphertext)
+    }
+
+    /** Decode directly from the received socket buffer: no intermediate 256 KiB copies. */
+    fun decodeRoutedEncryptedChunkFrame(bytes: ByteArray): Pair<String, EncryptedChunkFrame> {
+        val offset = ROUTING_HEADER_LENGTH
+        require(bytes.size >= offset + CHUNK_HEADER_LENGTH + 16) { "Encrypted routed frame too short" }
+        require(bytes[0].toInt() == FRAME_ROUTED_RELAY && bytes[offset].toInt() == FRAME_ENCRYPTED_CHUNK)
+        val frame = EncryptedChunkFrame(
+            readFixedAsciiId(bytes, offset + 1), getU32Be(bytes, offset + 17), getU32Be(bytes, offset + 21),
+            bytes.copyOfRange(offset + 25, offset + 37), bytes,
+            offset + CHUNK_HEADER_LENGTH, bytes.size - offset - CHUNK_HEADER_LENGTH,
+        )
+        return readFixedAsciiId(bytes, 17) to frame
     }
 
     fun wrapRoutedRelayFrame(

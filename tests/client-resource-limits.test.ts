@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { WarpClient, type ClipboardBeamItem, type TransferSessionView } from '../src/client/engine/warpClient.js';
+import { CHUNK_SIZE, MAX_BROWSER_BUFFERED_BYTES, MAX_CHUNKS_PER_TRANSFER, WarpClient, type ClipboardBeamItem, type TransferSessionView } from '../src/client/engine/warpClient.js';
 import type { PeerSummary } from '../src/shared/protocol.js';
 
 type Internals = {
@@ -58,4 +58,56 @@ describe('long-lived client privacy and resource limits', () => {
       expect(revoke).toHaveBeenCalledTimes(10);
     } finally { revoke.mockRestore(); client.stop(); }
   });
+  it('uses injected persistence without changing or reading another client’s storage', () => {
+    const createStorage = (): Storage => {
+      const data = new Map<string, string>();
+      return { get length() { return data.size; }, key: (i) => [...data.keys()][i] ?? null,
+        getItem: (key) => data.get(key) ?? null, setItem: (key, value) => { data.set(key, value); },
+        removeItem: (key) => { data.delete(key); }, clear: () => data.clear() };
+    };
+    const a = createStorage(); const b = createStorage();
+    a.setItem('test:pairCode', 'ABC234'); b.setItem('test:pairCode', 'XYZ567');
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    const first = new WarpClient({ storage: a, storagePrefix: 'test' });
+    const second = new WarpClient({ storage: b, storagePrefix: 'test' });
+    try {
+      first.setAutoClipboardSync(false);
+      expect(a.getItem('test:autoClipboard')).toBe('0');
+      expect(b.getItem('test:autoClipboard')).toBeNull();
+      expect(first.getSnapshot().pairCode).toBe('ABC234');
+      expect(second.getSnapshot().pairCode).toBe('XYZ567');
+      expect(Object.getOwnPropertyDescriptor(globalThis, 'localStorage')).toEqual(descriptor);
+    } finally { first.stop(); second.stop(); }
+  });
+
+  it('bounds retained file payload memory independently of the history item count', () => {
+    const { client, state } = fixture();
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    try {
+      const file = (name: string) => ({ name, chunks: [new Uint8Array(30)], blobUrl: `blob:${name}` });
+      state.transfers = [
+        { transferId: 'new', status: 'completed', receivedFiles: [file('new')] } as TransferSessionView,
+        { transferId: 'old', status: 'completed', receivedFiles: [file('old')] } as TransferSessionView,
+      ];
+      (client as unknown as { trimBufferedHistory(budget: number): void }).trimBufferedHistory(40);
+      expect(state.transfers).toHaveLength(2);
+      expect(state.transfers[0].receivedFiles).toHaveLength(1);
+      expect(state.transfers[1].receivedFiles).toEqual([]);
+      expect(revoke).toHaveBeenCalledExactlyOnceWith('blob:old');
+      expect(MAX_BROWSER_BUFFERED_BYTES).toBe(128 * 1024 * 1024);
+    } finally { client.stop(); revoke.mockRestore(); }
+  });
+
+  it.each([
+    { name: '', size: 0 }, { name: 'bad', size: -1 }, { name: 'bad', size: 1.5 },
+    { name: 'bad', size: Number.POSITIVE_INFINITY }, { name: 'x'.repeat(513), size: 1 },
+    { name: 'huge', size: CHUNK_SIZE * (MAX_CHUNKS_PER_TRANSFER + 1) },
+  ])('rejects invalid/unsafe outgoing manifests before encryption or file reads: %j', async (meta) => {
+    const { client, state } = fixture();
+    const read = vi.fn();
+    state.peers = [{ peerId: 'peer' } as PeerSummary];
+    try { await expect(client.sendFiles('peer', [{ ...meta, type: 'x', sliceBytes: read }])).rejects.toThrow(); expect(read).not.toHaveBeenCalled(); }
+    finally { client.stop(); }
+  });
+
 });

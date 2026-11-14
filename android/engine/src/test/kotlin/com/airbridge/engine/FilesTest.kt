@@ -19,6 +19,8 @@ fun main() {
             totalChunks = totalChunks,
             chunkSize = chunkSize,
         )
+        val sha = java.security.MessageDigest.getInstance("SHA-256").digest(raw)
+            .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
         val transferId = "abababababababab"
         val firstProcess = DirectoryFileSink(dir, meta, transferId)
         for (i in 0 until 40) {
@@ -44,7 +46,7 @@ fun main() {
             recovered.store(i, raw.copyOfRange(i * chunkSize, (i + 1) * chunkSize))
         }
         recovered.markComplete()
-        val result = recovered.finalizeIfReady(null, force = false)
+        val result = recovered.finalizeIfReady(sha, force = false)
         check(result != null && result.verified) { "journaled file did not finalize" }
         check(File(result!!.savedPath).readBytes().contentEquals(raw)) { "recovered bytes differ" }
         check(!File(dir, "$transferId.0.meta").exists()) { "sidecar survived finalize" }
@@ -75,9 +77,21 @@ fun main() {
         // Out-of-order writes use bounded disk hashing, not a concatenated file.
         val shuffled = DirectoryFileSink(dir, meta, "1212121212121212")
         for (i in (0 until totalChunks).reversed()) shuffled.store(i, raw.copyOfRange(i * chunkSize, (i + 1) * chunkSize))
-        val sha = java.security.MessageDigest.getInstance("SHA-256").digest(raw)
-            .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
         check(shuffled.finalizeIfReady(sha, false)?.verified == true)
+
+        // Missing hashes cannot be called verified, and paused/discarded
+        // writers cannot recreate a partial after cleanup has run.
+        var noHashPublished = false
+        val noHash = DirectoryFileSink(dir, meta, "3434343434343434") { file, _ -> noHashPublished = true; file }
+        for (i in 0 until totalChunks) noHash.store(i, raw.copyOfRange(i * chunkSize, (i + 1) * chunkSize))
+        check(noHash.finalizeIfReady(null, false) == null && !noHashPublished)
+        check(noHash.lastError()?.contains("SHA-256") == true)
+        check(noHash.finalizeIfReady(sha, false)?.verified == true && noHashPublished)
+        noHash.discard()
+        check(File(dir, "3434343434343434.0.part").exists()) { "Cancel deleted a published file" }
+        check(runCatching { paused.store(7, raw.copyOfRange(7 * chunkSize, 8 * chunkSize)) }.isFailure)
+        check(runCatching { orphan.store(0, raw.copyOfRange(0, chunkSize)) }.isFailure)
+        check(!File(dir, "edededededededed.0.part").exists()) { "Late write recreated a discarded partial" }
 
         println("FILES: ALL PASS (journal + crash resume + handle cleanup + orphan recovery + integrity-before-publish)")
     } catch (t: Throwable) {

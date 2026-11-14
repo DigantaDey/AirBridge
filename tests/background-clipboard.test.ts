@@ -21,6 +21,21 @@ describe('background clipboard peer', () => {
     expect(code).toBe('ABC234');
   });
 
+  it('keeps daemon state private and null storage strictly in memory', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'airbridge-background-private-'));
+    try {
+      const file = path.join(dir, 'peer.json');
+      const storage = createBackgroundStorage(file);
+      storage.setItem('pref', 'one'); storage.setItem('pref', 'two');
+      if (process.platform !== 'win32') expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+      expect(fs.readdirSync(dir)).toEqual(['peer.json']);
+      const memory = createBackgroundStorage(null);
+      memory.setItem('pref', 'memory');
+      expect(createBackgroundStorage(null).getItem('pref')).toBeNull();
+      expect(createBackgroundStorage(file).getItem('pref')).toBe('two');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it('starts cleanly when the state file is missing or corrupt', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'airbridge-background-peer-'));
     const missing = createBackgroundStorage(path.join(dir, 'missing.json'));

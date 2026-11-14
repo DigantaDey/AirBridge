@@ -90,12 +90,17 @@ export function triggerSingleFileDownload(record: ReceivedFileRecord): void {
   // the bytes stream to Downloads through the native bridge instead.
   if (isNativeShell()) {
     void saveBlobToDevice(blob, record.name).then((saved) => {
-      if (!saved) triggerAnchorDownload(record.blobUrl || URL.createObjectURL(blob), record.name);
+      if (!saved) downloadBlob(blob, record.name, record.blobUrl);
     });
     return;
   }
-  const url = record.blobUrl || URL.createObjectURL(blob);
-  triggerAnchorDownload(url, record.name);
+  downloadBlob(blob, record.name, record.blobUrl);
+}
+
+function downloadBlob(blob: Blob, fileName: string, existingUrl?: string): void {
+  const url = existingUrl || URL.createObjectURL(blob);
+  try { triggerAnchorDownload(url, fileName); }
+  finally { if (!existingUrl) setTimeout(() => URL.revokeObjectURL(url), 10_000); }
 }
 
 /** The browser download the app has always used. */
@@ -122,13 +127,11 @@ export function triggerBatchZipDownload(
   const fileName = `${archiveBaseName}.zip`;
   if (isNativeShell()) {
     void saveBlobToDevice(blob, fileName).then((saved) => {
-      if (!saved) triggerAnchorDownload(URL.createObjectURL(blob), fileName);
+      if (!saved) downloadBlob(blob, fileName);
     });
     return;
   }
-  const url = URL.createObjectURL(blob);
-  triggerAnchorDownload(url, fileName);
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  downloadBlob(blob, fileName);
 }
 
 /**
@@ -151,10 +154,14 @@ export async function consumePwaSharedPayload(): Promise<{
       req.onsuccess = () => {
         const db = req.result;
         if (!db.objectStoreNames.contains('shared-items')) {
+          db.close();
           resolve(null);
           return;
         }
         const tx = db.transaction('shared-items', 'readwrite');
+        let payload: { files: SendableFileInput[]; text: string } | null = null;
+        tx.oncomplete = () => { db.close(); resolve(payload); };
+        tx.onabort = tx.onerror = () => { db.close(); resolve(null); };
         const store = tx.objectStore('shared-items');
         const getReq = store.get('latest');
         getReq.onsuccess = () => {
@@ -171,7 +178,7 @@ export async function consumePwaSharedPayload(): Promise<{
             .filter(Boolean)
             .join('\n')
             .trim();
-          resolve({ files, text: combinedText });
+          payload = { files, text: combinedText };
         };
         getReq.onerror = () => resolve(null);
       };

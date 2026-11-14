@@ -15,16 +15,16 @@ const STORAGE_PREFIX = 'airbridge:background';
 
 /**
  * A tiny persistent stand-in for the browser's localStorage. The desktop
- * daemon keeps its own ECDH identity, peer id and pair code across restarts
- * so it does not look like a brand-new device every time the service starts.
+ * daemon keeps its logical device id, peer id and pair code across restarts.
+ * Session encryption keys are ephemeral and are never persisted here.
  */
 class BackgroundStorage implements Storage {
   private data: Record<string, string>;
 
-  constructor(private readonly filePath: string) {
+  constructor(private readonly filePath: string | null) {
     this.data = {};
     try {
-      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<string, unknown>;
+      const parsed = JSON.parse(filePath ? fs.readFileSync(filePath, 'utf8') : '{}') as Record<string, unknown>;
       for (const [key, value] of Object.entries(parsed)) {
         if (typeof value === 'string') this.data[key] = value;
       }
@@ -61,10 +61,15 @@ class BackgroundStorage implements Storage {
   }
 
   private flush(): void {
+    if (!this.filePath) return;
+    const temporary = `${this.filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
     try {
       fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
-      fs.writeFileSync(this.filePath, JSON.stringify(this.data), 'utf8');
+      fs.writeFileSync(temporary, JSON.stringify(this.data), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      fs.renameSync(temporary, this.filePath);
+      fs.chmodSync(this.filePath, 0o600);
     } catch {
+      try { fs.unlinkSync(temporary); } catch { /* no temporary was created */ }
       // Persistence is best effort; the in-memory copy still works this run.
     }
   }
@@ -72,21 +77,10 @@ class BackgroundStorage implements Storage {
 
 /** Overridable for tests; defaults to ~/.airbridge/background-peer.json. */
 export function createBackgroundStorage(storagePath?: string | null): Storage {
-  const target = storagePath ?? path.join(os.homedir(), '.airbridge', 'background-peer.json');
+  const target = storagePath === null ? null : storagePath ?? path.join(os.homedir(), '.airbridge', 'background-peer.json');
   return new BackgroundStorage(target);
 }
 
-function installGlobalLocalStorage(storage: Storage): void {
-  try {
-    Object.defineProperty(globalThis, 'localStorage', {
-      value: storage,
-      configurable: true,
-      writable: true,
-    });
-  } catch {
-    (globalThis as unknown as { localStorage: Storage }).localStorage = storage;
-  }
-}
 
 function hostPlatform(): PlatformType {
   if (process.platform === 'darwin') return 'macos';
@@ -119,10 +113,11 @@ export class BackgroundClipboardPeer {
   private readonly storage: Storage;
   private client: WarpClient | null = null;
   private stopped = false;
+  private pendingWrite: string | null = null;
+  private writing = false;
 
   constructor(private readonly opts: BackgroundClipboardOptions) {
     this.storage = createBackgroundStorage(opts.storagePath);
-    installGlobalLocalStorage(this.storage);
   }
 
   start(): void {
@@ -154,15 +149,16 @@ export class BackgroundClipboardPeer {
       wsUrl: `ws://127.0.0.1:${this.opts.port}/ws`,
       initialPairCode: pairCode,
       storagePrefix: STORAGE_PREFIX,
+      storage: this.storage,
       enableWebRtc: false,
       deviceOverride: device,
-      autoClipboardSync: true,
+      writeHostClipboard: false,
       onIncomingClipboard: (item: ClipboardBeamItem) => {
         if (item.contentType === 'image' || !item.text) return;
         const text = item.text;
         if (!text.trim()) return;
-        client.markClipboardSynced(text);
-        void this.opts.writeClipboard(text).catch(() => {});
+        this.pendingWrite = text;
+        void this.flushClipboardWrites();
       },
     });
     this.client = client;
@@ -172,13 +168,40 @@ export class BackgroundClipboardPeer {
         client.stop();
         return;
       }
-      client.setAutoClipboardSync(true);
-      client.setClipboardReceiveEnabled(true);
       client.setVisibility('paired-only');
     }).catch(() => {
       // WarpClient reconnects on its own; the daemon must not crash if WebCrypto
       // or the loopback socket is briefly unavailable.
     });
+  }
+
+  getPairCode(): string {
+    return this.storage.getItem(`${STORAGE_PREFIX}:pairCode`) ?? '';
+  }
+
+  setPreferences(autoClipboard: boolean, receiveClipboard: boolean): void {
+    this.client?.setAutoClipboardSync(autoClipboard);
+    this.client?.setClipboardReceiveEnabled(receiveClipboard);
+    if (!receiveClipboard) this.pendingWrite = null;
+  }
+
+  /** Bounded, ordered OS writes: only the in-flight and latest value survive. */
+  private async flushClipboardWrites(): Promise<void> {
+    if (this.writing) return;
+    this.writing = true;
+    try {
+      while (this.pendingWrite !== null && !this.stopped) {
+        const text = this.pendingWrite;
+        this.pendingWrite = null;
+        if (!this.client?.getSnapshot().clipboardReceiveEnabled) continue;
+        if (await this.opts.writeClipboard(text).catch(() => false)) this.client?.markClipboardSynced(text);
+      }
+    } finally { this.writing = false; }
+  }
+
+  /** The daemon owns OS capture even when a newer browser tab is suspended. */
+  handleHostClipboard(text: string): void {
+    if (!this.stopped) void this.client?.handleDetectedLocalClipboard(text).catch(() => {});
   }
 
   /** Called by the local browser when the user joins or rotates a pair code. */
@@ -192,6 +215,7 @@ export class BackgroundClipboardPeer {
   stop(): void {
     if (this.stopped) return;
     this.stopped = true;
+    this.pendingWrite = null;
     this.client?.stop();
     this.client = null;
   }

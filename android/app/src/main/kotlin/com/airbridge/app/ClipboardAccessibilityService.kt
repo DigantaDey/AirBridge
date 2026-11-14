@@ -1,7 +1,6 @@
 package com.airbridge.app
 
 import android.accessibilityservice.AccessibilityService
-import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.provider.Settings
@@ -21,6 +20,15 @@ import android.view.accessibility.AccessibilityEvent
  * content, reads text fields, records keystrokes or performs gestures.
  */
 class ClipboardAccessibilityService : AccessibilityService() {
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var scheduled = false
+    private val capture = Runnable {
+        scheduled = false
+        val prefs = Prefs(this)
+        if (prefs.accessibilityClipboardOptIn && prefs.connectionContinuity) {
+            ClipboardText.read(this)?.let { ConnectionService.publishClipboardChange(this, it) }
+        }
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -30,23 +38,17 @@ class ClipboardAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || !isRelevantEvent(event.eventType)) return
         val prefs = Prefs(this)
-        if (!prefs.accessibilityClipboardOptIn || !prefs.connectionContinuity) return
-        val text = try {
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            val clip = clipboard.primaryClip ?: return
-            if (clip.itemCount == 0 || !clip.description.hasMimeType("text/*")) return
-            if (clip.description.extras?.getBoolean("android.content.extra.IS_SENSITIVE", false) == true) return
-            clip.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
-        } catch (e: SecurityException) {
-            // Android 10+ can still refuse a background clipboard read.
-            return
-        } catch (e: Exception) {
-            return
-        }
-        if (text.isEmpty() || text.length > 256_000) return
-        // The foreground service and this one can both see the same change;
-        // the shared helper deduplicates and suppresses incoming-beam echoes.
-        ConnectionService.publishClipboardChange(this, text)
+        if (!prefs.accessibilityClipboardOptIn || !prefs.connectionContinuity || scheduled) return
+        // Copy menu accessibility events can precede the clipboard commit.
+        // Coalesce bursts and read after the commit, rather than on every
+        // selection/keystroke. Never inspect the event's text/window contents.
+        scheduled = true
+        handler.postDelayed(capture, 200)
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
+        super.onDestroy()
     }
 
     override fun onInterrupt() {
@@ -56,7 +58,6 @@ class ClipboardAccessibilityService : AccessibilityService() {
     private fun isRelevantEvent(type: Int): Boolean = when (type) {
         AccessibilityEvent.TYPE_VIEW_CLICKED,
         AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
-        AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
         AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED,
         AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> true
         else -> false

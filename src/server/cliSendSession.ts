@@ -2,6 +2,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Express, Request, Response } from 'express';
+import { pipeline } from 'node:stream/promises';
+import { asyncRoute } from './httpSafety.js';
 import { formatBytes } from '../shared/protocol.js';
 
 export interface CliBeamFile {
@@ -27,7 +29,13 @@ const failedLookups = new Map<string, { count: number; windowStart: number }>();
 function tokenGuessThrottled(ip: string): boolean {
   const now = Date.now();
   const entry = failedLookups.get(ip);
-  if (!entry || now - entry.windowStart > 60_000) { failedLookups.set(ip, { count: 0, windowStart: now }); return false; }
+  if (!entry || now - entry.windowStart > 60_000) {
+    if (failedLookups.size >= 1_024) {
+      for (const [address, attempt] of failedLookups) if (now - attempt.windowStart > 60_000) failedLookups.delete(address);
+      if (failedLookups.size >= 1_024) failedLookups.delete(failedLookups.keys().next().value!);
+    }
+    failedLookups.set(ip, { count: 0, windowStart: now }); return false;
+  }
   return entry.count >= 20;
 }
 function noteFailedLookup(ip: string): void {
@@ -67,67 +75,56 @@ export function registerCliBeamRoutes(
     });
   });
 
-  app.get('/api/beam/:token/file/:idx', async (req: Request, res: Response) => {
+  app.get('/api/beam/:token/file/:idx', asyncRoute(async (req: Request, res: Response) => {
     if (tokenGuessThrottled(req.ip || '')) { res.status(429).send('Too many attempts.'); return; }
     const session = liveSession(sessions, String(req.params.token), req.ip || '');
-    if (!session) {
-      res.status(404).send('Beam token expired or invalid.');
-      return;
-    }
-    const idx = Number.parseInt(String(req.params.idx), 10);
-    const file = session.files.find((f) => f.index === idx);
-    if (!file || !fs.existsSync(file.absPath)) {
-      res.status(404).send('File not found.');
-      return;
-    }
+    if (!session) { res.status(404).send('Beam token expired or invalid.'); return; }
+    const idx = Number(req.params.idx);
+    const file = Number.isInteger(idx) && session.files.find((f) => f.index === idx);
+    if (!file) { res.status(404).send('File not found.'); return; }
 
-    const stat = await fs.promises.stat(file.absPath);
-    const total = stat.size;
-    const encodedName = encodeURIComponent(file.name);
-    const ext = path.extname(file.name).toLowerCase();
-    const mimeByExt: Record<string, string> = {
-      '.pdf': 'application/pdf',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.png': 'image/png',
-      '.webp': 'image/webp',
-      '.mp4': 'video/mp4',
-      '.mov': 'video/quicktime',
-      '.zip': 'application/zip',
-      '.apk': 'application/vnd.android.package-archive',
-    };
-
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Content-Type', mimeByExt[ext] || 'application/octet-stream');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${file.name.replace(/"/g, '_')}"; filename*=UTF-8''${encodedName}`
-    );
-
-    const range = req.headers.range;
-    if (range) {
-      const match = range.match(/bytes=(\d*)-(\d*)/);
-      if (match) {
-        const start = match[1] ? Number.parseInt(match[1], 10) : Math.max(0, total - (match[2] ? Number.parseInt(match[2], 10) : 0));
-        const end = match[1] && match[2] ? Math.min(Number.parseInt(match[2], 10), total - 1) : total - 1;
-        if (total > 0 && start >= 0 && start <= end && end < total) {
-          res.status(206);
-          res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
-          res.setHeader('Content-Length', String(end - start + 1));
-          fs.createReadStream(file.absPath, { start, end }).pipe(res);
-          return;
+    // Open once and stat that descriptor: deletion/replacement between an
+    // exists/stat/read sequence must neither crash the process nor leak FDs.
+    const handle = await fs.promises.open(file.absPath, 'r').catch(() => null);
+    if (!handle) { res.status(404).send('File not found.'); return; }
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile()) { res.status(404).send('File not found.'); return; }
+      const total = stat.size;
+      let start = 0;
+      let end = total - 1;
+      const range = req.headers.range;
+      if (range) {
+        const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+        const first = match?.[1] ? Number(match[1]) : null;
+        const last = match?.[2] ? Number(match[2]) : null;
+        if (first === null && last !== null) start = Math.max(0, total - last);
+        else if (first !== null) { start = first; if (last !== null) end = Math.min(last, total - 1); }
+        if (!match || (first === null && (last === null || last === 0)) ||
+            !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start > end || start >= total) {
+          res.status(416).setHeader('Content-Range', `bytes */${total}`); res.end(); return;
         }
+        res.status(206).setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
       }
-    }
-
-    res.setHeader('Content-Length', String(total));
-    const stream = fs.createReadStream(file.absPath);
-    stream.on('end', () => {
-      session.downloads += 1;
-      onDownloadComplete?.(file, req.ip || req.socket.remoteAddress || 'peer');
-    });
-    stream.pipe(res);
-  });
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.type(path.extname(file.name) || 'application/octet-stream');
+      const safeName = file.name.replace(/[^\x20-\x7e]|["\\]/g, '_');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(file.name)}`);
+      res.setHeader('Content-Length', String(total === 0 ? 0 : end - start + 1));
+      try {
+        const stream = handle.createReadStream({ start, ...(total > 0 ? { end } : {}), autoClose: false });
+        await pipeline(stream, res);
+        if (!range) {
+          session.downloads += 1;
+          onDownloadComplete?.(file, req.ip || req.socket.remoteAddress || 'peer');
+        }
+      } catch {
+        // pipeline tears down both ends on disconnect/read errors, including
+        // ranged downloads. A disappeared client must not leave a file open.
+        if (!res.destroyed) res.destroy();
+      }
+    } finally { await handle.close(); }
+  }));
 }
 
 export async function createCliBeamSession(filePaths: string[]): Promise<CliBeamSession> {

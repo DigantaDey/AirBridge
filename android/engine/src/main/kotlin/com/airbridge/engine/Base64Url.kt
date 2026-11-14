@@ -10,11 +10,9 @@ object Base64Url {
     fun encode(data: ByteArray): String =
         Base64.getUrlEncoder().withoutPadding().encodeToString(data)
 
-    fun decode(text: String): ByteArray {
-        val padded = text.replace('-', '+').replace('_', '/') +
-            "=".repeat((4 - text.length % 4) % 4)
-        return Base64.getDecoder().decode(padded)
-    }
+    // java.util.Base64 accepts unpadded URL input directly. Replacing both
+    // alphabets and padding used to copy multi-megabyte images three times.
+    fun decode(text: String): ByteArray = Base64.getUrlDecoder().decode(text)
 
     /** Standard base64 (with padding) — used inside data: URLs. */
     fun encodeStandard(data: ByteArray): String =

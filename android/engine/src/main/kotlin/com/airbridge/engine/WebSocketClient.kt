@@ -78,6 +78,10 @@ class WebSocketClient(
         try {
         raw.tcpNoDelay = true
         raw.keepAlive = true
+        // Request the receive window BEFORE connect (TCP window scaling is
+        // negotiated in the SYN). Android/kernel limits may clamp these hints.
+        raw.receiveBufferSize = 4 * 1024 * 1024
+        raw.sendBufferSize = 1024 * 1024
         raw.connect(InetSocketAddress(host, port), connectTimeoutMs)
         raw.soTimeout = connectTimeoutMs
         if (raw is SSLSocket) raw.startHandshake()
@@ -127,7 +131,7 @@ class WebSocketClient(
         if (!sawUpgrade || acceptHeader.isEmpty()) throw IOException("Malformed WebSocket handshake")
         val expected = expectedAccept(key)
         if (acceptHeader != expected) throw IOException("Bad Sec-WebSocket-Accept")
-        raw.soTimeout = 0
+        raw.soTimeout = 75_000
         if (closed) throw IOException("Socket closed during upgrade")
         isOpen = true
         } catch (e: Exception) {

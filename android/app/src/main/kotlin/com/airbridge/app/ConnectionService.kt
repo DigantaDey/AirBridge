@@ -28,7 +28,7 @@ import kotlin.math.pow
 /** Owns the native encrypted peer independently of any Activity or WebView. */
 class ConnectionService : Service() {
     private var transferActive = false
-    private var uiAttached = false
+    @Volatile private var uiAttached = false
     private var pendingOffers = false
     private var shareUntil = 0L
     private var nativeState = ConnectionState.CONNECTING
@@ -37,9 +37,34 @@ class ConnectionService : Service() {
     private val actions = Executors.newSingleThreadExecutor()
     @Volatile private var engineHost: NativeEngineHost? = null
     private var engineTarget = ""
+    private var engineGeneration = 0L
+    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+    private var defaultNetwork: android.net.Network? = null
+    private var lockRefreshScheduled = false
+    private var notificationScheduled = false
+    private val notificationRefresh = Runnable {
+        notificationScheduled = false
+        if (instance === this) runCatching {
+            getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, buildNotification())
+        }
+    }
+
+    private fun refreshNotification(immediate: Boolean = false) {
+        if (immediate) {
+            mainHandler.removeCallbacks(notificationRefresh)
+            notificationRefresh.run()
+        } else if (!notificationScheduled) {
+            notificationScheduled = true
+            mainHandler.postDelayed(notificationRefresh, 1_000)
+        }
+    }
     private val lockRefresh = object : Runnable {
         override fun run() {
-            if (transferActive) updateTransferWakeLock()
+            lockRefreshScheduled = false
+            if (transferActive) {
+                transferWakeLock?.takeIf { it.isHeld }?.let { runCatching { it.acquire(10 * 60_000L) } }
+                updateTransferWakeLock()
+            }
         }
     }
     private var transferWakeLock: PowerManager.WakeLock? = null
@@ -67,6 +92,20 @@ class ConnectionService : Service() {
         } catch (e: Exception) {
             Log.w("AirBridgeClip", "could not watch clipboard: ${e.message}")
         }
+        val connectivity = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) {
+                val changed = defaultNetwork != null && defaultNetwork != network
+                defaultNetwork = network
+                if (changed || nativeState == ConnectionState.RECONNECTING) engineHost?.reconnect()
+                if (transferActive) updateTransferWakeLock()
+            }
+            override fun onLost(network: android.net.Network) {
+                if (defaultNetwork == network) { defaultNetwork = null; engineHost?.reconnect() }
+            }
+        }
+        try { connectivity.registerDefaultNetworkCallback(callback, mainHandler); networkCallback = callback }
+        catch (e: Exception) { Log.w("AirBridgeNetwork", "Network recovery callback unavailable: ${e.message}") }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
@@ -88,8 +127,8 @@ class ConnectionService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_SHARE_TEXT -> {
-                shareUntil = android.os.SystemClock.elapsedRealtime() + 30_000
-                mainHandler.postDelayed({ if (shouldStopWhenIdle()) stopSelf() }, 30_100)
+                shareUntil = android.os.SystemClock.elapsedRealtime() + 60_000
+                mainHandler.postDelayed({ if (shouldStopWhenIdle()) stopSelf() }, 60_100)
             }
             ACTION_UI_ATTACH -> uiAttached = true
             ACTION_UI_DETACH -> uiAttached = false
@@ -133,26 +172,14 @@ class ConnectionService : Service() {
      * The listener still fires when the OS allows it; failures are swallowed so
      * the foreground service (and the encrypted session) stay alive.
      */
-    private fun publishSystemClipboard(clipboard: ClipboardManager) {
-        val text = try {
-            val clip = clipboard.primaryClip
-            if (clip == null || clip.itemCount == 0 || !clip.description.hasMimeType("text/*")) return
-            if (clip.description.extras?.getBoolean("android.content.extra.IS_SENSITIVE", false) == true) return
-            clip.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
-        } catch (e: SecurityException) {
-            return
-        } catch (e: Exception) {
-            return
-        }
-        if (text.isEmpty() || text.length > 256_000) return
-        publishClipboardChange(this, text)
+    private fun publishSystemClipboard(@Suppress("UNUSED_PARAMETER") clipboard: ClipboardManager) {
+        ClipboardText.read(this)?.let { publishClipboardChange(this, it) }
     }
 
     /** Refreshes the foreground notification from the WebView's live rate. */
     private fun applyTransferSpeed(payloadJson: String) {
         transferSpeed = parseTransferSpeed(payloadJson)
-        getSystemService(NotificationManager::class.java)
-            ?.notify(NOTIFICATION_ID, buildNotification())
+        refreshNotification()
     }
 
     private fun parseTransferSpeed(payloadJson: String): TransferSpeedSnapshot? {
@@ -257,7 +284,6 @@ class ConnectionService : Service() {
             releaseTransferWakeLock()
             return
         }
-        if (transferWakeLock?.isHeld == true) transferWakeLock?.acquire(10 * 60_000L)
         if (transferWakeLock?.isHeld != true) {
             val powerManager = getSystemService(POWER_SERVICE) as PowerManager
             transferWakeLock = powerManager.newWakeLock(
@@ -282,12 +308,15 @@ class ConnectionService : Service() {
             Log.w("AirBridgePower", "Wi-Fi performance lock unavailable: ${e.message}")
             wifiLock = null
         }
-        mainHandler.removeCallbacks(lockRefresh)
-        mainHandler.postDelayed(lockRefresh, 60_000)
+        if (!lockRefreshScheduled) {
+            lockRefreshScheduled = true
+            mainHandler.postDelayed(lockRefresh, 60_000)
+        }
     }
 
     private fun releaseTransferWakeLock() {
         mainHandler.removeCallbacks(lockRefresh)
+        lockRefreshScheduled = false
         val cpuLock = transferWakeLock
         if (cpuLock?.isHeld == true) runCatching { cpuLock.release() }
         transferWakeLock = null
@@ -299,6 +328,11 @@ class ConnectionService : Service() {
 
     override fun onDestroy() {
         if (instance === this) instance = null
+        engineGeneration++
+        networkCallback?.let { callback -> runCatching {
+            (getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager).unregisterNetworkCallback(callback)
+        } }
+        networkCallback = null
         val host = engineHost
         engineHost = null
         // Shutdown is potentially waiting on disk IO. Never block the main
@@ -333,9 +367,17 @@ class ConnectionService : Service() {
         val old = engineHost
         if (old != null) actions.execute { old.close() }
         engineTarget = target
+        nativeState = ConnectionState.CONNECTING
+        transferActive = false
+        pendingOffers = false
+        transferSpeed = null
+        releaseTransferWakeLock()
+        for (id in offerIds) getSystemService(NotificationManager::class.java)?.cancel(offerNotificationId(id))
+        offerIds.clear()
+        val generation = ++engineGeneration
         engineHost = NativeEngineHost(applicationContext, { transfers ->
             mainHandler.post {
-                if (instance !== this || engineTarget != target) return@post
+                if (instance !== this || engineGeneration != generation) return@post
                 transferActive = transfers.any { it.status == TransferStatus.TRANSFERRING || it.status == TransferStatus.CONNECTING }
                 pendingOffers = transfers.any { it.status == TransferStatus.PENDING_ACCEPT }
                 val active = transfers.firstOrNull { it.status == TransferStatus.TRANSFERRING }
@@ -345,20 +387,20 @@ class ConnectionService : Service() {
                     getSystemService(NotificationManager::class.java)?.cancel(offerNotificationId(view.transferId))
                 }
                 updateTransferWakeLock()
-                getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, buildNotification())
+                refreshNotification()
                 if (shouldStopWhenIdle()) stopSelf()
             }
         }, { offer ->
             mainHandler.post {
-                if (instance !== this || engineTarget != target) return@post
+                if (instance !== this || engineGeneration != generation) return@post
                 pendingOffers = true
                 showIncomingOffer(offer)
             }
         }, { state ->
             mainHandler.post {
-                if (instance === this && engineTarget == target) {
+                if (instance === this && engineGeneration == generation) {
                     nativeState = state
-                    getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, buildNotification())
+                    refreshNotification(immediate = true)
                 }
             }
         })
@@ -426,8 +468,8 @@ class ConnectionService : Service() {
 
         /** Called by ShellBridge.copyText before it writes an incoming beam. */
         fun markOwnClipboardWrite(text: String) {
-            lastOwnClipboardText = text.trim()
-            lastOwnClipboardAt = System.currentTimeMillis()
+            lastOwnClipboardText = text
+            lastOwnClipboardAt = android.os.SystemClock.elapsedRealtime()
         }
 
         /**
@@ -438,30 +480,30 @@ class ConnectionService : Service() {
          */
         @Synchronized
         fun publishClipboardChange(context: Context, text: String): Boolean {
-            if (!Prefs(context).connectionContinuity) {
-                lastOwnClipboardText = null
-                return false
-            }
-            val trimmed = text.trim()
-            if (trimmed.isEmpty() || trimmed.length > 256_000) return false
-            val now = System.currentTimeMillis()
+            val service = instance ?: return false
+            val host = service.engineHost ?: return false
+            if (!Prefs(context).connectionContinuity && !service.uiAttached) return false
+            if (text.isBlank() || text.length > 256_000) return false
+            val now = android.os.SystemClock.elapsedRealtime()
             val own = lastOwnClipboardText
-            if (own != null && own == trimmed && now - lastOwnClipboardAt < OWN_WRITE_ECHO_WINDOW_MS) {
-                lastOwnClipboardText = null
-                lastPublishedClipboardText = trimmed
+            if (own != null && own == text && now - lastOwnClipboardAt < OWN_WRITE_ECHO_WINDOW_MS) {
+                lastPublishedClipboardText = text
                 lastPublishedClipboardAt = now
                 return false // an incoming beam, not a new local copy
             }
-            if (trimmed == lastPublishedClipboardText &&
+            if (text == lastPublishedClipboardText &&
                 now - lastPublishedClipboardAt < DUPLICATE_EVENT_WINDOW_MS
             ) {
                 return false
             }
-            lastPublishedClipboardText = trimmed
+            lastPublishedClipboardText = text
             lastPublishedClipboardAt = now
-            val host = instance?.engineHost ?: return false
             host.publishLocalClipboard(text)
             return true
+        }
+
+        fun captureClipboard(context: Context) {
+            ClipboardText.read(context)?.let { publishClipboardChange(context, it) }
         }
 
         /**

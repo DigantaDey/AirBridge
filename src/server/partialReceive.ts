@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { MacDaemonConfig } from './macIntegration.js';
-import { resolveFinalPath, triggerMacNotification } from './macIntegration.js';
+import { publishReceivedFile, triggerMacNotification } from './macIntegration.js';
 
 /**
  * Received-chunk bookkeeping for the disk-backed receive path.
@@ -480,10 +480,9 @@ export class PartialReceiveStore {
         this.states.delete(key);
         throw new Error('SHA-256 verification failed; the partial file was discarded.');
       }
-      const finalPath = await resolveFinalPath(this.config.downloadDir, state.name);
-      await fs.promises.rename(state.tempPath, finalPath);
-      await fs.promises.rm(state.metaPath, { force: true });
-      await fs.promises.rm(state.journalPath, { force: true });
+      const finalPath = await publishReceivedFile(state.tempPath, this.config.downloadDir, state.name);
+      await fs.promises.rm(state.metaPath, { force: true }).catch(() => {});
+      await fs.promises.rm(state.journalPath, { force: true }).catch(() => {});
       this.states.delete(key);
 
       if (process.platform === 'darwin' && this.config.notifyOnReceive) {
