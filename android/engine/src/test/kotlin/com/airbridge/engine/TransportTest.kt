@@ -91,6 +91,30 @@ fun main() {
     check(queue.take() == null)
     writer.join(); secondWriter.join()
 
+    // A blocked system clipboard/snapshot consumer must retain only the latest
+    // pending state, and yield to already queued commands between deliveries.
+    val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    val first = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val latest = CompletableFuture<Int>()
+    val consumed = java.util.Collections.synchronizedList(mutableListOf<Int>())
+    val command = CompletableFuture<Boolean>()
+    val mailbox = LatestTask<Int>(executor) { value ->
+        consumed.add(value)
+        if (value == 1) { first.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        else { check(command.isDone) { "Snapshot work starved commands" }; latest.complete(value) }
+    }
+    try {
+        mailbox.offer(1)
+        check(first.await(1, TimeUnit.SECONDS))
+        for (value in 2..10_000) mailbox.offer(value)
+        executor.execute { command.complete(true) }
+        release.countDown()
+        check(latest.get(2, TimeUnit.SECONDS) == 10_000)
+        check(consumed.toList() == listOf(1, 10_000)) { "Mailbox retained superseded values" }
+    } finally { release.countDown(); executor.shutdownNow() }
+    mailbox.offer(10_001) // shutdown rejection must neither throw nor strand a worker
+
     // A later-file ACK must not conjure acknowledgements for earlier files or
     // count the resume prefix as newly transmitted work.
     val engine = AirBridgeEngine(EngineConfig("ws://127.0.0.1:9/ws", "ACK test"))
@@ -115,5 +139,5 @@ fun main() {
         acknowledge("2222222222222222", 1, 99)
         check(send.ackedGlobalChunks == 20) { "Invalid or forged ACK released the window" }
     } finally { engine.stop() }
-    println("TRANSPORT: ALL PASS (bounded frames, fragments, exactly-once close, byte queue, per-file ACKs)")
+    println("TRANSPORT: ALL PASS (bounded frames, fragments, exactly-once close, byte queue, bounded latest-state work, per-file ACKs)")
 }

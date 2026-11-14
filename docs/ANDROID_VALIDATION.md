@@ -47,7 +47,8 @@ certificates and downloads, cleans up children, and tests **HTTP and TLS**:
   also run the transfer scenarios using the pinned trust manager.
 
 Engine checks additionally cover malformed/fragmented WebSocket limits,
-exactly-once close, queue shutdown/backpressure, per-file ACK/resume accounting,
+exactly-once close, queue shutdown/backpressure, latest-value mailbox bounds/fairness,
+per-file ACK/resume accounting,
 integrity-before-publication, out-of-order hashing, orphan metadata and paused
 file descriptors. SDK-jar compilation (`npm run verify:android`) is useful as a
 local preflight, but is **not** a substitute for Gradle APK packaging or Android

@@ -26,8 +26,6 @@ class NativeEngineHost(
     private val configuredTarget = prefs.target
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "airbridge-native-commands").apply { isDaemon = true } }
     private val stateLock = Any()
-    private val refreshQueued = java.util.concurrent.atomic.AtomicBoolean(false)
-    private val snapshotDirty = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var engine: AirBridgeEngine? = null
     @Volatile private var closed = false
     private data class Snapshot(val version: Long, val clipboardVersion: Long, val json: String, val clips: String)
@@ -49,6 +47,27 @@ class NativeEngineHost(
     private var lastSynced = ""
     private data class PendingClipboard(val text: String, val at: Long, val explicit: Boolean)
     private var pendingClipboard: PendingClipboard? = null
+
+    private val snapshotWork = LatestTask<Unit>(worker) {
+        if (!closed) { buildSnapshot(); flushPendingClipboard() }
+    }
+    private val clipboardWork = LatestTask<ClipboardItem>(worker) { item ->
+        // The OS clipboard is a latest value, not a reliable event log. If it
+        // is slow to write, superseded images must not pile up in the heap.
+        if (!closed) {
+            synchronized(stateLock) { lastSynced = item.text.trim() }
+            try {
+                val image = item.imageDataUrl
+                if (image != null) ClipboardImageProvider.copyImage(context, image)
+                else {
+                    ConnectionService.markOwnClipboardWrite(item.text)
+                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                        .setPrimaryClip(ClipData.newPlainText("AirBridge", item.text))
+                }
+            } catch (e: Exception) { Log.w(TAG, "System clipboard write failed: ${e.message}") }
+            addClip(item)
+        }
+    }
 
     init {
         worker.execute {
@@ -80,25 +99,13 @@ class NativeEngineHost(
                         prefs.pairCode = pairCode; refresh()
                     }
                     override fun onPeersChanged(peers: List<Peer>) {
+                        // Snapshot work also retries pending clipboard sends,
+                        // without queuing one worker for every peer update.
                         refresh()
-                        // Never block the network reader on local clipboard work.
-                        enqueue { flushPendingClipboard() }
                     }
                     override fun onIncomingOffer(transfer: TransferView) { refresh(); onOffer(transfer) }
                     override fun onTransferChanged(transfer: TransferView) { refresh(); onTransfers(created.transfersSnapshot()) }
-                    override fun onClipboard(item: ClipboardItem) = enqueue {
-                        synchronized(stateLock) { lastSynced = item.text.trim() }
-                        try {
-                            val image = item.imageDataUrl
-                            if (image != null) ClipboardImageProvider.copyImage(context, image)
-                            else {
-                                ConnectionService.markOwnClipboardWrite(item.text)
-                                (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                                    .setPrimaryClip(ClipData.newPlainText("AirBridge", item.text))
-                            }
-                        } catch (e: Exception) { Log.w(TAG, "System clipboard write failed: ${e.message}") }
-                        addClip(item)
-                    }
+                    override fun onClipboard(item: ClipboardItem) { clipboardWork.offer(item) }
                     override fun onLocalClipboardBeam(item: ClipboardItem) = addClip(item)
                     override fun onError(code: String, message: String) {
                         if (code == "CONNECTION_FAILED") connectionError = message
@@ -212,19 +219,8 @@ class NativeEngineHost(
         catch (_: java.util.concurrent.RejectedExecutionException) { /* service is stopping */ }
     }
 
-    /** Coalesce progress metadata off the reader; never stringify history per chunk on it. */
-    private fun refresh() {
-        if (closed) return
-        snapshotDirty.set(true)
-        if (!refreshQueued.compareAndSet(false, true)) return
-        enqueue {
-            try { while (snapshotDirty.getAndSet(false) && !closed) buildSnapshot() }
-            finally {
-                refreshQueued.set(false)
-                if (snapshotDirty.get()) refresh()
-            }
-        }
-    }
+    /** Coalesce replaceable metadata off the network reader, with bounded work. */
+    private fun refresh() { if (!closed) snapshotWork.offer(Unit) }
 
     /** Build a consistent, bounded metadata snapshot; no file payloads or Blobs. */
     private fun buildSnapshot() {

@@ -30,7 +30,8 @@
 
 - Generate full-entropy 96-bit AES-GCM chunk nonces; retain wire compatibility.
 - Restrict automatic clipboard sharing to paired peers, preserve text whitespace,
-  cap retained clipboard content and release evicted transfer Blob URLs without
+  coalesce superseded incoming clipboard/snapshot work, cap retained clipboard
+  content and release evicted transfer Blob URLs without
   dropping active sessions from history.
 - Handle partial filesystem writes, orphaned resume metadata, malformed integer
   manifests, stalled/invalid ACKs, fragmented WebSocket bounds, socket cleanup
