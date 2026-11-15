@@ -509,14 +509,13 @@ class QrScannerView(context: Context) : FrameLayout(context) {
     private fun decode(image: Image): String? {
         val startTime = System.nanoTime()
         val plane = image.planes.firstOrNull() ?: return null
-        if (plane.pixelStride != 1) return null
         val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
         val height = image.height
         val width = image.width
         if (rowStride < width) return null
 
         val requiredSize = rowStride * height
-        // Optimization: Reuse byte array buffer to eliminate per-frame heap allocations & GC churn
         var data = yuvBuffer
         if (data == null || data.size < requiredSize) {
             data = ByteArray(requiredSize)
@@ -524,6 +523,7 @@ class QrScannerView(context: Context) : FrameLayout(context) {
         }
 
         val buffer = plane.buffer
+        buffer.rewind()
         val read = min(buffer.remaining(), data.size)
         buffer.get(data, 0, read)
 
@@ -542,18 +542,28 @@ class QrScannerView(context: Context) : FrameLayout(context) {
             result
         } catch (_: NotFoundException) {
             try {
-                val rotated = luminance.rotateCounterClockwise()
-                val result = zxing.decodeWithState(BinaryBitmap(HybridBinarizer(rotated))).text
+                val rot90 = luminance.rotateCounterClockwise()
+                val result = zxing.decodeWithState(BinaryBitmap(HybridBinarizer(rot90))).text
                 val elapsedNs = System.nanoTime() - startTime
                 frameCount++
                 totalDecodeTimeNs += elapsedNs
-                Log.d(TAG, "QR decoded (rotated) in %.2f ms after %d frames".format(elapsedNs / 1_000_000.0, frameCount))
+                Log.d(TAG, "QR decoded (rotated 90) in %.2f ms after %d frames".format(elapsedNs / 1_000_000.0, frameCount))
                 result
             } catch (_: Exception) {
-                val elapsedNs = System.nanoTime() - startTime
-                frameCount++
-                totalDecodeTimeNs += elapsedNs
-                null
+                try {
+                    val rot270 = luminance.rotateCounterClockwise().rotateCounterClockwise().rotateCounterClockwise()
+                    val result = zxing.decodeWithState(BinaryBitmap(HybridBinarizer(rot270))).text
+                    val elapsedNs = System.nanoTime() - startTime
+                    frameCount++
+                    totalDecodeTimeNs += elapsedNs
+                    Log.d(TAG, "QR decoded (rotated 270) in %.2f ms after %d frames".format(elapsedNs / 1_000_000.0, frameCount))
+                    result
+                } catch (_: Exception) {
+                    val elapsedNs = System.nanoTime() - startTime
+                    frameCount++
+                    totalDecodeTimeNs += elapsedNs
+                    null
+                }
             }
         } catch (_: Exception) {
             val elapsedNs = System.nanoTime() - startTime

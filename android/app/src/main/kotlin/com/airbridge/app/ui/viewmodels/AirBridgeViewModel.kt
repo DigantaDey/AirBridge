@@ -279,11 +279,31 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             _events.tryEmit("That is a one-off file link, not a pairing code")
             return false
         }
-        val link = PairingLink.parse(trimmed)
+        var link = PairingLink.parse(trimmed)
         if (link == null) {
             _events.tryEmit("That QR code is not an AirBridge pairing code")
             return false
         }
+
+        if (link.host.isEmpty() || link.host.equals("localhost", ignoreCase = true) || link.host == "127.0.0.1") {
+            val nearby = synchronized(nearbyLock) { _nearbyHosts.value.firstOrNull() }
+            if (nearby != null) {
+                val nearbyLink = PairingLink.parse(nearby.address)
+                if (nearbyLink != null) {
+                    link = nearbyLink.copy(pairCode = link.pairCode ?: nearbyLink.pairCode)
+                }
+            } else if (prefs.target.isNotEmpty() && link.pairCode != null) {
+                joinPairCode(link.pairCode!!)
+                _overlays.value = _overlays.value.copy(scannerOpen = false)
+                return true
+            }
+        }
+
+        if (link.host.isEmpty()) {
+            _events.tryEmit("Scanned code needs a server address or active discovery")
+            return false
+        }
+
         connectWithLink(link)
         return true
     }

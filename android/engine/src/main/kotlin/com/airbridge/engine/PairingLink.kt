@@ -49,6 +49,16 @@ data class PairingLink(
             text = text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() } ?: return null
             if (text.any { it.isWhitespace() }) return null
 
+            if (!text.contains("://") && !text.contains('/') && !text.contains('?')) {
+                val cleanChars = text.replace("-", "").trim()
+                if (cleanChars.length in 6..7 && cleanChars.all { it.isLetterOrDigit() }) {
+                    val normalizedRawCode = PairCode.normalize(text)
+                    if (PairCode.isValid(normalizedRawCode)) {
+                        return PairingLink(scheme = "https", host = "", port = DEFAULT_PORT, pairCode = normalizedRawCode)
+                    }
+                }
+            }
+
             val scheme: String
             val withoutScheme: String
             val schemeEnd = text.indexOf("://")
