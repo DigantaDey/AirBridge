@@ -10,7 +10,16 @@ export function postMacOsNotification(title: string, body: string, appName?: str
   const cleanBody = body.trim();
   if (!cleanTitle && !cleanBody) return;
 
-  const script = `display notification ${JSON.stringify(cleanBody)} with title ${JSON.stringify(cleanTitle)} sound name "default"`;
+  const titleJson = JSON.stringify(cleanTitle);
+  const bodyJson = JSON.stringify(cleanBody);
+
+  const script = `
+    try
+      tell application id "com.airbridge.launcher" to display notification ${bodyJson} with title ${titleJson} sound name "default"
+    on error
+      display notification ${bodyJson} with title ${titleJson} sound name "default"
+    end try
+  `;
 
   execFile('osascript', ['-e', script], (err) => {
     if (err) {

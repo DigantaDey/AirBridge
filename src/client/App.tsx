@@ -368,8 +368,10 @@ export function App() {
               const notifTitle = notification.appName
                 ? `${notification.appName}: ${notification.title}`
                 : notification.title;
+              const iconUrl = `${window.location.origin}/icon.svg`;
               new Notification(notifTitle, {
                 body: notification.body,
+                icon: iconUrl,
                 tag: notification.notificationId,
               });
             } catch (_e) {}
