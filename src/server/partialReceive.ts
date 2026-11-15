@@ -37,6 +37,8 @@ export interface PartialReceiveState extends PartialReceiveMeta {
   /** Indexes not yet appended to the journal. Losing these only causes a safe re-send. */
   pendingJournal: number[];
   hasSnapshot: boolean;
+  runningHash?: crypto.Hash | null;
+  hashedContiguousChunks?: number;
   fd?: fs.promises.FileHandle;
 }
 
@@ -205,6 +207,8 @@ export class PartialReceiveStore {
       receivedBytes: 0,
       pendingJournal: [],
       hasSnapshot,
+      runningHash: hasSnapshot ? null : crypto.createHash('sha256'),
+      hashedContiguousChunks: 0,
     };
     if (hasSnapshot) {
       await this.replayJournal(state);
@@ -219,6 +223,8 @@ export class PartialReceiveStore {
         state.receivedChunks.fill(false);
         state.receivedCount = 0;
         state.hasSnapshot = false;
+        state.runningHash = crypto.createHash('sha256');
+        state.hashedContiguousChunks = 0;
         await fs.promises.rm(journalPath, { force: true });
         await fs.promises.rm(metaPath, { force: true });
       }
@@ -394,6 +400,12 @@ export class PartialReceiveStore {
       state.receivedCount++;
       state.receivedBytes += data.byteLength;
       state.pendingJournal.push(chunkIndex);
+      if (state.runningHash && state.hashedContiguousChunks === chunkIndex) {
+        state.runningHash.update(data);
+        state.hashedContiguousChunks++;
+      } else {
+        state.runningHash = null;
+      }
 
       if (!state.hasSnapshot) {
         // One small atomic manifest per file anchors the append-only journal
@@ -469,7 +481,11 @@ export class PartialReceiveStore {
         throw new Error('Received byte count does not match the declared file size.');
       }
       await this.flushJournal(state);
-      const sha256 = await this.hashFile(state.tempPath);
+      const sha256 =
+        state.runningHash && state.hashedContiguousChunks === state.totalChunks
+          ? state.runningHash.digest('hex')
+          : await this.hashFile(state.tempPath);
+      state.runningHash = null;
       // Reject before the .part file is renamed: a hash mismatch must never
       // become a "completed" file in Downloads. Remove the partial so a retry
       // starts clean instead of trusting corrupted bytes as a resume prefix.

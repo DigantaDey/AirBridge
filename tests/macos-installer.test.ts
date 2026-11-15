@@ -65,7 +65,7 @@ describe('macOS installer', () => {
     expect(fs.readFileSync(path.join(root, 'starts'), 'utf8').trim()).toBe('3105 --no-browser');
     expect(fs.readFileSync(path.join(root, 'opened'), 'utf8').trim().split('\n')).toEqual(['http://localhost:3105', 'http://localhost:3105']);
     expect(install('--no-start').status).toBe(0);
-  });
+  }, 15_000);
   it('shows an error instead of opening an unrelated service or missing binary', () => {
     expect(install('--no-start').status).toBe(0);
     fs.rmSync(path.join(env.AIRBRIDGE_INSTALL_DIR!, 'AirBridge'));

@@ -1,0 +1,51 @@
+{
+  "domain": "Permissions and APIs",
+  "findings": [
+    {
+      "policy_id": "accessibility_api_policy",
+      "issue_summary": "Accessibility Service used for background clipboard capture in a standard utility without prominent disclosure or affirmative consent",
+      "severity": "CRITICAL",
+      "files_involved": [
+        "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/AndroidManifest.xml",
+        "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/xml/accessibility_service_config.xml",
+        "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/screens/SettingsScreen.kt",
+        "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt"
+      ],
+      "evidence": "AndroidManifest.xml (lines 76-89) declares ClipboardAccessibilityService requesting android.permission.BIND_ACCESSIBILITY_SERVICE with configuration res/xml/accessibility_service_config.xml where android:isAccessibilityTool is missing or false. The app is a file and clipboard transfer utility, not a dedicated accessibility tool for people with disabilities. In SettingsScreen.kt (lines 167-205) and MainActivity.kt (lines 273-282), toggling or clicking 'Open Settings' directs the user directly to Settings.ACTION_ACCESSIBILITY_SETTINGS without displaying an in-app prominent disclosure and affirmative consent screen.",
+      "recommendation": "High Risk of Play Store Rejection: Because you request accessibility permission for a standard utility, you MUST implement an in-app Prominent Disclosure and Affirmative Consent screen before asking the user to enable the service, otherwise your app will be rejected. The disclosure must clearly describe what data is accessed and how it is used. Additionally, consider removing the Accessibility Service entirely because Google Play strictly prohibits using Accessibility APIs for non-accessibility tasks like background monitoring or clipboard synchronization."
+    },
+    {
+      "policy_id": "accessibility_api_policy",
+      "issue_summary": "Accessibility Service captures user interaction events and transmits clipboard data to an off-device network endpoint",
+      "severity": "CRITICAL",
+      "files_involved": [
+        "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ClipboardAccessibilityService.kt",
+        "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ConnectionService.kt"
+      ],
+      "evidence": "In ClipboardAccessibilityService.kt (lines 80-104), onAccessibilityEvent intercepts global UI interactions (clicks, text selection changes, notification state) from other applications, attaches a 1x1 transparent TYPE_ACCESSIBILITY_OVERLAY window to gain focus (lines 131-183), reads clipboard content via ClipboardText.read(), and routes it off-device via ConnectionService.publishClipboardChange() (lines 106-110 and ConnectionService.kt line 609). Google Play policy strictly prohibits using Accessibility APIs to capture data and transmit it off-device for standard utility features.",
+      "recommendation": "Remove the Accessibility Service and overlay-based background capture workaround. Google Play strictly prohibits using Accessibility APIs for background clipboard harvesting or non-accessibility utility tasks. Migrate clipboard sharing strictly to user-initiated mechanisms such as the Android Share Sheet (Intent.ACTION_SEND) or Quick Settings tile."
+    },
+    {
+      "policy_id": "files_and_docs_policy",
+      "issue_summary": "Direct external storage directory creation via deprecated Environment APIs in app targeting SDK 35",
+      "severity": "IMPORTANT",
+      "files_involved": [
+        "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/NativeFiles.kt",
+        "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/AndroidManifest.xml"
+      ],
+      "evidence": "In NativeFiles.kt (lines 268-271), publishLegacyOrFallback calls Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS) and creates a custom directory via publicDir.mkdirs(). AndroidManifest.xml (lines 16-18) declares android.permission.WRITE_EXTERNAL_STORAGE while targeting SDK 35 (Android 15). Under Scoped Storage rules on modern Android versions, apps should not manually create directories in root or public external storage.",
+      "recommendation": "Scoped Storage Mandate: Avoid calling deprecated Environment.getExternalStoragePublicDirectory() or creating custom root-level folders on shared storage. Ensure all shared file operations on modern Android versions strictly use the Storage Access Framework (SAF) or MediaStore API without manual filesystem path manipulation."
+    },
+    {
+      "policy_id": "foreground_services_policy",
+      "issue_summary": "Play Console declaration required for declared foreground service types (connectedDevice, dataSync)",
+      "severity": "SUGGESTION",
+      "files_involved": [
+        "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/AndroidManifest.xml",
+        "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ConnectionService.kt"
+      ],
+      "evidence": "AndroidManifest.xml (lines 6-8, 65-69) declares ConnectionService with android:foregroundServiceType=\"connectedDevice|dataSync\" and requests FOREGROUND_SERVICE_CONNECTED_DEVICE and FOREGROUND_SERVICE_DATA_SYNC. The app targets SDK 35 (Android 15).",
+      "recommendation": "Play Console Declaration Required: For apps targeting Android 14+, you must complete a Foreground Service declaration in the Play Console (App content section) for each type used, providing a functional description, user impact video, and a specific use case selection."
+    }
+  ]
+}

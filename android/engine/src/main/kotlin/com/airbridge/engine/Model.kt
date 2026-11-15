@@ -6,18 +6,26 @@ package com.airbridge.engine
  */
 
 object Limits {
-    const val CHUNK_SIZE = 256 * 1024
+    const val CHUNK_SIZE = 1024 * 1024 // 1 MiB: 4× fewer WS/crypto/storage round-trips than 256 KiB
     const val MIN_CHUNK_SIZE = 16 * 1024
     const val MAX_CHUNK_SIZE = 1024 * 1024
     const val MAX_FILES_PER_TRANSFER = 100
     const val MAX_CHUNKS_PER_TRANSFER = 262_144
     const val MAX_CLIPBOARD_TEXT = 256_000
     const val MAX_CLIPBOARD_IMAGE_DATAURL = 7_000_000
-    // Match the web client: 16 MiB is enough to cover LAN RTT without
-    // allowing a fast sender to build a device-wide latency queue.
-    const val MAX_UNACKED_CHUNKS = 64
+    const val WINDOW_BYTE_BUDGET = 32 * 1024 * 1024
+    const val ACK_BYTE_CADENCE = 2 * 1024 * 1024
+    // Match the web client: 24-32 MiB byte window keeps high-bandwidth Wi-Fi
+    // saturated without allowing a fast sender to build an unbounded latency queue.
+    const val MAX_UNACKED_CHUNKS = 96
     const val ACK_INTERVAL_CHUNKS = 8
     const val MAX_HISTORY = 50
+
+    fun windowChunksFor(chunkSize: Int): Int =
+        (WINDOW_BYTE_BUDGET / maxOf(MIN_CHUNK_SIZE, chunkSize)).coerceIn(32, 128)
+
+    fun ackIntervalFor(chunkSize: Int): Int =
+        (ACK_BYTE_CADENCE / maxOf(MIN_CHUNK_SIZE, chunkSize)).coerceIn(2, 16)
 }
 
 data class DeviceProfile(

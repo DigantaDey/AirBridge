@@ -151,6 +151,7 @@ export class BackgroundClipboardPeer {
       storagePrefix: STORAGE_PREFIX,
       storage: this.storage,
       enableWebRtc: false,
+      autoAcceptAll: true,
       deviceOverride: device,
       writeHostClipboard: false,
       onIncomingClipboard: (item: ClipboardBeamItem) => {

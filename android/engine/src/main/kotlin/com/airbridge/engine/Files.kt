@@ -5,6 +5,8 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.security.MessageDigest
 
 /**
@@ -47,14 +49,30 @@ class FileInputStreamSource(
 ) : FileSource {
     override val name: String get() = file.name
     override val size: Long get() = file.length()
+    private var raf: RandomAccessFile? = null
+    private var channel: FileChannel? = null
+
+    @Synchronized
     override fun readRange(start: Long, end: Long): ByteArray {
         val len = (end - start).toInt()
+        val ch = channel ?: RandomAccessFile(file, "r").also { raf = it }.channel.also { channel = it }
         val out = ByteArray(len)
-        RandomAccessFile(file, "r").use { handle ->
-            handle.seek(start)
-            handle.readFully(out)
+        val buf = ByteBuffer.wrap(out)
+        var pos = start
+        while (buf.hasRemaining()) {
+            val n = ch.read(buf, pos)
+            if (n < 0) throw IOException("Unexpected EOF reading ${file.name}")
+            pos += n
         }
         return out
+    }
+
+    @Synchronized
+    override fun close() {
+        runCatching { channel?.close() }
+        runCatching { raf?.close() }
+        channel = null
+        raf = null
     }
 }
 
@@ -135,11 +153,15 @@ class DirectoryFileSink(
     private var complete = false
     private var error: String? = null
     private var raf: RandomAccessFile? = null
+    private var channel: FileChannel? = null
+    private var journalOut: FileOutputStream? = null
+    private var journalAligned = false
     private var finalized = false
     private var paused = false
     @Volatile private var discarded = false
     private var streamDigest: MessageDigest? = MessageDigest.getInstance("SHA-256")
     private var nextHashChunk = 0
+    private val pendingHashChunks = HashMap<Int, ByteArray>()
 
     init {
         require(Regex("^[0-9a-f]{16}$").matches(transferId)) { "Invalid transfer ID" }
@@ -180,7 +202,7 @@ class DirectoryFileSink(
         }
         if (partFile.exists()) {
             try {
-                raf = RandomAccessFile(partFile, "rw")
+                raf = RandomAccessFile(partFile, "rw").also { channel = it.channel }
             } catch (e: Exception) {
                 error = e.message
             }
@@ -228,17 +250,33 @@ class DirectoryFileSink(
         require(data.size == expected) { "Chunk length does not match manifest" }
         if (received.get(chunkIndex)) return
         try {
-            val handle = raf ?: RandomAccessFile(partFile, "rw").also {
+            val ch = channel ?: RandomAccessFile(partFile, "rw").also {
                 // Size the part file once, not on every chunk.
                 if (it.length() != meta.size) it.setLength(meta.size)
                 raf = it
+                channel = it.channel
+            }.channel
+            val buf = ByteBuffer.wrap(data)
+            var pos = chunkIndex * meta.chunkSize.toLong()
+            while (buf.hasRemaining()) {
+                pos += ch.write(buf, pos)
             }
-            handle.seek(chunkIndex * meta.chunkSize.toLong())
-            handle.write(data)
-            if (chunkIndex == nextHashChunk) {
-                streamDigest?.update(data)
-                nextHashChunk++
-            } else streamDigest = null
+            if (streamDigest != null) {
+                if (chunkIndex == nextHashChunk) {
+                    streamDigest?.update(data)
+                    nextHashChunk++
+                    while (pendingHashChunks.containsKey(nextHashChunk)) {
+                        val nextData = pendingHashChunks.remove(nextHashChunk) ?: break
+                        streamDigest?.update(nextData)
+                        nextHashChunk++
+                    }
+                } else if (chunkIndex > nextHashChunk && pendingHashChunks.size < 64) {
+                    pendingHashChunks[chunkIndex] = data
+                } else {
+                    streamDigest = null
+                    pendingHashChunks.clear()
+                }
+            }
             received.set(chunkIndex)
             pendingJournal.add(chunkIndex)
             if (!hasSnapshot) {
@@ -246,6 +284,7 @@ class DirectoryFileSink(
                 // indexes in bounded batches instead of rewriting JSON per chunk.
                 persistSidecar()
                 pendingJournal.clear()
+                closeJournal()
                 journalFile.delete()
             } else if (pendingJournal.size >= JOURNAL_FLUSH_CHUNKS || chunkIndex == meta.totalChunks - 1) {
                 flushJournal()
@@ -273,10 +312,14 @@ class DirectoryFileSink(
 
     private fun flushJournal() {
         if (pendingJournal.isEmpty()) return
-        if (journalFile.exists() && journalFile.length() % JOURNAL_ENTRY_BYTES != 0L) {
-            RandomAccessFile(journalFile, "rw").use {
-                it.setLength(it.length() - it.length() % JOURNAL_ENTRY_BYTES)
+        if (!journalAligned) {
+            closeJournal()
+            if (journalFile.exists() && journalFile.length() % JOURNAL_ENTRY_BYTES != 0L) {
+                RandomAccessFile(journalFile, "rw").use {
+                    it.setLength(it.length() - it.length() % JOURNAL_ENTRY_BYTES)
+                }
             }
+            journalAligned = true
         }
         val bytes = ByteArray(pendingJournal.size * JOURNAL_ENTRY_BYTES)
         pendingJournal.forEachIndexed { i, index ->
@@ -286,7 +329,8 @@ class DirectoryFileSink(
             bytes[offset + 2] = (index ushr 8).toByte()
             bytes[offset + 3] = index.toByte()
         }
-        FileOutputStream(journalFile, true).use { it.write(bytes) }
+        val out = journalOut ?: FileOutputStream(journalFile, true).also { journalOut = it }
+        out.write(bytes)
         pendingJournal.clear()
     }
 
@@ -299,6 +343,7 @@ class DirectoryFileSink(
             // interrupted after the atomic rename.
             persistSidecar()
             pendingJournal.clear()
+            closeJournal()
             journalFile.delete()
         } catch (_: Exception) {
         }
@@ -335,7 +380,7 @@ class DirectoryFileSink(
                 }
             require(partFile.length() == meta.size) { "File length changed before publication" }
             val hex = digest.digest().joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
-            if (declaredSha256 != null && declaredSha256 != hex) {
+            if (declaredSha256 != hex) {
                 error = "SHA-256 verification failed; partial file discarded."
                 discard()
                 return null
@@ -354,7 +399,23 @@ class DirectoryFileSink(
         }
     }
 
+    private fun closeJournal() {
+        try {
+            journalOut?.close()
+        } catch (_: Exception) {
+        }
+        journalOut = null
+        journalAligned = false
+    }
+
     private fun closeHandle() {
+        closeJournal()
+        pendingHashChunks.clear()
+        try {
+            channel?.close()
+        } catch (_: Exception) {
+        }
+        channel = null
         try {
             raf?.close()
         } catch (_: Exception) {

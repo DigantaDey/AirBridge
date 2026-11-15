@@ -47,6 +47,15 @@ internal class ByteBoundedQueue<T>(
         item
     }
 
+    /** Non-blocking poll for coalescing batched socket writes without waiting. */
+    fun tryPoll(): T? = synchronized(lock) {
+        if (closed || items.isEmpty()) return null
+        val item = items.pollFirst() ?: return null
+        bytes -= sizeOf(item)
+        lock.notifyAll()
+        item
+    }
+
     fun clear() = synchronized(lock) { items.clear(); bytes = 0; lock.notifyAll() }
     fun close() = synchronized(lock) { closed = true; items.clear(); bytes = 0; lock.notifyAll() }
 }

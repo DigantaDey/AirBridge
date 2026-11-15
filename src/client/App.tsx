@@ -853,15 +853,24 @@ export function App() {
         )}
         <section className="devices-section">
           <div className="section-title"><h2>Devices</h2><button className="text-button" onClick={() => setPairingOpen(true)}>Pair a device</button></div>
-          {snap.peers.length ? <ul className="device-list">{snap.peers.map((peer) => {
-            const verification = snap.peerSecurity[peer.peerId];
-            return <li className="device-row" key={peer.peerId}>
-              <span className="device-glyph" aria-hidden="true">{peer.device.formFactor === "phone" ? "▯" : "▱"}</span>
-              <span className="device-copy"><strong>{peer.device.name}</strong><small>{peer.discoveryScope === "paired" ? "Paired" : "Nearby"}{verification ? " · Encrypted session established" : " · Discovered; pair to send"}</small></span>
-              <button className="quiet-button clipboard-device-button" aria-label={`Send clipboard text to ${peer.device.name}`} title="Send text / link / code" onClick={() => openClipboardForPeer(peer.peerId)}>Clipboard</button>
-              <button className="send-device-button" disabled={stagedFiles.length === 0 || !verification} onClick={() => { handleSendFilesToPeer(peer.peerId, stagedFiles); setStagedFiles([]); }}>Send</button>
-            </li>;
-          })}</ul> : <div className="empty-devices"><p>No devices found yet</p><span>Open AirBridge on your other device on the same Wi-Fi network, or pair it with a QR code.</span><button className="secondary-button" onClick={() => setPairingOpen(true)}>Pair with QR code</button></div>}
+          {(() => {
+            const visiblePeers = snap.peers.filter((peer) => {
+              if (peer.device.model !== "AirBridge service") return true;
+              if (snap.localDaemon.enabled) return false;
+              return !snap.peers.some(
+                (other) => other.device.model !== "AirBridge service" && other.device.platform === peer.device.platform,
+              );
+            });
+            return visiblePeers.length ? <ul className="device-list">{visiblePeers.map((peer) => {
+              const verification = snap.peerSecurity[peer.peerId];
+              return <li className="device-row" key={peer.peerId}>
+                <span className="device-glyph" aria-hidden="true">{peer.device.formFactor === "phone" ? "▯" : "▱"}</span>
+                <span className="device-copy"><strong>{peer.device.name}</strong><small>{peer.discoveryScope === "paired" ? "Paired" : "Nearby"}{verification ? " · Encrypted session established" : " · Discovered; pair to send"}</small></span>
+                <button className="quiet-button clipboard-device-button" aria-label={`Send clipboard text to ${peer.device.name}`} title="Send text / link / code" onClick={() => openClipboardForPeer(peer.peerId)}>Clipboard</button>
+                <button className="send-device-button" disabled={stagedFiles.length === 0 || !verification} onClick={() => { handleSendFilesToPeer(peer.peerId, stagedFiles); setStagedFiles([]); }}>Send</button>
+              </li>;
+            })}</ul> : <div className="empty-devices"><p>No devices found yet</p><span>Open AirBridge on your other device on the same Wi-Fi network, or pair it with a QR code.</span><button className="secondary-button" onClick={() => setPairingOpen(true)}>Pair with QR code</button></div>;
+          })()}
         </section>
         <section className="send-section">
           <div className="section-title"><h2>Send files</h2>{stagedFiles.length > 0 && <button className="text-button" onClick={() => setStagedFiles([])}>Clear selection</button>}</div>

@@ -1,9 +1,17 @@
 plugins {
     id("org.jetbrains.kotlin.jvm")
+    java
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
 }
 
 kotlin {
-    jvmToolchain(17)
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
 }
 
 // Cross-implementation vector check: expectations are produced by the real
@@ -47,6 +55,20 @@ val transportTest by tasks.registering(JavaExec::class) {
     mainClass = "com.airbridge.engine.TransportTestKt"
     outputs.upToDateWhen { false }
 }
+val milestone1Test by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Runs Milestone 1 packaging, discovery queue, and service invariants checks"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "com.airbridge.engine.Milestone1TestKt"
+    outputs.upToDateWhen { false }
+}
+val milestone2Test by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Runs Milestone 2 high-speed transfer pipeline, binary SACK, and loopback benchmark checks"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "com.airbridge.engine.Milestone2TestKt"
+    outputs.upToDateWhen { false }
+}
 val interopClasspath by tasks.registering {
     dependsOn(tasks.named("testClasses"))
     doLast {
@@ -54,4 +76,4 @@ val interopClasspath by tasks.registering {
             .writeText(sourceSets["test"].runtimeClasspath.asPath)
     }
 }
-tasks.named("check") { dependsOn(filesTest, transportTest, interopClasspath) }
+tasks.named("check") { dependsOn(filesTest, transportTest, milestone1Test, milestone2Test, interopClasspath) }

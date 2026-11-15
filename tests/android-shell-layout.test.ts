@@ -7,34 +7,25 @@ const root = process.cwd();
 const read = (relative: string): string =>
   readFileSync(path.join(root, relative), "utf8");
 
-describe("Android shell layout", () => {
-  it("stops WebView from zooming out when the header overflows", () => {
+describe("Android native Compose & background layout", () => {
+  it("renders a full edge-to-edge Compose activity without WebView chrome workarounds", () => {
     const activity = read("android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt");
-    expect(activity).toContain("settings.loadWithOverviewMode = false");
-    expect(activity).toContain("installSystemBarInsets(contentFrame)");
-    expect(activity).toContain("window.decorView.setOnApplyWindowInsetsListener");
-    expect(activity).toContain("setDecorFitsSystemWindows(false)");
-    expect(activity).toContain("registerSystemBackCallback()");
-    expect(activity).toContain("__airbridgeSystemBack");
-    expect(activity).toContain("fun setDarkTheme(enabled: Boolean)");
-  });
+    expect(activity).toContain("class MainActivity : ComponentActivity()");
+    expect(activity).toContain("enableEdgeToEdge(");
+    expect(activity).toContain("SystemBarStyle.dark(Color.TRANSPARENT)");
+    expect(activity).toContain("SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)");
+    expect(activity).toContain("setContent {");
+    expect(activity).not.toContain("WebView");
 
-  it("physically insets a parent container instead of padding WebView itself", () => {
-    const activity = read("android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt");
-    expect(activity).toContain("contentFrame = FrameLayout(this)");
-    expect(activity).toContain("contentFrame.addView(");
-    expect(activity).toContain("contentFrame.setPadding(fallback.left, fallback.top, fallback.right, fallback.bottom)");
-    expect(activity).toContain("view.setPadding(bars.left, bars.top, bars.right, bars.bottom)");
-    expect(activity).toContain("WindowInsets.CONSUMED");
-    expect(activity).toContain("fallbackSystemBarInsets()");
-    expect(activity).toContain("applyChromeInsets(lastChromeInsets)");
-    expect(activity).toContain("NATIVE_SHELL_ASSET");
-    expect(activity).toContain("injectNativeShellShim(view)");
-    expect(activity).toContain("onPageCommitVisible(view: WebView, url: String)");
-    expect(activity).not.toContain("installSystemBarInsets(webView)");
+    const app = read("android/app/src/main/kotlin/com/airbridge/app/ui/AirBridgeApp.kt");
+    expect(app).toContain("contentWindowInsets = WindowInsets.safeDrawing");
+    expect(app).toContain("SnackbarHost(hostState = snackbarHostState)");
+    expect(app).toContain("NavigationBar");
+    expect(app).toContain("NavigationRail");
 
     const manifest = read("android/app/src/main/AndroidManifest.xml");
     expect(manifest).toContain('android:windowSoftInputMode="adjustResize"');
+    expect(manifest).toContain('android:foregroundServiceType="connectedDevice|dataSync"');
   });
 
   it("centre-crops the QR preview instead of stretching the camera", () => {
@@ -45,7 +36,7 @@ describe("Android shell layout", () => {
     expect(scanner).toContain("fun applyChromeInsets(insets: SystemBarInsets)");
   });
 
-  it("uses safe areas and keeps header actions reachable on narrow screens", () => {
+  it("uses safe areas and keeps header actions reachable on narrow desktop web screens", () => {
     const css = read("src/client/index.css");
     expect(css).toContain("--ab-safe-top: env(safe-area-inset-top, 0px)");
     expect(css).toContain("html.ab-native-shell { --ab-safe-top: 0px;");
@@ -58,13 +49,12 @@ describe("Android shell layout", () => {
     expect(css).toContain(".settings-modal .advanced-toggle");
   });
 
-  it("applies the same safe-area rules to the unpaired connect screen", () => {
-    const connect = read("android/app/src/main/assets/shell/connect.html");
-    expect(connect).toContain("--ab-safe-top: env(safe-area-inset-top, 0px)");
-    expect(connect).toContain("html.ab-native-shell");
-    expect(connect).toContain("--ab-safe-left");
-    expect(connect).toContain("@media (max-width: 420px)");
-    expect(connect).toContain("@media (max-width: 480px)");
+  it("applies IME and safe-area padding on the native Compose connect screen", () => {
+    const connect = read("android/app/src/main/kotlin/com/airbridge/app/ui/screens/ConnectScreen.kt");
+    expect(connect).toContain("BoxWithConstraints(");
+    expect(connect).toContain(".imePadding()");
+    expect(connect).toContain("maxWidth >= 840.dp");
+    expect(connect).toContain("widthIn(max = 1040.dp)");
   });
 
   it("keeps clipboard sharing alive without open app UIs", () => {
@@ -86,7 +76,7 @@ describe("Android shell layout", () => {
     expect(prefs).toContain('getBoolean("connectionContinuity", true)');
   });
 
-  it("reads system-bar and cutout insets from the decor view", () => {
+  it("reads system-bar and cutout insets correctly in SystemBarInsets helper", () => {
     const helper = read(
       "android/app/src/main/kotlin/com/airbridge/app/SystemBarInsets.kt",
     );
@@ -122,20 +112,16 @@ describe("Android shell layout", () => {
     expect(service).toContain("publishClipboardChange");
     expect(service).not.toContain("getRootInActiveWindow");
 
-    const bridge = read("android/app/src/main/kotlin/com/airbridge/app/ShellBridge.kt");
-    expect(bridge).toContain("accessibilityOptInEnabled");
-    expect(bridge).toContain("openAccessibilitySettings");
+    const vm = read("android/app/src/main/kotlin/com/airbridge/app/ui/viewmodels/AirBridgeViewModel.kt");
+    expect(vm).toContain("fun setAccessibilityOptIn(enabled: Boolean)");
+    expect(vm).toContain("ClipboardAccessibilityService.isEnabled");
+
+    const settings = read("android/app/src/main/kotlin/com/airbridge/app/ui/screens/SettingsScreen.kt");
+    expect(settings).toContain("onSetAccessibilityOptIn");
+    expect(settings).toContain("onOpenAccessibilitySettings");
+    expect(settings).toContain("Accessibility service is active");
 
     const activity = read("android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt");
-    expect(activity).toContain("__airbridgeNativeAccessibilityState");
-
-    const nativeShell = read("src/client/engine/nativeShell.ts");
-    expect(nativeShell).toContain("getNativeAccessibilityOptIn");
-    expect(nativeShell).toContain("openNativeAccessibilitySettings");
-
-    const app = read("src/client/App.tsx");
-    expect(app).toContain("Accessibility-assisted clipboard capture");
-    expect(app).toContain("openNativeAccessibilitySettings");
-    expect(app).toContain("accessibilityServiceEnabled");
+    expect(activity).toContain("Settings.ACTION_ACCESSIBILITY_SETTINGS");
   });
 });

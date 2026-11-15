@@ -1,0 +1,10 @@
+{
+    "key_files": {
+        "gradles": [
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/build.gradle.kts"
+        ],
+        "manifests": [
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/AndroidManifest.xml"
+        ]
+    }
+}

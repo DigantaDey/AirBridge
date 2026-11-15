@@ -65,6 +65,9 @@ class Prefs(context: Context) {
      * user must explicitly opt in, then enable the AirBridge service in
      * Android's Accessibility settings; the app cannot enable it silently.
      */
+    val hasAccessibilityClipboardOptInChoice: Boolean
+        get() = sp.contains("accessibilityClipboardOptIn")
+
     var accessibilityClipboardOptIn: Boolean
         get() = sp.getBoolean("accessibilityClipboardOptIn", false)
         set(value) = sp.edit().putBoolean("accessibilityClipboardOptIn", value).apply()
@@ -78,7 +81,11 @@ class Prefs(context: Context) {
     fun pairingLink(): PairingLink? = PairingLink.parse(target)
 
     var deviceId: String
-        get() = sp.getString("nativeDeviceId", null) ?: com.airbridge.engine.AirCrypto.randomHex16().also { deviceId = it }
+        @Synchronized
+        get() = sp.getString("nativeDeviceId", null) ?: com.airbridge.engine.AirCrypto.randomHex16().also {
+            sp.edit().putString("nativeDeviceId", it).apply()
+        }
+        @Synchronized
         set(value) = sp.edit().putString("nativeDeviceId", value).apply()
     var peerId: String
         get() = sp.getString("nativePeerId", "") ?: ""
@@ -87,14 +94,25 @@ class Prefs(context: Context) {
         get() = sp.getString("nativeDeviceName", android.os.Build.MODEL) ?: "Android"
         set(value) = sp.edit().putString("nativeDeviceName", value).apply()
     var visibility: String
-        get() = sp.getString("nativeVisibility", "nearby") ?: "nearby"
-        set(value) = sp.edit().putString("nativeVisibility", value).apply()
+        get() = normalizeVisibility(sp.getString("nativeVisibility", "nearby"))
+        set(value) = sp.edit().putString("nativeVisibility", normalizeVisibility(value)).apply()
+
+    companion object {
+        fun normalizeVisibility(mode: String?): String = when (mode) {
+            "paired", "paired-only" -> "paired-only"
+            "hidden" -> "hidden"
+            else -> "nearby"
+        }
+    }
     var autoClipboard: Boolean
         get() = sp.getBoolean("nativeAutoClipboard", true)
         set(value) = sp.edit().putBoolean("nativeAutoClipboard", value).apply()
     var receiveClipboard: Boolean
         get() = sp.getBoolean("nativeReceiveClipboard", true)
         set(value) = sp.edit().putBoolean("nativeReceiveClipboard", value).apply()
+    var themeMode: String
+        get() = sp.getString("nativeThemeMode", "dark") ?: "dark"
+        set(value) = sp.edit().putString("nativeThemeMode", value).apply()
     var trustedKeys: Set<String>
         get() = sp.getStringSet("nativeTrustedKeys", emptySet())?.toSet() ?: emptySet()
         set(value) = sp.edit().putStringSet("nativeTrustedKeys", value).apply()
@@ -119,7 +137,6 @@ class Prefs(context: Context) {
             .remove("serverUrl")
             .remove("pairCode")
             .remove("pendingPairCode")
-            .remove("accessibilityClipboardOptIn")
             .apply()
     }
 }

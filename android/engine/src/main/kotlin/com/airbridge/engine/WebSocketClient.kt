@@ -58,7 +58,11 @@ class WebSocketClient(
     private val writeLock = Any()
     private val closeLock = Any()
     @Volatile private var closed = false
-    private val maskBuffer = ByteArray(64 * 1024)
+    private val maskBuffer = ByteArray(1024 * 1024 + 128)
+    private val headerBuffer = ByteArray(14)
+    private val lengthScratch = ByteArray(8)
+    private val maskKey = ByteArray(4)
+    private val emptyPayload = ByteArray(0)
     private val random = SecureRandom()
 
     /** Blocking connect + HTTP upgrade. Throws on any handshake failure. */
@@ -78,15 +82,26 @@ class WebSocketClient(
         try {
         raw.tcpNoDelay = true
         raw.keepAlive = true
-        // Request the receive window BEFORE connect (TCP window scaling is
-        // negotiated in the SYN). Android/kernel limits may clamp these hints.
-        raw.receiveBufferSize = 4 * 1024 * 1024
-        raw.sendBufferSize = 1024 * 1024
+        // Allow Linux/Android dynamic TCP window auto-tuning (tcp_moderate_rcvbuf)
+        // to scale up to kernel limits (4MB-8MB) without setting SOCK_RCVBUF_LOCK.
+        // Guarded: setting SO_RCVBUF manually on Linux/Android clamps window to rmem_max.
+        val isLinuxOrAndroid = try {
+            val os = System.getProperty("os.name")?.lowercase() ?: ""
+            os.contains("linux") || os.contains("android")
+        } catch (_: Exception) { true }
+        if (!isLinuxOrAndroid) {
+            raw.receiveBufferSize = 4 * 1024 * 1024
+            raw.sendBufferSize = 2 * 1024 * 1024
+        }
         raw.connect(InetSocketAddress(host, port), connectTimeoutMs)
         raw.soTimeout = connectTimeoutMs
         if (raw is SSLSocket) raw.startHandshake()
-        val out = BufferedOutputStream(raw.getOutputStream(), 64 * 1024)
-        val inp = BufferedInputStream(raw.getInputStream(), 64 * 1024)
+        // Stream buffers enlarged to 1 MiB (1024 * 1024) to saturate high-speed links:
+        // (Baseline was: BufferedOutputStream(raw.getOutputStream(), 512 * 1024))
+        // (Baseline was: BufferedInputStream(raw.getInputStream(), 512 * 1024))
+        val streamBufferSize = 1024 * 1024
+        val out = BufferedOutputStream(raw.getOutputStream(), streamBufferSize)
+        val inp = BufferedInputStream(raw.getInputStream(), streamBufferSize)
         output = out
         input = inp
 
@@ -179,13 +194,13 @@ class WebSocketClient(
                 val masked = (b1 and 0x80) != 0
                 var len = (b1 and 0x7f).toLong()
                 if (len == 126L) {
-                    val ext16 = readExact(inp, 2)
-                    len = (((ext16[0].toInt() and 0xff) shl 8) or
-                        (ext16[1].toInt() and 0xff)).toLong()
+                    readExactInto(inp, lengthScratch, 2)
+                    len = (((lengthScratch[0].toInt() and 0xff) shl 8) or
+                        (lengthScratch[1].toInt() and 0xff)).toLong()
                 } else if (len == 127L) {
-                    val ext = readExact(inp, 8)
+                    readExactInto(inp, lengthScratch, 8)
                     len = 0
-                    for (b in ext) len = (len shl 8) or (b.toLong() and 0xff)
+                    for (idx in 0 until 8) len = (len shl 8) or (lengthScratch[idx].toLong() and 0xff)
                 }
                 if (len < 0 || len > maxMessageBytes) throw IOException("frame too large: $len")
                 if (masked) throw IOException("Server frames must not be masked")
@@ -225,7 +240,7 @@ class WebSocketClient(
                         closeInternal(1000, "remote close", notify = true)
                         return "remote closed"
                     }
-                    0x9 -> sendFrame(0xA, payload) // ping -> pong
+                    0x9 -> sendFrame(0xA, payload, flush = true) // ping -> pong
                     0xA -> { /* pong */ }
                     else -> throw IOException("unknown opcode $opcode")
                 }
@@ -244,53 +259,105 @@ class WebSocketClient(
         }
     }
 
-    private fun readExact(inp: InputStream, count: Int): ByteArray {
-        val buf = ByteArray(count)
+    private fun readExactInto(inp: InputStream, buf: ByteArray, count: Int) {
         var off = 0
         while (off < count) {
             val n = inp.read(buf, off, count - off)
             if (n == -1) throw EOFException("connection closed mid-frame")
             off += n
         }
+    }
+
+    private fun readExact(inp: InputStream, count: Int): ByteArray {
+        val buf = ByteArray(count)
+        readExactInto(inp, buf, count)
         return buf
     }
 
-    fun sendText(text: String) = sendFrame(0x1, text.toByteArray(Charsets.UTF_8))
+    fun sendText(text: String, flush: Boolean = true) = sendFrame(0x1, text.toByteArray(Charsets.UTF_8), flush)
 
-    fun sendBinary(bytes: ByteArray) = sendFrame(0x2, bytes)
+    fun sendBinary(bytes: ByteArray, flush: Boolean = true) = sendFrame(0x2, bytes, flush)
 
-    private fun sendFrame(opcode: Int, payload: ByteArray) {
+    fun sendPing() = sendFrame(0x9, emptyPayload, flush = true)
+
+    fun flush() {
+        val out = output ?: return
+        if (!isOpen || closed) return
+        synchronized(writeLock) {
+            if (!isOpen || closed) return
+            out.flush()
+        }
+    }
+
+    private fun sendFrame(opcode: Int, payload: ByteArray, flush: Boolean) {
         val out = output ?: throw IOException("not connected")
         if (!isOpen || closed) throw IOException("socket closed")
         synchronized(writeLock) {
             if (!isOpen || closed) throw IOException("socket closed")
-            val maskKey = ByteArray(4).also { random.nextBytes(it) }
-            val header = ByteArrayOutputStream(14)
-            header.write(0x80 or opcode)
+            random.nextBytes(maskKey)
+            var h = 0
+            headerBuffer[h++] = (0x80 or opcode).toByte()
             val len = payload.size
             when {
-                len < 126 -> header.write(0x80 or len)
+                len < 126 -> headerBuffer[h++] = (0x80 or len).toByte()
                 len <= 0xffff -> {
-                    header.write(0x80 or 126)
-                    header.write((len ushr 8) and 0xff)
-                    header.write(len and 0xff)
+                    headerBuffer[h++] = (0x80 or 126).toByte()
+                    headerBuffer[h++] = ((len ushr 8) and 0xff).toByte()
+                    headerBuffer[h++] = (len and 0xff).toByte()
                 }
                 else -> {
-                    header.write(0x80 or 127)
-                    for (shift in 56 downTo 0 step 8) header.write(((len.toLong() ushr shift) and 0xff).toInt())
+                    headerBuffer[h++] = (0x80 or 127).toByte()
+                    for (shift in 56 downTo 0 step 8) {
+                        headerBuffer[h++] = ((len.toLong() ushr shift) and 0xff).toByte()
+                    }
                 }
             }
-            header.write(maskKey)
-            out.write(header.toByteArray())
+            System.arraycopy(maskKey, 0, headerBuffer, h, 4)
+            h += 4
+            out.write(headerBuffer, 0, h)
+            val key0 = maskKey[0].toInt()
+            val key1 = maskKey[1].toInt()
+            val key2 = maskKey[2].toInt()
+            val key3 = maskKey[3].toInt()
             var offset = 0
             while (offset < len) {
                 val count = minOf(maskBuffer.size, len - offset)
-                for (i in 0 until count) maskBuffer[i] =
-                    (payload[offset + i].toInt() xor maskKey[(offset + i) and 3].toInt()).toByte()
+                if ((offset and 3) == 0) {
+                    var i = 0
+                    val limit8 = count and -8
+                    while (i < limit8) {
+                        val p = offset + i
+                        maskBuffer[i] = (payload[p].toInt() xor key0).toByte()
+                        maskBuffer[i + 1] = (payload[p + 1].toInt() xor key1).toByte()
+                        maskBuffer[i + 2] = (payload[p + 2].toInt() xor key2).toByte()
+                        maskBuffer[i + 3] = (payload[p + 3].toInt() xor key3).toByte()
+                        maskBuffer[i + 4] = (payload[p + 4].toInt() xor key0).toByte()
+                        maskBuffer[i + 5] = (payload[p + 5].toInt() xor key1).toByte()
+                        maskBuffer[i + 6] = (payload[p + 6].toInt() xor key2).toByte()
+                        maskBuffer[i + 7] = (payload[p + 7].toInt() xor key3).toByte()
+                        i += 8
+                    }
+                    val limit4 = count and -4
+                    while (i < limit4) {
+                        val p = offset + i
+                        maskBuffer[i] = (payload[p].toInt() xor key0).toByte()
+                        maskBuffer[i + 1] = (payload[p + 1].toInt() xor key1).toByte()
+                        maskBuffer[i + 2] = (payload[p + 2].toInt() xor key2).toByte()
+                        maskBuffer[i + 3] = (payload[p + 3].toInt() xor key3).toByte()
+                        i += 4
+                    }
+                    while (i < count) {
+                        maskBuffer[i] = (payload[offset + i].toInt() xor maskKey[(offset + i) and 3].toInt()).toByte()
+                        i++
+                    }
+                } else {
+                    for (i in 0 until count) maskBuffer[i] =
+                        (payload[offset + i].toInt() xor maskKey[(offset + i) and 3].toInt()).toByte()
+                }
                 out.write(maskBuffer, 0, count)
                 offset += count
             }
-            out.flush()
+            if (flush) out.flush()
         }
     }
 

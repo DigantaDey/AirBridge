@@ -10,8 +10,12 @@ import {
   type TransportKind,
   type VisibilityMode,
   classifyTextPayload,
+  decodeBinarySackFrame,
   decodeEncryptedChunkFrame,
+  encodeBinarySackFrame,
   encodeEncryptedChunkFrame,
+  FRAME_BINARY_SACK,
+  FRAME_ENCRYPTED_CHUNK,
   formatPairCode,
   isValidClipboardImageDataUrl,
   MAX_CLIPBOARD_IMAGE_DATAURL,
@@ -33,7 +37,7 @@ import {
 import { loadOrCreateDeviceId } from './deviceDetect.js';
 import { hashStream, Sha256Stream } from './sha256Stream.js';
 
-export const CHUNK_SIZE = 256 * 1024; // 256 KiB — 4× fewer read/encrypt/frame/ACK round-trips per byte than the old 64 KiB
+export const CHUNK_SIZE = 1024 * 1024; // 1 MiB — 4× fewer frame/crypto/ACK round-trips than 256 KiB
 export const MIN_CHUNK_SIZE = 16 * 1024; // smallest per-file chunk size a peer may declare (legacy peers use 64 KiB)
 export const MAX_CHUNK_SIZE = 1024 * 1024; // largest per-file chunk size a peer may declare
 export const MAX_FILES_PER_TRANSFER = 100;
@@ -105,18 +109,24 @@ export function countNewlyAcknowledgedChunks(
   );
 }
 
-const MAX_UNACKED_CHUNKS = 64; // 16 MiB of receiver-confirmed work: deep for LAN RTTs without hiding a slow disk
-const ACK_INTERVAL_CHUNKS = 8; // 2 MiB ACK cadence keeps both devices' progress closely aligned
+const WINDOW_BYTE_BUDGET = 32 * 1024 * 1024;
+const ACK_BYTE_CADENCE = 2 * 1024 * 1024;
+function windowChunksFor(chunkSize: number): number {
+  return Math.max(32, Math.min(128, Math.floor(WINDOW_BYTE_BUDGET / Math.max(MIN_CHUNK_SIZE, chunkSize))));
+}
+function ackIntervalFor(chunkSize: number): number {
+  return Math.max(2, Math.min(16, Math.floor(ACK_BYTE_CADENCE / Math.max(MIN_CHUNK_SIZE, chunkSize))));
+}
 const ACK_STALL_TIMEOUT_MS = 60_000;
-const ACK_MAX_DELAY_MS = 200;
+const ACK_MAX_DELAY_MS = 150;
 // Keep the displayed rate truthful when disk writes or the network pause.
 const SPEED_SAMPLE_INTERVAL_MS = 250;
 const SPEED_STALE_TIMEOUT_MS = 1_500;
 const COMPLETE_ACK_TIMEOUT_MS = 60_000;
 const MAX_COMPLETE_ACK_RETRIES = 2;
-const ENCRYPT_PIPELINE_DEPTH = 8; // file reads + AES-GCM encrypts kept in flight ahead of the socket (2 MiB of frames)
-const MAX_BUFFER_HIGH_WATER = 4 * 1024 * 1024; // cap queued bytes so other apps are not stuck behind a huge Wi-Fi buffer
-const BUFFER_LOW_WATER = 1024 * 1024; // resume after the socket has drained below 1 MiB
+const ENCRYPT_PIPELINE_DEPTH = 8; // 8 MiB in flight at 1 MiB/chunk without stalling the socket
+const MAX_BUFFER_HIGH_WATER = 8 * 1024 * 1024; // keep high-speed local Wi-Fi fed smoothly
+const BUFFER_LOW_WATER = 2 * 1024 * 1024;
 
 export interface SendableFileInput {
   /** Opaque Android URI capability, never a path supplied by a peer. */
@@ -284,6 +294,7 @@ interface InternalSendState {
   lastAckAt: number;
   ackWaitStartedAt?: number;
   peerPublicKey?: string;
+  peerConnectedAt?: number;
   connection?: WebSocket;
   lastAckedBytes: number;
   /** Speed sampling is separate from ACK-stall detection, so a paused stream can show 0 B/s. */
@@ -297,7 +308,7 @@ interface InternalSendState {
   /** All durable bytes, including any non-contiguous chunks, on the receiver. */
   resumeBytesTotal?: number;
   completionResult?: { verified: boolean; reason?: string };
-  completionAckWaiters: Array<(result: { verified: boolean; reason?: string }) => void>;
+  completionAckWaiters: Array<(result: { verified: boolean; reason?: string } | null) => void>;
   acceptingPeerId?: string;
 }
 
@@ -1551,6 +1562,7 @@ export class WarpClient {
     peer: PeerSummary,
   ): Promise<TransportKind> {
     sendState.connection = this.ws ?? undefined;
+    sendState.peerConnectedAt = peer.connectedAt;
     const acceptPromise = new Promise<TransportKind>((resolve, reject) => {
       sendState.acceptResolver = resolve;
       sendState.acceptRejecter = reject;
@@ -1756,12 +1768,13 @@ export class WarpClient {
         launchPrepare(resumeFrom + i);
       }
 
+      const maxUnacked = windowChunksFor(meta.chunkSize);
       for (let chunkIdx = resumeFrom; chunkIdx < meta.totalChunks; chunkIdx++) {
         if (sendState.cancelled) return;
 
         // Respect receiver-confirmed work. If ACKs stop, surface the stall as
         // recoverable so the same transfer ID can renegotiate and resume.
-        while (!sendState.cancelled && globalSentChunks - sendState.ackedGlobalChunks >= MAX_UNACKED_CHUNKS) {
+        while (!sendState.cancelled && globalSentChunks - sendState.ackedGlobalChunks >= maxUnacked) {
           await this.waitForChunkAckProgress(sendState, peer.peerId);
         }
         if (sendState.cancelled) return;
@@ -1797,6 +1810,7 @@ export class WarpClient {
         sendState.sentChunksByFile[fileIdx] = (sendState.sentChunksByFile[fileIdx] ?? 0) + 1;
       }
 
+      this.assertTransferPeerConnected(sendState, peer.peerId);
       const digest = fileHasher.hex();
       await this.sendControlMessage(
         peer.peerId,
@@ -1856,8 +1870,12 @@ export class WarpClient {
         (sendState.connection && sendState.connection !== this.ws)) {
       throw new TransferConnectionInterruptedError('Signaling connection lost; resuming transfer.');
     }
-    if (!this.peers.some((peer) => peer.peerId === peerId &&
-        (!sendState.peerPublicKey || peer.device.publicKey === sendState.peerPublicKey))) {
+    const peer = this.peers.find(
+      (candidate) =>
+        candidate.peerId === peerId &&
+        (!sendState.peerPublicKey || candidate.device.publicKey === sendState.peerPublicKey),
+    );
+    if (!peer || (sendState.peerConnectedAt !== undefined && peer.connectedAt !== sendState.peerConnectedAt)) {
       throw new TransferConnectionInterruptedError('Receiver disconnected; waiting to resume.');
     }
   }
@@ -1907,7 +1925,7 @@ export class WarpClient {
           if (index >= 0) sendState.completionAckWaiters.splice(index, 1);
           resolve(result);
         };
-        const waiter = (result: { verified: boolean; reason?: string }) => finish(result);
+        const waiter = (result: { verified: boolean; reason?: string } | null) => finish(result);
         const timer = setTimeout(() => finish(null), COMPLETE_ACK_TIMEOUT_MS);
         sendState.completionAckWaiters.push(waiter);
         if (sendState.completionResult) finish(sendState.completionResult);
@@ -2452,14 +2470,24 @@ export class WarpClient {
         try {
           const bytes = new Uint8Array(event.data);
           const { sourcePeerId, payload } = unwrapRoutedRelayFrame(bytes);
-          this.handleIncomingEncryptedChunk(sourcePeerId, payload, 'ws-relay').catch(() => {});
+          if (payload[0] === FRAME_BINARY_SACK) {
+            const sack = decodeBinarySackFrame(payload);
+            this.applyChunkAck(sourcePeerId, { transferId: sack.transferId, fileIndex: sack.fileIndex, ackedChunkIndex: sack.chunkIndex });
+          } else {
+            this.handleIncomingEncryptedChunk(sourcePeerId, payload, 'ws-relay').catch(() => {});
+          }
         } catch { /* malformed routed frame */ }
       } else if (typeof Blob !== 'undefined' && event.data instanceof Blob) {
         event.data.arrayBuffer().then((ab) => {
           if (this.destroyed || this.ws !== ws) return;
           const bytes = new Uint8Array(ab);
           const { sourcePeerId, payload } = unwrapRoutedRelayFrame(bytes);
-          this.handleIncomingEncryptedChunk(sourcePeerId, payload, 'ws-relay').catch(() => {});
+          if (payload[0] === FRAME_BINARY_SACK) {
+            const sack = decodeBinarySackFrame(payload);
+            this.applyChunkAck(sourcePeerId, { transferId: sack.transferId, fileIndex: sack.fileIndex, ackedChunkIndex: sack.chunkIndex });
+          } else {
+            this.handleIncomingEncryptedChunk(sourcePeerId, payload, 'ws-relay').catch(() => {});
+          }
         }).catch(() => {});
       }
     };
@@ -2551,10 +2579,19 @@ export class WarpClient {
     }
     for (const sendState of this.outgoingStates.values()) {
       const acceptingPeerId = sendState.acceptingPeerId ?? sendState.session.peerId;
-      if (sendState.acceptRejecter && !activeIds.has(acceptingPeerId)) {
-        sendState.acceptRejecter(
-          new TransferConnectionInterruptedError('Receiver disconnected while waiting for acceptance.'),
-        );
+      const activePeer = nextPeers.find((peer) => peer.peerId === acceptingPeerId);
+      const peerLost =
+        !activePeer ||
+        (sendState.peerPublicKey !== undefined && activePeer.device.publicKey !== sendState.peerPublicKey) ||
+        (sendState.peerConnectedAt !== undefined && activePeer.connectedAt !== sendState.peerConnectedAt);
+      if (peerLost) {
+        if (sendState.acceptRejecter) {
+          sendState.acceptRejecter(
+            new TransferConnectionInterruptedError('Receiver disconnected while waiting for acceptance.'),
+          );
+        }
+        for (const waiter of [...sendState.ackWaiters]) waiter();
+        for (const waiter of [...sendState.completionAckWaiters]) waiter(null);
       }
     }
 
@@ -2634,7 +2671,12 @@ export class WarpClient {
 
     const connection = this.ws;
     const peer = this.peers.find((p) => p.peerId === peerId);
-    if (!peer) throw new Error('Missing peer encryption session');
+    if (!peer) {
+      if ('transferId' in payload && this.outgoingStates.has(payload.transferId)) {
+        throw new TransferConnectionInterruptedError('Receiver disconnected; waiting to resume.');
+      }
+      throw new Error('Missing peer encryption session');
+    }
     if ('transferId' in payload) {
       const transfer = this.transfers.find((item) => item.transferId === payload.transferId);
       const boundKey = this.outgoingStates.get(payload.transferId)?.peerPublicKey ??
@@ -3025,70 +3067,12 @@ export class WarpClient {
       }
 
       case 'chunk-ack': {
-        const sendState = this.outgoingStates.get(payload.transferId);
-        if (sendState && sendState.session.peerId === fromPeerId) {
-          if (!Number.isInteger(payload.fileIndex) || payload.fileIndex < 0 || payload.fileIndex >= sendState.session.files.length) break;
-          const file = sendState.session.files[payload.fileIndex];
-          if (
-            !file ||
-            !Number.isInteger(payload.ackedChunkIndex) ||
-            payload.ackedChunkIndex < 0 ||
-            payload.ackedChunkIndex >= file.totalChunks ||
-            !Number.isInteger(payload.bytesReceivedTotal) ||
-            payload.bytesReceivedTotal < 0 ||
-            payload.bytesReceivedTotal > sendState.session.totalBytes
-          ) break;
-          const receiverPrefix = payload.ackedChunkIndex + 1;
-          const resumePrefix = sendState.resumeFromChunks?.[payload.fileIndex] ?? 0;
-          const sentPrefix = resumePrefix + (sendState.sentChunksByFile[payload.fileIndex] ?? 0);
-          // ACKs are per-file. Treating a later file's ACK as proof that all
-          // earlier files were durable allowed multi-file sends to release
-          // the 16 MiB window early and get tens of MiB ahead of the receiver.
-          if (receiverPrefix > sentPrefix) break;
-          const previousAckedChunks = sendState.ackedGlobalChunks;
-          sendState.ackedChunksByFile[payload.fileIndex] = Math.max(
-            sendState.ackedChunksByFile[payload.fileIndex] ?? resumePrefix,
-            receiverPrefix,
-          );
-          const newlyAcked = countNewlyAcknowledgedChunks(
-            sendState.ackedChunksByFile,
-            sendState.resumeFromChunks,
-          );
-          sendState.ackedGlobalChunks = Math.min(sendState.sentGlobalChunks, newlyAcked);
-
-          const now = Date.now();
-          const previousConfirmedBytes = sendState.session.transferredBytes;
-          const confirmedBytes = Math.max(
-            previousConfirmedBytes,
-            Math.min(sendState.session.totalBytes, payload.bytesReceivedTotal),
-          );
-          if (confirmedBytes > sendState.lastAckedBytes) {
-            const elapsed = Math.max((now - sendState.lastSpeedTs) / 1000, 0.001);
-            const instant = (confirmedBytes - sendState.lastSpeedBytes) / elapsed;
-            sendState.session.speedBytesPerSec =
-              sendState.session.speedBytesPerSec === 0
-                ? instant
-                : sendState.session.speedBytesPerSec * 0.65 + instant * 0.35;
-            sendState.lastAckedBytes = confirmedBytes;
-            sendState.lastSpeedBytes = confirmedBytes;
-            sendState.lastSpeedTs = now;
-            sendState.session.transferredBytes = confirmedBytes;
-            const remaining = Math.max(0, sendState.session.totalBytes - confirmedBytes);
-            sendState.session.etaSeconds =
-              sendState.session.speedBytesPerSec > 1024
-                ? Math.ceil(remaining / sendState.session.speedBytesPerSec)
-                : null;
-          }
-          if (
-            sendState.ackedGlobalChunks > previousAckedChunks ||
-            confirmedBytes > previousConfirmedBytes
-          ) {
-            sendState.lastAckAt = now;
-          }
-          const waiters = sendState.ackWaiters.splice(0, sendState.ackWaiters.length);
-          for (const w of waiters) w();
-          this.emit();
-        }
+        this.applyChunkAck(fromPeerId, {
+          transferId: payload.transferId,
+          fileIndex: payload.fileIndex,
+          ackedChunkIndex: payload.ackedChunkIndex,
+          bytesReceivedTotal: payload.bytesReceivedTotal,
+        });
         break;
       }
 
@@ -3168,6 +3152,87 @@ export class WarpClient {
         break;
       }
     }
+  }
+
+  private applyChunkAck(
+    fromPeerId: string,
+    ack: { transferId: string; fileIndex: number; ackedChunkIndex: number; bytesReceivedTotal?: number },
+  ): void {
+    const sendState = this.outgoingStates.get(ack.transferId);
+    if (!sendState || sendState.session.peerId !== fromPeerId) return;
+    if (!Number.isInteger(ack.fileIndex) || ack.fileIndex < 0 || ack.fileIndex >= sendState.session.files.length) return;
+    const file = sendState.session.files[ack.fileIndex];
+    if (
+      !file ||
+      !Number.isInteger(ack.ackedChunkIndex) ||
+      ack.ackedChunkIndex < 0 ||
+      ack.ackedChunkIndex >= file.totalChunks
+    ) return;
+    if (
+      ack.bytesReceivedTotal !== undefined &&
+      (!Number.isInteger(ack.bytesReceivedTotal) ||
+        ack.bytesReceivedTotal < 0 ||
+        ack.bytesReceivedTotal > sendState.session.totalBytes)
+    ) return;
+
+    const receiverPrefix = ack.ackedChunkIndex + 1;
+    const resumePrefix = sendState.resumeFromChunks?.[ack.fileIndex] ?? 0;
+    const sentPrefix = resumePrefix + (sendState.sentChunksByFile[ack.fileIndex] ?? 0);
+    // ACKs are per-file. Treating a later file's ACK as proof that all
+    // earlier files were durable allowed multi-file sends to release
+    // the window early and get ahead of the receiver.
+    if (receiverPrefix > sentPrefix) return;
+
+    const previousAckedChunks = sendState.ackedGlobalChunks;
+    sendState.ackedChunksByFile[ack.fileIndex] = Math.max(
+      sendState.ackedChunksByFile[ack.fileIndex] ?? resumePrefix,
+      receiverPrefix,
+    );
+    const newlyAcked = countNewlyAcknowledgedChunks(
+      sendState.ackedChunksByFile,
+      sendState.resumeFromChunks,
+    );
+    sendState.ackedGlobalChunks = Math.min(sendState.sentGlobalChunks, newlyAcked);
+
+    const now = Date.now();
+    const previousConfirmedBytes = sendState.session.transferredBytes;
+    const inferredConfirmed = sendState.session.files.reduce(
+      (sum, f, idx) => sum + Math.min(f.size, (sendState.ackedChunksByFile[idx] ?? 0) * f.chunkSize),
+      0,
+    );
+    const confirmedBytes = Math.max(
+      previousConfirmedBytes,
+      Math.min(
+        sendState.session.totalBytes,
+        ack.bytesReceivedTotal !== undefined ? ack.bytesReceivedTotal : inferredConfirmed,
+      ),
+    );
+    if (confirmedBytes > sendState.lastAckedBytes) {
+      const elapsed = Math.max((now - sendState.lastSpeedTs) / 1000, 0.001);
+      const instant = (confirmedBytes - sendState.lastSpeedBytes) / elapsed;
+      sendState.session.speedBytesPerSec =
+        sendState.session.speedBytesPerSec === 0
+          ? instant
+          : sendState.session.speedBytesPerSec * 0.65 + instant * 0.35;
+      sendState.lastAckedBytes = confirmedBytes;
+      sendState.lastSpeedBytes = confirmedBytes;
+      sendState.lastSpeedTs = now;
+      sendState.session.transferredBytes = confirmedBytes;
+      const remaining = Math.max(0, sendState.session.totalBytes - confirmedBytes);
+      sendState.session.etaSeconds =
+        sendState.session.speedBytesPerSec > 1024
+          ? Math.ceil(remaining / sendState.session.speedBytesPerSec)
+          : null;
+    }
+    if (
+      sendState.ackedGlobalChunks > previousAckedChunks ||
+      confirmedBytes > previousConfirmedBytes
+    ) {
+      sendState.lastAckAt = now;
+    }
+    const waiters = sendState.ackWaiters.splice(0, sendState.ackWaiters.length);
+    for (const w of waiters) w();
+    this.emit();
   }
 
   private scheduleReceiveFinalization(transferId: string, forceFallback: boolean): Promise<void> {
@@ -3495,9 +3560,10 @@ export class WarpClient {
     const lastAck = recvState.lastAckedChunks[fileIndex];
     const ackNow = Date.now();
     const ackTimes = recvState.lastAckTimes ??= recvState.session.files.map(() => 0);
+    const ackInterval = ackIntervalFor(meta.chunkSize);
     if (
       contiguousAck > lastAck &&
-      (contiguousAck - lastAck >= ACK_INTERVAL_CHUNKS || nextContiguous === meta.totalChunks ||
+      (contiguousAck - lastAck >= ackInterval || nextContiguous === meta.totalChunks ||
         ackNow - ackTimes[fileIndex] >= ACK_MAX_DELAY_MS)
     ) {
       recvState.lastAckedChunks[fileIndex] = contiguousAck;
@@ -3505,17 +3571,33 @@ export class WarpClient {
       // ACK only a contiguous durable prefix. Decrypts and writes can finish
       // out of order, so acknowledging an arbitrary completed chunk would
       // incorrectly release earlier chunks that are still in flight.
-      void this.sendControlMessage(
-        fromPeerId,
-        {
-          kind: 'chunk-ack',
-          transferId: decoded.transferId,
-          fileIndex,
-          ackedChunkIndex: contiguousAck,
-          bytesReceivedTotal: recvState.bytesReceived,
-        },
-        true
-      ).catch(() => {});
+      const binaryAck =
+        transport === 'ws-relay' && this.ws?.readyState === WebSocket.OPEN
+          ? encodeBinarySackFrame({
+              transferId: decoded.transferId,
+              fileIndex,
+              chunkIndex: contiguousAck,
+            })
+          : null;
+      if (binaryAck && this.ws?.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(wrapRoutedRelayFrame(fromPeerId, this.peerId, binaryAck));
+        } catch {
+          // Fall through cleanly if the socket closed concurrently
+        }
+      } else {
+        void this.sendControlMessage(
+          fromPeerId,
+          {
+            kind: 'chunk-ack',
+            transferId: decoded.transferId,
+            fileIndex,
+            ackedChunkIndex: contiguousAck,
+            bytesReceivedTotal: recvState.bytesReceived,
+          },
+          true
+        ).catch(() => {});
+      }
     }
 
     const fileStored = recvState.receivedChunkCounts[fileIndex] >= meta.totalChunks;
@@ -3744,9 +3826,26 @@ export class WarpClient {
       if (this.ws.readyState !== WebSocket.OPEN) {
         throw new TransferConnectionInterruptedError('Signaling relay socket disconnected; resuming transfer.');
       }
-      // Short poll: browsers expose no drain event for WebSocket, and a
-      // 15 ms nap here used to cap relay throughput far below link speed.
-      await new Promise((r) => setTimeout(r, 3));
+      const rawSocket = (this.ws as any)?._socket;
+      if (rawSocket && typeof rawSocket.once === 'function') {
+        await new Promise<void>((resolve) => {
+          let timer: ReturnType<typeof setTimeout> | null = null;
+          const onDrain = () => {
+            if (timer) clearTimeout(timer);
+            resolve();
+          };
+          timer = setTimeout(() => {
+            if (typeof rawSocket.removeListener === 'function') {
+              rawSocket.removeListener('drain', onDrain);
+            }
+            resolve();
+          }, 10);
+          rawSocket.once('drain', onDrain);
+        });
+      } else {
+        // Fast poll in browser environments where WebSocket exposes no drain event
+        await new Promise((r) => setTimeout(r, 1));
+      }
     }
     const routed = wrapRoutedRelayFrame(targetPeerId, this.peerId, innerFrame);
     try {

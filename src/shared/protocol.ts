@@ -258,11 +258,13 @@ export function formatPairCode(code: string): string {
 
 export const FRAME_ENCRYPTED_CHUNK = 0x01;
 export const FRAME_ROUTED_RELAY = 0x02;
+export const FRAME_BINARY_SACK = 0x03;
 
 export const ID_ASCII_LENGTH = 16; // 16 hex chars = 64 bits entropy
 export const GCM_IV_LENGTH = 12;
 export const CHUNK_HEADER_LENGTH = 1 + ID_ASCII_LENGTH + 4 + 4 + GCM_IV_LENGTH; // 37 bytes
 export const ROUTING_HEADER_LENGTH = 1 + ID_ASCII_LENGTH + ID_ASCII_LENGTH; // 33 bytes
+export const BINARY_SACK_LENGTH = 16; // 1(op) + 8(hex64 transferId) + 2(fileIndex) + 4(chunkIndex) + 1(bitmask)
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -366,6 +368,64 @@ export function overwriteRoutedSourcePeerId(bytes: Uint8Array, authenticatedPeer
   if (bytes.byteLength >= ROUTING_HEADER_LENGTH && bytes[0] === FRAME_ROUTED_RELAY) {
     writeFixedAsciiId(bytes, 17, authenticatedPeerId);
   }
+}
+
+export interface BinarySackFrame {
+  transferId: string;
+  fileIndex: number;
+  chunkIndex: number;
+  bitmask?: number;
+}
+
+const HEX_ALPHABET = '0123456789abcdef';
+
+function hexNibble(code: number): number {
+  if (code >= 48 && code <= 57) return code - 48;
+  if (code >= 97 && code <= 102) return code - 87;
+  if (code >= 65 && code <= 70) return code - 55;
+  return -1;
+}
+
+export function encodeBinarySackFrame(frame: BinarySackFrame): Uint8Array | null {
+  if (frame.transferId.length !== 16 || !Number.isInteger(frame.fileIndex) ||
+      frame.fileIndex < 0 || frame.fileIndex > 0xffff ||
+      !Number.isInteger(frame.chunkIndex) || frame.chunkIndex < 0) {
+    return null;
+  }
+  const out = new Uint8Array(BINARY_SACK_LENGTH);
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  out[0] = FRAME_BINARY_SACK;
+  for (let i = 0; i < 8; i++) {
+    const hi = hexNibble(frame.transferId.charCodeAt(i * 2));
+    const lo = hexNibble(frame.transferId.charCodeAt(i * 2 + 1));
+    if (hi < 0 || lo < 0) return null;
+    out[1 + i] = (hi << 4) | lo;
+  }
+  view.setUint16(9, frame.fileIndex, false);
+  view.setUint32(11, frame.chunkIndex >>> 0, false);
+  out[15] = (frame.bitmask ?? 0) & 0xff;
+  return out;
+}
+
+export function decodeBinarySackFrame(bytes: Uint8Array): BinarySackFrame {
+  if (bytes.byteLength !== BINARY_SACK_LENGTH) {
+    throw new Error(`Binary SACK invalid length: ${bytes.byteLength}`);
+  }
+  if (bytes[0] !== FRAME_BINARY_SACK) {
+    throw new Error(`Unexpected binary SACK opcode: 0x${bytes[0].toString(16)}`);
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let transferId = '';
+  for (let i = 0; i < 8; i++) {
+    const b = bytes[1 + i];
+    transferId += HEX_ALPHABET[b >>> 4] + HEX_ALPHABET[b & 0x0f];
+  }
+  return {
+    transferId,
+    fileIndex: view.getUint16(9, false),
+    chunkIndex: view.getUint32(11, false),
+    bitmask: bytes[15],
+  };
 }
 
 // ============================================================================

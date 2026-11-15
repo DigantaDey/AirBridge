@@ -1,0 +1,101 @@
+{
+    "APP_DIR": "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app",
+    "APP_NAME": "AirBridge",
+    "GOAL_NAME": "data_safety_part_1",
+    "PACKAGE_NAME": "com.airbridge.app",
+    "REPO_ROOT": "/Users/digantadey/.gemini/config/skills/play-policy-insights",
+    "TARGET_SDK": 35,
+    "TEMP_DIR": "/Users/digantadey/AndroidStudioProjects/AirBridge/.scratch/play_policy_insights_c152f7f1-af61-4968-85c9-680c0dda7907",
+    "accessibility": [
+        "src/main/kotlin/com/airbridge/app/ClipboardAccessibilityService.kt (Pattern: AccessibilityService)",
+        "src/main/kotlin/com/airbridge/app/ConnectionService.kt (Pattern: AccessibilityService)",
+        "src/main/kotlin/com/airbridge/app/ui/viewmodels/AirBridgeViewModel.kt (Pattern: AccessibilityService)"
+    ],
+    "data_sources": {
+        "FILES_AND_DOCS": {
+            "description": "A user\u2019s files or documents, or information about their files or documents such as file names.",
+            "findings": [
+                "src/main/kotlin/com/airbridge/app/MainActivity.kt (Pattern: */*)"
+            ]
+        },
+        "MUSIC": {
+            "description": "A user\u2019s music files.",
+            "findings": [
+                "src/main/kotlin/com/airbridge/app/MainActivity.kt (Pattern: track)"
+            ]
+        },
+        "PERFORMANCE_DIAGNOSTICS": {
+            "description": "Information about the performance of your app. For example battery life, loading time, latency, framerate, or any technical diagnostics.",
+            "findings": [
+                "src/main/kotlin/com/airbridge/app/ConnectionService.kt (Pattern: PowerManager)"
+            ]
+        },
+        "PHOTOS": {
+            "description": "A user\u2019s photos.",
+            "findings": [
+                "src/main/kotlin/com/airbridge/app/MainActivity.kt (Pattern: PickVisualMedia)",
+                "src/main/kotlin/com/airbridge/app/QrScannerView.kt (Pattern: CAMERA)",
+                "src/main/kotlin/com/airbridge/app/ui/viewmodels/AirBridgeViewModel.kt (Pattern: CAMERA)"
+            ]
+        }
+    },
+    "disclosure": [
+        "src/main/kotlin/com/airbridge/app/ConnectionService.kt (Pattern: Accept)",
+        "src/main/kotlin/com/airbridge/app/MainActivity.kt (Pattern: Dialog)",
+        "src/main/kotlin/com/airbridge/app/QrScannerView.kt (Pattern: share)",
+        "src/main/kotlin/com/airbridge/app/ShareTextActivity.kt (Pattern: share)",
+        "src/main/kotlin/com/airbridge/app/ui/AirBridgeApp.kt (Pattern: AlertDialog)",
+        "src/main/kotlin/com/airbridge/app/ui/components/TransferCard.kt (Pattern: Accept)",
+        "src/main/kotlin/com/airbridge/app/ui/components/TransferOfferDialog.kt (Pattern: AlertDialog)",
+        "src/main/kotlin/com/airbridge/app/ui/screens/SettingsScreen.kt (Pattern: AlertDialog)",
+        "src/main/kotlin/com/airbridge/app/ui/screens/TransfersScreen.kt (Pattern: Accept)"
+    ],
+    "foreground_service": [
+        "src/main/kotlin/com/airbridge/app/ClipboardAccessibilityService.kt (Pattern: startForeground)",
+        "src/main/kotlin/com/airbridge/app/ClipboardBeamActivity.kt (Pattern: startForeground)",
+        "src/main/kotlin/com/airbridge/app/ConnectionService.kt (Pattern: FOREGROUND_SERVICE)",
+        "src/main/kotlin/com/airbridge/app/ShareTextActivity.kt (Pattern: startForeground)",
+        "src/main/kotlin/com/airbridge/app/ui/viewmodels/AirBridgeViewModel.kt (Pattern: startForeground)"
+    ],
+    "found_urls": [],
+    "requested_permissions": {
+        "AUDIO": [
+            "android.permission.WRITE_EXTERNAL_STORAGE"
+        ],
+        "FILES_AND_DOCS": [
+            "android.permission.WRITE_EXTERNAL_STORAGE"
+        ],
+        "MEDIA": [
+            "android.permission.WRITE_EXTERNAL_STORAGE"
+        ],
+        "MUSIC": [
+            "android.permission.WRITE_EXTERNAL_STORAGE"
+        ],
+        "OTHER_AUDIO": [
+            "android.permission.WRITE_EXTERNAL_STORAGE"
+        ],
+        "PHOTOS": [
+            "android.permission.WRITE_EXTERNAL_STORAGE",
+            "android.permission.CAMERA"
+        ],
+        "VIDEOS": [
+            "android.permission.WRITE_EXTERNAL_STORAGE",
+            "android.permission.CAMERA"
+        ],
+        "accessibility": [
+            "android.permission.BIND_ACCESSIBILITY_SERVICE"
+        ],
+        "foreground_service": [
+            "android.permission.FOREGROUND_SERVICE"
+        ]
+    },
+    "semantic_files": {
+        "CONFIG": [
+            "accessibility_service_config.xml",
+            "network_security_config.xml"
+        ],
+        "PHOTOS": [
+            "ClipboardImageProvider.kt"
+        ]
+    }
+}

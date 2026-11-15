@@ -316,6 +316,30 @@ else
   fi
 fi
 
+stop_running_daemon() {
+  [ -e "$bin" ] || [ "$LAUNCH" = "1" ] || return 0
+  stopped=0
+  if [ -e "$bin" ] && command -v pgrep >/dev/null 2>&1; then
+    for pid in $(pgrep -f "$bin" 2>/dev/null || true); do
+      [ "$pid" = "$$" ] && continue
+      kill -TERM "$pid" 2>/dev/null && stopped=1 || true
+    done
+  fi
+  if [ "$LAUNCH" = "1" ] && [ "$stopped" = "0" ] && command -v lsof >/dev/null 2>&1; then
+    for pid in $(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true); do
+      [ "$pid" = "$$" ] && continue
+      cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+      case "$cmd" in
+        *AirBridge*|*airbridge*) kill -TERM "$pid" 2>/dev/null && stopped=1 || true ;;
+      esac
+    done
+  fi
+  if [ "$stopped" = "1" ]; then
+    sleep 0.5
+  fi
+}
+
+stop_running_daemon
 chmod +x "$bin.tmp"
 mv "$bin.tmp" "$bin"
 

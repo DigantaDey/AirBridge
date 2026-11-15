@@ -308,6 +308,8 @@ export class HostClipboardMonitor {
   private timer: NodeJS.Timeout | null = null;
   private writing = false;
   private writeRevision = 0;
+  private lastWrittenNormalized: string | null = null;
+  private lastWrittenAt = 0;
   private pendingWrite: { text: string; resolve: (written: boolean) => void } | null = null;
 
   constructor(opts: HostClipboardMonitorOptions) {
@@ -342,6 +344,10 @@ export class HostClipboardMonitor {
 
   public writeClipboard(text: string): Promise<boolean> {
     if (this.closed || !this.provider.isSupported() || text.length > this.maxTextLength) return Promise.resolve(false);
+    const normalized = normalizeClipboardComparison(text);
+    if (normalized && normalized === this.lastWrittenNormalized && Date.now() - this.lastWrittenAt < 2_000) {
+      return Promise.resolve(true);
+    }
     return new Promise((resolve) => {
       this.pendingWrite?.resolve(false); // a superseded clipboard value is not an OS write
       this.pendingWrite = { text, resolve };
@@ -360,7 +366,10 @@ export class HostClipboardMonitor {
         let written = false;
         try { written = await this.provider.writeText(write.text); } catch { /* OS/provider unavailable */ }
         if (written) {
-          this.lastNormalized = normalizeClipboardComparison(write.text);
+          const normalized = normalizeClipboardComparison(write.text);
+          this.lastNormalized = normalized;
+          this.lastWrittenNormalized = normalized;
+          this.lastWrittenAt = Date.now();
           this.seeded = true;
         }
         write.resolve(written);

@@ -198,6 +198,8 @@ object AirCrypto {
     fun chunkIv(fileIndex: Int, chunkIndex: Int): ByteArray =
         ByteArray(Frames.GCM_IV_LENGTH).also { random.nextBytes(it) }
 
+    private val ivScratch = ThreadLocal.withInitial { ByteArray(Frames.GCM_IV_LENGTH) }
+
     fun encryptBinaryChunk(
         aesKey: SecretKeySpec,
         plaintext: ByteArray,
@@ -206,6 +208,30 @@ object AirCrypto {
     ): Pair<ByteArray, ByteArray> {
         val iv = chunkIv(fileIndex, chunkIndex)
         return iv to aesGcm(aesKey, iv, plaintext, encrypt = true)
+    }
+
+    /** Encrypt [plaintext] directly into [ciphertextOut] and write its random 96-bit IV into [ivOut]. */
+    fun encryptBinaryChunkInto(
+        aesKey: SecretKeySpec,
+        plaintext: ByteArray,
+        plaintextLength: Int = plaintext.size,
+        ivOut: ByteArray,
+        ivOffset: Int,
+        ciphertextOut: ByteArray,
+        ciphertextOffset: Int,
+    ): Int {
+        val iv = ivScratch.get()!!
+        random.nextBytes(iv)
+        System.arraycopy(iv, 0, ivOut, ivOffset, Frames.GCM_IV_LENGTH)
+        val cipher = ciphers.get()!!
+        return try {
+            val spec = GCMParameterSpec(GCM_TAG_BITS, iv)
+            cipher.init(Cipher.ENCRYPT_MODE, aesKey, spec)
+            cipher.doFinal(plaintext, 0, plaintextLength, ciphertextOut, ciphertextOffset)
+        } catch (e: Exception) {
+            ciphers.remove()
+            throw e
+        }
     }
 
     fun decryptBinaryChunk(

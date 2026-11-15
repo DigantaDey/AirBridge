@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
@@ -11,16 +12,36 @@ android {
         applicationId = "com.airbridge.app"
         minSdk = 26
         targetSdk = 35
-        // Releases re-stamp this from the CI run number so every build is an
-        // upgrade over the previous sideloaded APK.
-        versionCode = System.getenv("AIRBRIDGE_VERSION_CODE")?.toIntOrNull() ?: 1
+
+        val ciRunNumber = System.getenv("AIRBRIDGE_VERSION_CODE")?.toIntOrNull()
+        val gitCommitCount = runCatching {
+            providers.exec {
+                commandLine("git", "rev-list", "--count", "HEAD")
+            }.standardOutput.asText.get().trim().toIntOrNull()
+        }.getOrNull() ?: 100
+
+        versionCode = when {
+            ciRunNumber != null -> 100000 + ciRunNumber
+            else -> 100000 + gitCommitCount
+        }
         versionName = "2.2.1"
     }
 
     signingConfigs {
         // Committed sideload key: keeps package signatures stable across CI
-        // runs so users can install updates over the previous APK. Override
-        // with AIRBRIDGE_KEYSTORE_FILE/-PASSWORD/-ALIAS for real distribution.
+        // runs and local debug builds so users and developers can install updates
+        // without signature collisions (INSTALL_FAILED_UPDATE_INCOMPATIBLE).
+        create("ciSideload") {
+            storeFile = rootProject.layout.projectDirectory.file("ci.keystore").asFile
+            storePassword = "airbridge-ci"
+            keyAlias = "airbridge"
+            keyPassword = "airbridge-ci"
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+        }
+
+        // Production release signing config overridden via environment variables
         val envStore = System.getenv("AIRBRIDGE_KEYSTORE_FILE")
         if (envStore != null) {
             create("release") {
@@ -28,24 +49,26 @@ android {
                 storePassword = System.getenv("AIRBRIDGE_KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("AIRBRIDGE_KEYSTORE_ALIAS")
                 keyPassword = System.getenv("AIRBRIDGE_KEYSTORE_KEY_PASSWORD")
-            }
-        } else {
-            create("release") {
-                storeFile = rootProject.layout.projectDirectory.file("ci.keystore").asFile
-                storePassword = "airbridge-ci"
-                keyAlias = "airbridge"
-                keyPassword = "airbridge-ci"
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
             }
         }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("ciSideload")
+        }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("ciSideload")
         }
     }
 
+    buildFeatures {
+        compose = true
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -58,22 +81,24 @@ android {
 
 dependencies {
     implementation(project(":engine"))
-    // QR decoding for the pairing scanner. Framework Camera2 does the preview and
-    // frame plumbing, so only the pure-Java decoder is pulled in (~600 kB, no
-    // Play Services, works offline).
+    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("androidx.activity:activity-ktx:1.9.3")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    implementation("androidx.navigation:navigation-compose:2.8.4")
+
+    val composeBom = platform("androidx.compose:compose-bom:2024.11.00")
+    implementation(composeBom)
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // QR encoding & camera pairing scanner (Camera2 + pure-Java ZXing, offline).
     implementation("com.google.zxing:core:3.5.3")
 }
-
-// The native service must not depend on JavaScript served by a possibly older
-// desktop release. CI installs npm dependencies before invoking Gradle.
-val prepareWebClient by tasks.registering(Exec::class) {
-    workingDir(rootProject.projectDir.parentFile)
-    commandLine("node", "scripts/build-android-client.mjs")
-    inputs.dir(rootProject.file("../src/client"))
-    inputs.dir(rootProject.file("../src/shared"))
-    inputs.dir(rootProject.file("../public"))
-    inputs.files(rootProject.file("../package-lock.json"), rootProject.file("../vite.config.ts"), rootProject.file("../index.html"), rootProject.file("../scripts/build-android-client.mjs"))
-    outputs.dir(layout.buildDirectory.dir("generated/clientAssets"))
-}
-android.sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/clientAssets"))
-tasks.named("preBuild") { dependsOn(prepareWebClient) }

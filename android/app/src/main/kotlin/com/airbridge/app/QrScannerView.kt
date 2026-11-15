@@ -134,14 +134,14 @@ class QrScannerView(context: Context) : FrameLayout(context) {
             orientation = LinearLayout.VERTICAL
         }
         titles.addView(TextView(context).apply {
-            text = "Scan to pair"
+            text = context.getString(R.string.qr_scan_title)
             setTextColor(CHROME_TEXT)
             textSize = 22f
             letterSpacing = -0.01f
             setPadding(0, dp(6), 0, dp(4))
         })
         titles.addView(TextView(context).apply {
-            text = "Point the camera at the QR code AirBridge shows on your computer."
+            text = context.getString(R.string.qr_scan_subtitle)
             setTextColor(CHROME_MUTED)
             textSize = 13f
         })
@@ -152,7 +152,7 @@ class QrScannerView(context: Context) : FrameLayout(context) {
             setTextColor(CHROME_TEXT)
             textSize = 26f
             gravity = Gravity.CENTER
-            contentDescription = "Close the scanner"
+            contentDescription = context.getString(R.string.qr_scan_close)
             background = android.graphics.drawable.GradientDrawable().apply {
                 shape = android.graphics.drawable.GradientDrawable.OVAL
                 setColor(0x33FFFFFF)
@@ -160,7 +160,7 @@ class QrScannerView(context: Context) : FrameLayout(context) {
             isClickable = true
             setOnClickListener { onClose?.invoke() }
         }
-        header.addView(close, LinearLayout.LayoutParams(dp(40), dp(40)))
+        header.addView(close, LinearLayout.LayoutParams(dp(48), dp(48)))
 
         val footer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -170,17 +170,18 @@ class QrScannerView(context: Context) : FrameLayout(context) {
         headerChrome = header
         footerChrome = footer
         footer.addView(TextView(context).apply {
-            text = "No camera or a broken code? Close this and enter the address shown by AirBridge."
+            text = context.getString(R.string.qr_scan_hint)
             setTextColor(CHROME_MUTED)
             textSize = 12f
             gravity = Gravity.CENTER
         })
         footer.addView(TextView(context).apply {
-            text = "Enter address instead"
+            text = context.getString(R.string.qr_scan_manual)
             setTextColor(CHROME_TEXT)
             textSize = 14f
             gravity = Gravity.CENTER
-            setPadding(0, dp(18), 0, dp(10))
+            minimumHeight = dp(48)
+            setPadding(dp(16), dp(12), dp(16), dp(12))
             isClickable = true
             setOnClickListener { onClose?.invoke() }
         })
@@ -202,6 +203,9 @@ class QrScannerView(context: Context) : FrameLayout(context) {
             isAntiAlias = true
         }
         private val hole = RectF()
+        private val maskPath = Path().apply {
+            fillType = Path.FillType.EVEN_ODD
+        }
 
         override fun onDraw(canvas: Canvas) {
             val side = min(min(width, height) * 0.66f, dpf(320f))
@@ -209,13 +213,11 @@ class QrScannerView(context: Context) : FrameLayout(context) {
             val top = (height - side) / 2f
             hole.set(left, top, left + side, top + side)
 
-            val mask = Path().apply {
-                fillType = Path.FillType.EVEN_ODD
-                addRect(0f, 0f, width.toFloat(), height.toFloat(), Path.Direction.CW)
-                addRoundRect(hole, dpf(20f), dpf(20f), Path.Direction.CW)
-            }
+            maskPath.reset()
+            maskPath.addRect(0f, 0f, width.toFloat(), height.toFloat(), Path.Direction.CW)
+            maskPath.addRoundRect(hole, dpf(20f), dpf(20f), Path.Direction.CW)
             canvas.save()
-            canvas.clipPath(mask)
+            canvas.clipPath(maskPath)
             canvas.drawPaint(scrim)
             canvas.restore()
 
@@ -286,6 +288,12 @@ class QrScannerView(context: Context) : FrameLayout(context) {
 
     private fun startCamera() {
         if (camera != null) return
+        if (context.checkSelfPermission(android.Manifest.permission.CAMERA) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            mainHandler.post { onCameraUnavailable?.invoke() }
+            return
+        }
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val info = try {
             pickCamera(manager)
@@ -331,6 +339,10 @@ class QrScannerView(context: Context) : FrameLayout(context) {
                     camera = null
                 }
             }, handler)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "camera permission denied: ${e.message}")
+            stopCamera()
+            mainHandler.post { onCameraUnavailable?.invoke() }
         } catch (e: Exception) {
             Log.w(TAG, "openCamera failed: ${e.message}")
             stopCamera()
@@ -515,14 +527,9 @@ class QrScannerView(context: Context) : FrameLayout(context) {
         val read = min(buffer.remaining(), data.size)
         buffer.get(data, 0, read)
 
-        // Optimization: Crop luminance source to central viewfinder region (~66% of frame)
-        // to avoid binarizing and scanning unneeded outer pixels
-        val cropSide = min(width, height) * 66 / 100
-        val cropLeft = (width - cropSide) / 2
-        val cropTop = (height - cropSide) / 2
         val luminance = PlanarYUVLuminanceSource(
             data, rowStride, height,
-            cropLeft, cropTop, cropSide, cropSide,
+            0, 0, width, height,
             false
         )
 
@@ -531,20 +538,23 @@ class QrScannerView(context: Context) : FrameLayout(context) {
             val elapsedNs = System.nanoTime() - startTime
             frameCount++
             totalDecodeTimeNs += elapsedNs
-            Log.d(
-                TAG,
-                "QR decoded in %.2f ms after %d frames (avg %.2f ms/frame)".format(
-                    elapsedNs / 1_000_000.0,
-                    frameCount,
-                    (totalDecodeTimeNs / 1_000_000.0) / frameCount,
-                ),
-            )
+            Log.d(TAG, "QR decoded in %.2f ms after %d frames".format(elapsedNs / 1_000_000.0, frameCount))
             result
         } catch (_: NotFoundException) {
-            val elapsedNs = System.nanoTime() - startTime
-            frameCount++
-            totalDecodeTimeNs += elapsedNs
-            null
+            try {
+                val rotated = luminance.rotateCounterClockwise()
+                val result = zxing.decodeWithState(BinaryBitmap(HybridBinarizer(rotated))).text
+                val elapsedNs = System.nanoTime() - startTime
+                frameCount++
+                totalDecodeTimeNs += elapsedNs
+                Log.d(TAG, "QR decoded (rotated) in %.2f ms after %d frames".format(elapsedNs / 1_000_000.0, frameCount))
+                result
+            } catch (_: Exception) {
+                val elapsedNs = System.nanoTime() - startTime
+                frameCount++
+                totalDecodeTimeNs += elapsedNs
+                null
+            }
         } catch (_: Exception) {
             val elapsedNs = System.nanoTime() - startTime
             frameCount++

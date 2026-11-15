@@ -275,8 +275,7 @@ describe("AirBridge app UI", () => {
   it("shows a live Upload speed in the main active-transfer row", async () => {
     const { container } = await renderApp();
     const socket = FakeSocket.lastInstance!;
-    const chunkSize = 256 * 1024;
-    const raw = new Uint8Array(chunkSize * 16).fill(23);
+    const raw = new Uint8Array(4 * 1024 * 1024).fill(23);
     const file = new File([raw], "speed.bin", { type: "application/octet-stream" });
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     const fileList: { length: number; item: (i: number) => File | null } & Record<number, File> = {
@@ -321,15 +320,15 @@ describe("AirBridge app UI", () => {
         preferredTransport: "ws-relay",
       });
     });
-    await waitFor(() => socket.sentBinaryCount >= 8);
+    await waitFor(() => socket.sentBinaryCount >= 4);
     expect(container.querySelector(".transfer-row")?.textContent).toContain("0 B of 4.00 MB");
     await act(async () => {
       await pushEncrypted(socket, {
         kind: "chunk-ack",
         transferId,
         fileIndex: 0,
-        ackedChunkIndex: 7,
-        bytesReceivedTotal: chunkSize * 8,
+        ackedChunkIndex: 1,
+        bytesReceivedTotal: 2 * 1024 * 1024,
       });
     });
     await waitFor(() => {

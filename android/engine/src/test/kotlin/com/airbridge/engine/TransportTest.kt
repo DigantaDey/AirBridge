@@ -117,6 +117,10 @@ fun main() {
     val (_, decoded) = Frames.decodeRoutedEncryptedChunkFrame(routed)
     check(decoded.ciphertext === routed) { "Decoder copied the entire file chunk" }
     check(AirCrypto.decryptBinaryChunk(key, decoded.iv, decoded.ciphertext, decoded.ciphertextOffset, decoded.ciphertextLength).contentEquals(plaintext))
+    val singleAllocRouted = Frames.encodeRoutedEncryptedChunk("1111111111111111", "2222222222222222", "abababababababab", 0, 1, key, plaintext, plaintext.size)
+    val (singleSrc, singleDec) = Frames.decodeRoutedEncryptedChunkFrame(singleAllocRouted)
+    check(singleSrc == "2222222222222222" && singleDec.transferId == "abababababababab" && singleDec.chunkIndex == 1)
+    check(AirCrypto.decryptBinaryChunk(key, singleDec.iv, singleDec.ciphertext, singleDec.ciphertextOffset, singleDec.ciphertextLength).contentEquals(plaintext))
     val badTag = ciphertext.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 1).toByte() }
     check(runCatching { AirCrypto.decryptBinaryChunk(key, iv, badTag) }.isFailure)
     check(AirCrypto.decryptBinaryChunk(key, iv, ciphertext).contentEquals(plaintext))
@@ -265,5 +269,48 @@ fun main() {
         diskRelease.countDown()
         stored.get(1, TimeUnit.SECONDS)
     } finally { diskRelease.countDown(); blockedEngine.stop(); diskWorker.shutdownNow(); observer.shutdownNow() }
-    println("TRANSPORT: ALL PASS (bounded frames, fragments, exactly-once close, byte/item queues, range crypto, nonblocking cancel, bounded latest-state work, per-file ACKs, consent/receipt identity)")
+
+    // Disconnecting mid-download preserves active accepted incoming transfers
+    // in CONNECTING with paused sinks so automatic reconnect re-offers resume.
+    val disconnectEngine = AirBridgeEngine(EngineConfig("ws://127.0.0.1:9/ws", "Disconnect test"))
+    try {
+        val paused = CountDownLatch(1)
+        val meta = FileManifestItem(0, "resume.bin", null, plaintext.size.toLong(), "x", 1, Limits.CHUNK_SIZE)
+        val activeSession = TransferSession("fedcba9876543210", "3333333333333333", null, "Mac", "macos", "123 · 456",
+            TransferDirection.INCOMING, TransferStatus.TRANSFERRING, listOf(meta), meta.size, 1)
+        val pendingSession = TransferSession("0123456789abcdee", "3333333333333333", null, "Mac", "macos", "123 · 456",
+            TransferDirection.INCOMING, TransferStatus.PENDING_ACCEPT, listOf(meta), meta.size, 2)
+        val pauseSink = object : FileSink {
+            override fun resumeFrom() = 0
+            override fun hasReceived(chunkIndex: Int) = false
+            override fun receivedCount() = 0
+            override fun store(chunkIndex: Int, data: ByteArray) {}
+            override fun markComplete() {}
+            override fun finalizeIfReady(declaredSha256: String?, force: Boolean): FileFinalize? = null
+            override fun pause() { paused.countDown() }
+            override fun discard() {}
+            override fun lastError(): String? = null
+        }
+        fun putMap(field: String, id: String, value: Any) {
+            val f = disconnectEngine.javaClass.getDeclaredField(field).apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            (f.get(disconnectEngine) as MutableMap<String, Any>)[id] = value
+        }
+        putMap("incoming", activeSession.transferId, RecvState(activeSession, mapOf(0 to pauseSink)))
+        putMap("transfers", activeSession.transferId, activeSession)
+        putMap("transfers", pendingSession.transferId, pendingSession)
+        putMap("acceptedTransferKeys", activeSession.transferId, "peer-key")
+        val onDisconnectMethod = disconnectEngine.javaClass.getDeclaredMethod("onDisconnect").apply { isAccessible = true }
+        onDisconnectMethod.invoke(disconnectEngine)
+        check(paused.await(2, TimeUnit.SECONDS)) { "Paused sink was not flushed on disconnect" }
+        val activeAfter = disconnectEngine.transferView(activeSession.transferId)
+        check(activeAfter?.status == TransferStatus.CONNECTING && activeAfter.errorMessage == null) {
+            "Expected CONNECTING incoming status after disconnect, got ${activeAfter?.status}"
+        }
+        val pendingAfter = disconnectEngine.transferView(pendingSession.transferId)
+        check(pendingAfter?.status == TransferStatus.ERROR) {
+            "Expected unaccepted pending offer to fail on disconnect, got ${pendingAfter?.status}"
+        }
+    } finally { disconnectEngine.stop() }
+    println("TRANSPORT: ALL PASS (bounded frames, fragments, exactly-once close, byte/item queues, range crypto, nonblocking cancel, bounded latest-state work, per-file ACKs, consent/receipt identity, connecting resume)")
 }

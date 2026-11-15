@@ -158,4 +158,66 @@ describe('background clipboard without open browser UIs', () => {
     } finally { await server.close(); fs.rmSync(dir, { recursive: true, force: true }); }
   }, 15_000);
 
+  it('keeps BackgroundClipboardPeer synchronized when a loopback browser joins or rotates pair codes', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'airbridge-pair-sync-'));
+    const stateFile = path.join(dir, 'peer.json');
+    const provider: HostClipboardProvider = { isSupported: () => true, readText: async () => '', writeText: async () => true };
+    const server = await createAirBridgeServer({
+      port: 0,
+      host: '127.0.0.1',
+      mode: 'test',
+      https: false,
+      enableMdns: false,
+      hostClipboard: provider,
+      backgroundClipboard: true,
+      backgroundClipboardStoragePath: stateFile,
+      receivedFolderSettingsPath: null,
+    });
+    const bgClient = (server.backgroundClipboard as unknown as { client: WarpClient }).client;
+    let browserWs: WebSocket | null = null;
+    try {
+      await waitFor(() => bgClient.getSnapshot().connectionState, (state) => state === 'connected');
+      const key = await generateIdentityKeyPair();
+      browserWs = new WebSocket(`ws://127.0.0.1:${server.port}/ws`);
+      const messages: Array<{ type: string; pairCode?: string }> = [];
+      await new Promise<void>((resolve, reject) => {
+        browserWs!.on('message', (data) => {
+          const parsed = JSON.parse(String(data)) as { type: string; pairCode?: string };
+          messages.push(parsed);
+          if (parsed.type === 'welcome') resolve();
+        });
+        browserWs!.on('open', () => {
+          browserWs!.send(
+            JSON.stringify({
+              type: 'hello',
+              device: {
+                name: 'Mac Browser',
+                platform: 'macos',
+                model: 'Browser',
+                formFactor: 'laptop',
+                publicKey: key.publicKeyB64,
+              },
+            }),
+          );
+        });
+        browserWs!.on('error', reject);
+      });
+
+      browserWs.send(JSON.stringify({ type: 'join-pair', pairCode: 'XYZ789' }));
+      await waitFor(() => bgClient.getSnapshot().pairCode, (code) => code === 'XYZ789');
+
+      browserWs.send(JSON.stringify({ type: 'rotate-pair' }));
+      await waitFor(
+        () => messages.find((m) => m.type === 'pair-updated' && m.pairCode !== 'XYZ789')?.pairCode ?? '',
+        (code) => code.length === 6 && code !== 'XYZ789',
+      );
+      const rotated = messages.find((m) => m.type === 'pair-updated' && m.pairCode !== 'XYZ789')!.pairCode!;
+      await waitFor(() => bgClient.getSnapshot().pairCode, (code) => code === rotated);
+    } finally {
+      browserWs?.close();
+      await server.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
 });

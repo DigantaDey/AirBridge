@@ -7,8 +7,8 @@ const root = process.cwd();
 const read = (relative: string): string =>
   readFileSync(path.join(root, relative), "utf8");
 
-describe("responsive Android web UI", () => {
-  it("uses fluid gutters and all four safe-area insets", () => {
+describe("responsive desktop web and native Android Compose UI", () => {
+  it("uses fluid gutters and all four safe-area insets on the desktop web UI", () => {
     const css = read("src/client/index.css");
     expect(css).toMatch(/--ab-gutter:\s*clamp\(/);
     expect(css).toContain("--ab-safe-top: env(safe-area-inset-top, 0px)");
@@ -21,7 +21,7 @@ describe("responsive Android web UI", () => {
     expect(css).not.toContain("100vw");
   });
 
-  it("has breakpoints for compact, small and very small screens", () => {
+  it("has CSS breakpoints for compact, small and very small web screens", () => {
     const css = read("src/client/index.css");
     expect(css).toContain("@media (max-width: 920px)");
     expect(css).toContain("@media (max-width: 720px)");
@@ -31,7 +31,7 @@ describe("responsive Android web UI", () => {
     expect(css).toContain(".settings-modal .advanced-toggle");
   });
 
-  it("prevents horizontal overflow and long text clipping", () => {
+  it("prevents horizontal overflow and long text clipping on the web UI", () => {
     const css = read("src/client/index.css");
     expect(css).toContain("overflow-wrap: anywhere");
     expect(css).toContain("min-width: 0");
@@ -42,50 +42,44 @@ describe("responsive Android web UI", () => {
     expect(css).toContain("overscroll-behavior: contain");
   });
 
-  it("applies decor-view insets to the WebView container and QR scanner", () => {
-    const activity = read(
-      "android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt",
-    );
-    expect(activity).toContain("window.decorView.setOnApplyWindowInsetsListener");
-    expect(activity).toContain("setDecorFitsSystemWindows(false)");
-    expect(activity).toContain("isNavigationBarContrastEnforced = false");
-    expect(activity).toContain("Color.TRANSPARENT");
-    expect(activity).toContain("contentFrame = FrameLayout(this)");
-    expect(activity).toContain("installSystemBarInsets(contentFrame)");
-    expect(activity).toContain("WindowInsets.CONSUMED");
-    expect(activity).toContain("scanner?.applyChromeInsets(bars)");
-    expect(activity).toContain("insets.systemBarInsets()");
-    expect(activity).toContain("injectNativeShellShim(view)");
-    expect(activity).toContain("onPageCommitVisible(view: WebView, url: String)");
-    expect(activity).toContain("registerSystemBackCallback()");
-    expect(activity).toContain("__airbridgeSystemBack");
-    expect(activity).not.toContain("installSystemBarInsets(webView)");
+  it("adapts Compose navigation (NavigationBar vs NavigationRail) and two-pane layouts by window width", () => {
+    const app = read("android/app/src/main/kotlin/com/airbridge/app/ui/AirBridgeApp.kt");
+    expect(app).toContain("BoxWithConstraints(modifier = Modifier.fillMaxSize())");
+    expect(app).toContain("val useRail = uiState.isPaired && maxWidth >= 600.dp");
+    expect(app).toContain("NavigationBar");
+    expect(app).toContain("NavigationRail(");
+    expect(app).toContain("contentWindowInsets = WindowInsets.safeDrawing");
 
-    const scanner = read(
-      "android/app/src/main/kotlin/com/airbridge/app/QrScannerView.kt",
-    );
+    for (const screen of ["ConnectScreen.kt", "TransfersScreen.kt", "ClipboardScreen.kt"]) {
+      const src = read(`android/app/src/main/kotlin/com/airbridge/app/ui/screens/${screen}`);
+      expect(src).toContain("BoxWithConstraints(");
+      expect(src).toContain("maxWidth >= 840.dp");
+    }
+
+    const scanner = read("android/app/src/main/kotlin/com/airbridge/app/QrScannerView.kt");
     expect(scanner).toContain("installChromeInsets()");
     expect(scanner).toContain("fun applyChromeInsets(insets: SystemBarInsets)");
     expect(scanner).toContain("insets.systemBarInsets()");
     expect(scanner).not.toContain("WindowInsets.Type.systemBars()");
 
-    const helper = read(
-      "android/app/src/main/kotlin/com/airbridge/app/SystemBarInsets.kt",
-    );
+    const helper = read("android/app/src/main/kotlin/com/airbridge/app/SystemBarInsets.kt");
     expect(helper).toContain("data class SystemBarInsets");
     expect(helper).toContain("WindowInsets.Type.systemBars()");
     expect(helper).toContain("WindowInsets.Type.displayCutout()");
     expect(helper).not.toContain("WindowInsets.Type.ime()");
   });
 
-  it("keeps the unpaired connect screen responsive", () => {
-    const connect = read("android/app/src/main/assets/shell/connect.html");
-    expect(connect).toContain("--ab-safe-left");
-    expect(connect).toContain("--ab-gutter: clamp(");
-    expect(connect).toContain("@media (max-width: 420px)");
-    expect(connect).toContain("@media (max-width: 480px)");
-    expect(connect).toContain("html.ab-native-shell");
-    expect(connect).toContain("__airbridgeSystemBack");
-    expect(connect).not.toContain("100vw");
+  it("applies edge-to-edge system bars and IME padding on Android", () => {
+    const activity = read("android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt");
+    expect(activity).toContain("enableEdgeToEdge(");
+    expect(activity).toContain("Color.TRANSPARENT");
+    expect(activity).toContain("SystemBarStyle.dark");
+    expect(activity).toContain("SystemBarStyle.light");
+
+    const clipboard = read("android/app/src/main/kotlin/com/airbridge/app/ui/screens/ClipboardScreen.kt");
+    expect(clipboard).toContain(".imePadding()");
+
+    const connect = read("android/app/src/main/kotlin/com/airbridge/app/ui/screens/ConnectScreen.kt");
+    expect(connect).toContain(".imePadding()");
   });
 });

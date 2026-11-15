@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -576,5 +577,57 @@ describe('disk receiver resource and recovery regressions', () => {
         expect((await recovered.ensure(meta)).receivedCount).toBe(0);
       } finally { await recovered.dispose(); }
     } finally { await store.dispose(); await fs.promises.rm(downloadDir, { recursive: true, force: true }); }
+  });
+
+  it('computes SHA-256 incrementally for in-order chunks and falls back cleanly for out-of-order chunks', async () => {
+    const downloadDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'airbridge-stream-hash-'));
+    const store = new PartialReceiveStore({
+      enabled: true,
+      downloadDir,
+      autoSaveToDownloads: true,
+      notifyOnReceive: false,
+      revealInFinder: false,
+    });
+    const payload = crypto.randomBytes(64 * 4);
+    const expectedSha = crypto.createHash('sha256').update(payload).digest('hex');
+    const hashSpy = vi.spyOn(
+      store as unknown as { hashFile: (filePath: string) => Promise<string> },
+      'hashFile',
+    );
+    try {
+      const inOrderMeta = {
+        transferId: '1122334455667788',
+        fileIndex: 0,
+        name: 'in-order.bin',
+        size: payload.byteLength,
+        chunkSize: 64,
+        totalChunks: 4,
+      };
+      for (let i = 0; i < 4; i++) {
+        await store.writeChunk(inOrderMeta, i, payload.subarray(i * 64, (i + 1) * 64));
+      }
+      const fastRes = await store.finalize(inOrderMeta.transferId, 0, expectedSha);
+      expect(fastRes.sha256).toBe(expectedSha);
+      expect(hashSpy).not.toHaveBeenCalled();
+
+      const outOfOrderMeta = {
+        transferId: '8877665544332211',
+        fileIndex: 0,
+        name: 'out-of-order.bin',
+        size: payload.byteLength,
+        chunkSize: 64,
+        totalChunks: 4,
+      };
+      for (const idx of [2, 0, 3, 1]) {
+        await store.writeChunk(outOfOrderMeta, idx, payload.subarray(idx * 64, (idx + 1) * 64));
+      }
+      const fallbackRes = await store.finalize(outOfOrderMeta.transferId, 0, expectedSha);
+      expect(fallbackRes.sha256).toBe(expectedSha);
+      expect(hashSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      hashSpy.mockRestore();
+      await store.dispose();
+      await fs.promises.rm(downloadDir, { recursive: true, force: true });
+    }
   });
 });

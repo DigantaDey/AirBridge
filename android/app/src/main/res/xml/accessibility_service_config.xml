@@ -11,9 +11,9 @@
   on supported devices without claiming an OS-level guarantee.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeViewClicked|typeViewLongClicked|typeViewTextSelectionChanged|typeWindowStateChanged"
+    android:accessibilityEventTypes="typeViewClicked|typeViewLongClicked|typeViewTextSelectionChanged|typeWindowStateChanged|typeWindowContentChanged|typeNotificationStateChanged|typeAnnouncement"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="false"
     android:canRequestTouchExplorationMode="false"
     android:canPerformGestures="false"

@@ -1,0 +1,26 @@
+{
+    "app_dir": "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app",
+    "app_label": "AirBridge",
+    "foreground_services": [
+        {
+            "name": ".ConnectionService",
+            "type": "connectedDevice|dataSync"
+        }
+    ],
+    "package_name": "com.airbridge.app",
+    "permissions": [
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.ACCESS_WIFI_STATE",
+        "android.permission.BIND_ACCESSIBILITY_SERVICE",
+        "android.permission.BIND_QUICK_SETTINGS_TILE",
+        "android.permission.CAMERA",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE",
+        "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
+        "android.permission.INTERNET",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.WAKE_LOCK",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+    ],
+    "target_sdk": 35
+}

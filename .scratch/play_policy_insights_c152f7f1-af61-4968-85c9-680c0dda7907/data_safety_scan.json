@@ -1,0 +1,309 @@
+{
+    "codebase_map": {
+        "all_files": [
+            [
+                ".DS_Store",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/.DS_Store",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app"
+            ],
+            [
+                "build.gradle.kts",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/build.gradle.kts",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app"
+            ],
+            [
+                ".DS_Store",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/.DS_Store",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src"
+            ],
+            [
+                "AndroidManifest.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/AndroidManifest.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main"
+            ],
+            [
+                "ClipboardAccessibilityService.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ClipboardAccessibilityService.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app"
+            ],
+            [
+                "ClipboardBeamActivity.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ClipboardBeamActivity.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app"
+            ],
+            [
+                "ClipboardImageProvider.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ClipboardImageProvider.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app"
+            ],
+            [
+                "ClipboardText.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ClipboardText.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app"
+            ],
+            [
+                "ClipboardTileService.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ClipboardTileService.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app"
+            ],
+            [
+                "ConnectionService.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ConnectionService.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app"
+            ],
+            [
+                "Discovery.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/Discovery.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app"
+            ],
+            [
+                "MainActivity.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app"
+            ],
+            [
+                "NativeEngineHost.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/NativeEngineHost.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app"
+            ],
+            [
+                "NativeFiles.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/NativeFiles.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app"
+            ],
+            [
+                "Prefs.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/Prefs.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app"
+            ],
+            [
+                "QrScannerView.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/QrScannerView.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app"
+            ],
+            [
+                "ShareTextActivity.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ShareTextActivity.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app"
+            ],
+            [
+                "SystemBarInsets.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/SystemBarInsets.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app"
+            ],
+            [
+                "AirBridgeApp.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/AirBridgeApp.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui"
+            ],
+            [
+                "Formatting.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/Formatting.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui"
+            ],
+            [
+                "ClipboardItemCard.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components/ClipboardItemCard.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components"
+            ],
+            [
+                "PairingSheet.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components/PairingSheet.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components"
+            ],
+            [
+                "QrCodeBitmap.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components/QrCodeBitmap.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components"
+            ],
+            [
+                "QrScannerScreen.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components/QrScannerScreen.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components"
+            ],
+            [
+                "TransferCard.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components/TransferCard.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components"
+            ],
+            [
+                "TransferOfferDialog.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components/TransferOfferDialog.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components"
+            ],
+            [
+                "ClipboardScreen.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/screens/ClipboardScreen.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/screens"
+            ],
+            [
+                "ConnectScreen.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/screens/ConnectScreen.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/screens"
+            ],
+            [
+                "SettingsScreen.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/screens/SettingsScreen.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/screens"
+            ],
+            [
+                "TransfersScreen.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/screens/TransfersScreen.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/screens"
+            ],
+            [
+                "Theme.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/theme/Theme.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/theme"
+            ],
+            [
+                "AirBridgeViewModel.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/viewmodels/AirBridgeViewModel.kt",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/viewmodels"
+            ],
+            [
+                "ic_launcher_foreground.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/drawable/ic_launcher_foreground.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/drawable"
+            ],
+            [
+                "ic_launcher.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/mipmap-anydpi-v26"
+            ],
+            [
+                "ic_launcher_round.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/mipmap-anydpi-v26"
+            ],
+            [
+                "colors.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/values/colors.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/values"
+            ],
+            [
+                "strings.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/values/strings.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/values"
+            ],
+            [
+                "styles.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/values/styles.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/values"
+            ],
+            [
+                "accessibility_service_config.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/xml/accessibility_service_config.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/xml"
+            ],
+            [
+                "network_security_config.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/xml/network_security_config.xml",
+                "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/xml"
+            ]
+        ],
+        "gradles": [
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/build.gradle.kts"
+        ],
+        "manifests": [
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/AndroidManifest.xml"
+        ],
+        "source_code": [
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ClipboardAccessibilityService.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ClipboardBeamActivity.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ClipboardImageProvider.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ClipboardText.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ClipboardTileService.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ConnectionService.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/Discovery.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/NativeEngineHost.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/NativeFiles.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/Prefs.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/QrScannerView.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ShareTextActivity.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/SystemBarInsets.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/AirBridgeApp.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/Formatting.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components/ClipboardItemCard.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components/PairingSheet.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components/QrCodeBitmap.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components/QrScannerScreen.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components/TransferCard.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/components/TransferOfferDialog.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/screens/ClipboardScreen.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/screens/ConnectScreen.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/screens/SettingsScreen.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/screens/TransfersScreen.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/theme/Theme.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/kotlin/com/airbridge/app/ui/viewmodels/AirBridgeViewModel.kt",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/values/colors.xml",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/values/strings.xml",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/values/styles.xml",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/xml/accessibility_service_config.xml",
+            "/Users/digantadey/AndroidStudioProjects/AirBridge/android/app/src/main/res/xml/network_security_config.xml"
+        ]
+    },
+    "data_safety_scan": {
+        "accessibility": {
+            "-": [
+                "src/main/kotlin/com/airbridge/app/ClipboardAccessibilityService.kt (Pattern: AccessibilityService)",
+                "src/main/kotlin/com/airbridge/app/ConnectionService.kt (Pattern: AccessibilityService)",
+                "src/main/kotlin/com/airbridge/app/ui/viewmodels/AirBridgeViewModel.kt (Pattern: AccessibilityService)"
+            ]
+        },
+        "data_sources": {
+            "FILES_AND_DOCS": [
+                "src/main/kotlin/com/airbridge/app/MainActivity.kt (Pattern: */*)"
+            ],
+            "MEDIA": [
+                "src/main/kotlin/com/airbridge/app/NativeFiles.kt (Pattern: MediaStore)"
+            ],
+            "MUSIC": [
+                "src/main/kotlin/com/airbridge/app/MainActivity.kt (Pattern: track)"
+            ],
+            "PERFORMANCE_DIAGNOSTICS": [
+                "src/main/kotlin/com/airbridge/app/ConnectionService.kt (Pattern: PowerManager)",
+                "src/main/kotlin/com/airbridge/app/MainActivity.kt (Pattern: PowerManager)",
+                "src/main/kotlin/com/airbridge/app/ui/viewmodels/AirBridgeViewModel.kt (Pattern: PowerManager)"
+            ],
+            "PHOTOS": [
+                "src/main/kotlin/com/airbridge/app/MainActivity.kt (Pattern: PickVisualMedia)",
+                "src/main/kotlin/com/airbridge/app/QrScannerView.kt (Pattern: CAMERA)",
+                "src/main/kotlin/com/airbridge/app/ui/viewmodels/AirBridgeViewModel.kt (Pattern: CAMERA)"
+            ]
+        },
+        "disclosure": {
+            "-": [
+                "src/main/kotlin/com/airbridge/app/ConnectionService.kt (Pattern: Accept)",
+                "src/main/kotlin/com/airbridge/app/MainActivity.kt (Pattern: Dialog)",
+                "src/main/kotlin/com/airbridge/app/QrScannerView.kt (Pattern: share)",
+                "src/main/kotlin/com/airbridge/app/ShareTextActivity.kt (Pattern: share)",
+                "src/main/kotlin/com/airbridge/app/ui/AirBridgeApp.kt (Pattern: AlertDialog)",
+                "src/main/kotlin/com/airbridge/app/ui/components/TransferCard.kt (Pattern: Accept)",
+                "src/main/kotlin/com/airbridge/app/ui/components/TransferOfferDialog.kt (Pattern: AlertDialog)",
+                "src/main/kotlin/com/airbridge/app/ui/screens/SettingsScreen.kt (Pattern: AlertDialog)",
+                "src/main/kotlin/com/airbridge/app/ui/screens/TransfersScreen.kt (Pattern: Accept)"
+            ]
+        },
+        "foreground_service": {
+            "-": [
+                "src/main/kotlin/com/airbridge/app/ClipboardAccessibilityService.kt (Pattern: startForeground)",
+                "src/main/kotlin/com/airbridge/app/ClipboardBeamActivity.kt (Pattern: startForeground)",
+                "src/main/kotlin/com/airbridge/app/ConnectionService.kt (Pattern: FOREGROUND_SERVICE)",
+                "src/main/kotlin/com/airbridge/app/ShareTextActivity.kt (Pattern: startForeground)",
+                "src/main/kotlin/com/airbridge/app/ui/viewmodels/AirBridgeViewModel.kt (Pattern: startForeground)"
+            ]
+        }
+    },
+    "found_urls": [],
+    "semantic_files": {
+        "CONFIG": [
+            "accessibility_service_config.xml",
+            "network_security_config.xml"
+        ],
+        "PHOTOS": [
+            "ClipboardImageProvider.kt"
+        ]
+    }
+}

@@ -221,6 +221,7 @@ export async function createAirBridgeServer(
     getDaemonStatus: () => getDaemonStatus(daemonCfg),
     clipboardProvider,
     clipboardPollMs: options.hostClipboardPollMs,
+    onHostPairCodeChange: (code) => backgroundPeer?.setPairCode(code),
   });
 
   const backgroundClipboardEnabled =

@@ -151,15 +151,18 @@ export class SignalingHub {
   private backgroundClipboardSink: ((text: string) => void) | null = null;
   private getLanUrls: () => string[];
   private getDaemonStatus: () => LocalDaemonStatus;
+  private onHostPairCodeChange?: (pairCode: string) => void;
 
   constructor(opts: {
     getLanUrls: () => string[];
     getDaemonStatus: () => LocalDaemonStatus;
     clipboardProvider?: HostClipboardProvider | null;
     clipboardPollMs?: number;
+    onHostPairCodeChange?: (pairCode: string) => void;
   }) {
     this.getLanUrls = opts.getLanUrls;
     this.getDaemonStatus = opts.getDaemonStatus;
+    this.onHostPairCodeChange = opts.onHostPairCodeChange;
     this.clipboardMonitor =
       opts.clipboardProvider && opts.clipboardProvider.isSupported()
         ? new HostClipboardMonitor({
@@ -372,8 +375,9 @@ export class SignalingHub {
         }
 
         const requestedPair = msg.pairCode ? normalizePairCode(msg.pairCode) : '';
+        const hasRequestedPair = isValidPairCode(requestedPair);
         let pairCode: string;
-        if (isValidPairCode(requestedPair)) {
+        if (hasRequestedPair) {
           pairCode = requestedPair;
         } else if (this.pairCodeByPeer.has(peerId)) {
           // Reconnect: rejoin the group this peerId last belonged to.
@@ -401,6 +405,9 @@ export class SignalingHub {
 
         this.clients.set(peerId, registeredClient);
         this.syncClipboardWatchState();
+        if (hasRequestedPair && isLoopback && device.model !== 'AirBridge service') {
+          this.onHostPairCodeChange?.(pairCode);
+        }
 
         this.sendJson(ws, {
           type: 'welcome',
@@ -453,6 +460,9 @@ export class SignalingHub {
           const prevPairCode = registeredClient.pairCode;
           registeredClient.pairCode = normalized;
           this.rememberPairCode(registeredClient.peerId, normalized);
+          if (registeredClient.isLoopback && registeredClient.device.model !== 'AirBridge service') {
+            this.onHostPairCodeChange?.(normalized);
+          }
           this.sendJson(ws, {
             type: 'pair-updated',
             pairCode: normalized,
@@ -468,6 +478,9 @@ export class SignalingHub {
           const fresh = generatePairCode(crypto.randomBytes(8));
           registeredClient.pairCode = fresh;
           this.rememberPairCode(registeredClient.peerId, fresh);
+          if (registeredClient.isLoopback && registeredClient.device.model !== 'AirBridge service') {
+            this.onHostPairCodeChange?.(fresh);
+          }
           this.sendJson(ws, {
             type: 'pair-updated',
             pairCode: fresh,

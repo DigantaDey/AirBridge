@@ -407,7 +407,7 @@ describe('phone disk-backed receive (File System Access API)', () => {
       expect(done.receivedFiles[0].verified).toBe(true);
       expect(done.receivedFiles[0].sha256).toBe(await refSha256(raw));
 
-      expect(mockDir.getFile('overwrite-long.bin')!.getBuffer()).toEqual(stale);
+      expect(Buffer.compare(Buffer.from(mockDir.getFile('overwrite-long.bin')!.getBuffer()), Buffer.from(stale))).toBe(0);
       const written = mockDir.getFile('overwrite-long (1).bin')!.getBuffer();
       expect(written.byteLength).toBe(size);
       expect(Buffer.compare(Buffer.from(written), Buffer.from(raw))).toBe(0);
