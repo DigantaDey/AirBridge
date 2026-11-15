@@ -24,7 +24,7 @@ beforeEach(() => {
   home = path.join(root, 'home & user');
   mocks = path.join(root, 'mocks');
   fs.mkdirSync(home); fs.mkdirSync(mocks);
-  env = { ...process.env, HOME: home, PATH: `${mocks}:${process.env.PATH}`, AIRBRIDGE_INSTALL_DIR: path.join(home, 'my bin'), PORT: '3105', TEST_ROOT: root };
+  env = { ...process.env, HOME: home, PATH: `${mocks}:${process.env.PATH}`, AIRBRIDGE_INSTALL_DIR: path.join(home, 'my bin'), PORT: '3105', TEST_ROOT: root, AIRBRIDGE_NATIVE_APP: '0' };
   mock('uname', 'if [ "$1" = "-s" ]; then echo Darwin; else echo arm64; fi');
   mock('codesign', 'exit 0');
   mock('curl', `

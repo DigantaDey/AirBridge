@@ -242,6 +242,36 @@ install_macos_app() {
 PLIST
   printf '%s\n' "$bin" > "$contents/Resources/binary-path"
   printf '%s\n' "$PORT" > "$contents/Resources/port"
+
+  # Compile Native Swift App Launcher if swiftc is available
+  local local_swift="$(dirname "$0")/scripts/mac_app.swift"
+  local swift_src="$(mktemp "${TMPDIR:-/tmp}/mac_app.XXXXXX.swift")"
+  local swift_url="https://raw.githubusercontent.com/${REPO}/main/scripts/mac_app.swift"
+
+  if [ -f "$local_swift" ]; then
+    cp "$local_swift" "$swift_src"
+  else
+    fetch "$swift_url" "$swift_src" || true
+  fi
+
+  if [ "${AIRBRIDGE_NATIVE_APP:-1}" = "1" ] && command -v swiftc >/dev/null 2>&1 && [ -s "$swift_src" ]; then
+    echo "▸ compiling native macOS Swift App GUI"
+    if swiftc -O -suppress-warnings "$swift_src" -o "$contents/MacOS/AirBridge" -framework AppKit -framework WebKit 2>/dev/null; then
+      codesign --force -s - "$contents/MacOS/AirBridge" 2>/dev/null || true
+      rm -f "$swift_src"
+      icon_url="https://raw.githubusercontent.com/${REPO}/main/macos/AirBridge.icns"
+      if fetch "$icon_url" "$tmp" && [ -s "$tmp" ]; then
+        cp "$tmp" "$contents/Resources/AirBridge.icns"
+      fi
+      if [ -x /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister ]; then
+        /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app" || true
+      fi
+      echo "▸ native app installed: $app (Launchpad or Applications)"
+      return 0
+    fi
+  fi
+  rm -f "$swift_src"
+
   cat > "$contents/MacOS/AirBridge" <<'APP'
 #!/bin/bash
 # Launch Services has a minimal environment. Do not rely on shell aliases,
