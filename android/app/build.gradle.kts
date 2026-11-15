@@ -24,7 +24,7 @@ android {
             ciRunNumber != null -> 100000 + ciRunNumber
             else -> 100000 + gitCommitCount
         }
-        versionName = "2.2.5"
+        versionName = "2.2.6"
     }
 
     signingConfigs {

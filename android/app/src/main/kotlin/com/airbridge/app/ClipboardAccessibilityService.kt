@@ -16,6 +16,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.inputmethod.InputMethodManager
 
 /**
  * Accessibility Service for reliable background clipboard capture on Android 10+.
@@ -84,9 +85,7 @@ class ClipboardAccessibilityService : AccessibilityService() {
         if (!prefs.accessibilityClipboardOptIn || !prefs.connectionContinuity) return
 
         when (event.eventType) {
-            AccessibilityEvent.TYPE_VIEW_CLICKED,
             AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
-            AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED,
             AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED,
             AccessibilityEvent.TYPE_ANNOUNCEMENT -> {
                 // Copy actions and confirmation toasts often commit just after the UI event;
@@ -131,6 +130,11 @@ class ClipboardAccessibilityService : AccessibilityService() {
     private fun attachFocusOverlay(): Boolean {
         if (overlayView != null) return false
         val wm = windowManager ?: return false
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        if (imm?.isAcceptingText == true) {
+            Log.d(TAG, "Input method is currently accepting text; skipping focus overlay to prevent keyboard dismissal")
+            return false
+        }
         val view = object : View(this) {
             override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
                 super.onWindowFocusChanged(hasWindowFocus)
