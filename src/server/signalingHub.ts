@@ -242,6 +242,12 @@ export class SignalingHub {
   private isHostDesktopClient(client: ConnectedClient): boolean {
     return (
       client.isLoopback &&
+      (client.device.platform === 'macos' ||
+       client.device.platform === 'windows' ||
+       client.device.platform === 'linux' ||
+       client.device.formFactor === 'laptop' ||
+       client.device.formFactor === 'desktop' ||
+       client.device.model === 'AirBridge service') &&
       client.device.platform !== 'android' &&
       client.device.platform !== 'ios'
     );
@@ -477,19 +483,31 @@ export class SignalingHub {
         case 'rotate-pair': {
           const prevPairCode = registeredClient.pairCode;
           const fresh = generatePairCode(crypto.randomBytes(8));
-          registeredClient.pairCode = fresh;
-          this.rememberPairCode(registeredClient.peerId, fresh);
 
-          if (registeredClient.isLoopback) {
+          if (this.isHostDesktopClient(registeredClient)) {
             this.defaultPairCode = fresh;
             this.onHostPairCodeChange?.(fresh);
+            for (const client of this.clients.values()) {
+              if (this.isHostDesktopClient(client) && client.pairCode === prevPairCode) {
+                client.pairCode = fresh;
+                this.rememberPairCode(client.peerId, fresh);
+                this.sendJson(client.ws, {
+                  type: 'pair-updated',
+                  pairCode: fresh,
+                  peers: this.computeVisiblePeers(client),
+                });
+              }
+            }
+          } else {
+            registeredClient.pairCode = fresh;
+            this.rememberPairCode(registeredClient.peerId, fresh);
+            this.sendJson(ws, {
+              type: 'pair-updated',
+              pairCode: fresh,
+              peers: this.computeVisiblePeers(registeredClient),
+            });
           }
 
-          this.sendJson(ws, {
-            type: 'pair-updated',
-            pairCode: fresh,
-            peers: this.computeVisiblePeers(registeredClient),
-          });
           this.broadcastToPairCode(prevPairCode);
           this.broadcastPeerUpdatesFor(registeredClient);
           break;

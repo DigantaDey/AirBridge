@@ -156,6 +156,8 @@ class NativeEngineHost(
         worker.execute {
             try {
                 val link = prefs.pairingLink() ?: return@execute
+                val targetPairCode = link.pairCode ?: prefs.pairCode
+                link.pairCode?.let { prefs.pairCode = it }
                 val created = AirBridgeEngine(
                     EngineConfig(
                         serverUrl = link.wsUrl,
@@ -163,7 +165,7 @@ class NativeEngineHost(
                         model = Build.MODEL,
                         deviceId = prefs.deviceId,
                         peerId = prefs.peerId.ifEmpty { null },
-                        initialPairCode = prefs.pairCode,
+                        initialPairCode = targetPairCode,
                         visibility = prefs.visibility,
                         tlsTrustManager = prefs.tlsTrust(link),
                         defaultSinkFactory = AndroidFileSinkFactory(context),
@@ -181,7 +183,7 @@ class NativeEngineHost(
                         }
 
                         override fun onWelcome(info: WelcomeInfo) {
-                            if (closed || prefs.target != configuredTarget) return
+                            if (closed) return
                             connectionError = null
                             prefs.peerId = info.peerId
                             prefs.pairCode = info.pairCode
@@ -190,7 +192,7 @@ class NativeEngineHost(
                         }
 
                         override fun onPairCodeChanged(pairCode: String) {
-                            if (closed || prefs.target != configuredTarget) return
+                            if (closed) return
                             prefs.pairCode = pairCode
                             refresh()
                         }
