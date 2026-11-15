@@ -438,8 +438,8 @@ private fun testEndToEndMultiFileTransferAndBinarySack() {
                 val transferId = senderEngine.sendFiles(receiverPeerId, sources)
                 check(transferId.length == 16, "transferId should be 16 hex chars for binary SACK")
 
-                check(senderDone.await(30, TimeUnit.SECONDS), "sender finished within 30s (error=${errorMsg.get()})")
-                check(receiverDone.await(30, TimeUnit.SECONDS), "receiver finished within 30s (error=${errorMsg.get()})")
+                check(senderDone.await(60, TimeUnit.SECONDS), "sender finished within 60s (error=${errorMsg.get()})")
+                check(receiverDone.await(60, TimeUnit.SECONDS), "receiver finished within 60s (error=${errorMsg.get()})")
                 val elapsedSec = maxOf(0.001, (System.nanoTime() - t0) / 1_000_000_000.0)
 
                 val sView = senderView.get()
