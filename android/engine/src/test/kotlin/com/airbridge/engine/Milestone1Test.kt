@@ -75,7 +75,14 @@ fun main() {
     val picked = DiscoveryUrlFormatter.pickBestAddress(listOf(lo4, lan6, lan4))
     check("pickBestAddress prefers non-loopback IPv4 over loopback & IPv6", picked == lan4)
     check("formatWsUrl formats IPv4 cleanly", DiscoveryUrlFormatter.formatWsUrl(lan4, 3411) == "ws://192.168.1.42:3411/ws")
-    val zoned6 = InetAddress.getByName("fe80::1%en0")
+    val activeInterface = runCatching {
+        java.net.NetworkInterface.getNetworkInterfaces()?.asSequence()?.firstOrNull { it.isUp }?.name
+    }.getOrNull() ?: "lo"
+    val zoned6 = runCatching {
+        InetAddress.getByName("fe80::1%$activeInterface")
+    }.getOrElse {
+        InetAddress.getByAddress(byteArrayOf(0xfe.toByte(), 0x80.toByte(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1))
+    }
     val ipv6Url = DiscoveryUrlFormatter.formatWsUrl(zoned6, 3411)
     check("formatWsUrl brackets IPv6 and strips zone id",
         ipv6Url != null && ipv6Url.startsWith("ws://[") && ipv6Url.endsWith(":3411/ws") && !ipv6Url.contains('%'),
