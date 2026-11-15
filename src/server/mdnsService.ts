@@ -11,23 +11,27 @@ const MDNS_PORT = 5353;
  */
 export function getLanIpv4Addresses(): string[] {
   const interfaces = os.networkInterfaces();
-  const addresses: string[] = [];
+  const primary: string[] = [];
+  const secondary: string[] = [];
 
   for (const [name, addrs] of Object.entries(interfaces)) {
     if (!addrs) continue;
-    // Skip virtual docker/bridge interfaces where possible, prioritize en0/wlan0/eth0
+    if (/(utun|vboxnet|docker|bridge|vEthernet|vmnet|vnic)/i.test(name)) continue;
+
     for (const addr of addrs) {
       if (addr.family === 'IPv4' && !addr.internal && !addr.address.startsWith('169.254.')) {
-        if (/^(en|wlan|wi-fi|eth)/i.test(name)) {
-          addresses.unshift(addr.address);
+        if (/^(en0|wlan0|eth0|wi-fi)$/i.test(name) || (name.toLowerCase().startsWith('en') && addr.address.startsWith('192.168.'))) {
+          primary.push(addr.address);
+        } else if (/^(en|wlan|eth)/i.test(name)) {
+          primary.push(addr.address);
         } else {
-          addresses.push(addr.address);
+          secondary.push(addr.address);
         }
       }
     }
   }
 
-  return Array.from(new Set(addresses));
+  return Array.from(new Set([...primary, ...secondary]));
 }
 
 export function getLanUrls(port: number, protocol: 'http' | 'https' = 'http'): string[] {
