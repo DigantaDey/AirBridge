@@ -380,8 +380,9 @@ export class SignalingHub {
         if (hasRequestedPair) {
           pairCode = requestedPair;
         } else if (this.pairCodeByPeer.has(peerId)) {
-          // Reconnect: rejoin the group this peerId last belonged to.
           pairCode = this.pairCodeByPeer.get(peerId)!;
+        } else if (this.isHostDesktopClient({ isLoopback, device } as ConnectedClient)) {
+          pairCode = this.defaultPairCode;
         } else if (!this.defaultPairCodeClaimed) {
           pairCode = this.defaultPairCode;
           this.defaultPairCodeClaimed = true;
@@ -478,9 +479,12 @@ export class SignalingHub {
           const fresh = generatePairCode(crypto.randomBytes(8));
           registeredClient.pairCode = fresh;
           this.rememberPairCode(registeredClient.peerId, fresh);
-          if (registeredClient.isLoopback && registeredClient.device.model !== 'AirBridge service') {
+
+          if (registeredClient.isLoopback) {
+            this.defaultPairCode = fresh;
             this.onHostPairCodeChange?.(fresh);
           }
+
           this.sendJson(ws, {
             type: 'pair-updated',
             pairCode: fresh,
