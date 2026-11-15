@@ -2,7 +2,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { WarpClient, type ClipboardBeamItem } from '../client/engine/warpClient.js';
+import { WarpClient, type ClipboardBeamItem, type NotificationBeamItem } from '../client/engine/warpClient.js';
+import { postMacOsNotification } from './macNotification.js';
 import {
   generatePairCode,
   isValidPairCode,
@@ -160,6 +161,9 @@ export class BackgroundClipboardPeer {
         if (!text.trim()) return;
         this.pendingWrite = text;
         void this.flushClipboardWrites();
+      },
+      onIncomingNotification: (notification: NotificationBeamItem) => {
+        postMacOsNotification(notification.title, notification.body, notification.appName);
       },
     });
     this.client = client;

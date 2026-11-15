@@ -362,6 +362,21 @@ export function App() {
           title: `Notification from ${notification.appName || notification.peerName}`,
           body: `${notification.title}${notification.body ? ": " + notification.body : ""}`,
         });
+        if (typeof window !== "undefined" && "Notification" in window) {
+          if (Notification.permission === "granted") {
+            try {
+              const notifTitle = notification.appName
+                ? `${notification.appName}: ${notification.title}`
+                : notification.title;
+              new Notification(notifTitle, {
+                body: notification.body,
+                tag: notification.notificationId,
+              });
+            } catch (_e) {}
+          } else if (Notification.permission === "default") {
+            Notification.requestPermission().catch(() => {});
+          }
+        }
       },
     });
 
