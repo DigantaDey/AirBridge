@@ -152,6 +152,9 @@ class MainActivity : ComponentActivity() {
                 onOpenDownloads = ::openDownloads,
                 onRequestBatteryExemption = ::requestBatteryExemption,
                 onOpenAccessibilitySettings = ::openAccessibilitySettings,
+                onOpenNotificationListenerSettings = {
+                    runCatching { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+                },
                 onOpenAppSettings = ::openAppSettings,
             )
         }

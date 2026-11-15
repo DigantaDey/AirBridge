@@ -60,6 +60,10 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("connectionContinuity", true)
         set(value) = sp.edit().putBoolean("connectionContinuity", value).apply()
 
+    var notificationSharing: Boolean
+        get() = sp.getBoolean("notificationSharing", true)
+        set(value) = sp.edit().putBoolean("notificationSharing", value).apply()
+
     /**
      * Accessibility-assisted hidden clipboard capture is OFF by default. The
      * user must explicitly opt in, then enable the AirBridge service in

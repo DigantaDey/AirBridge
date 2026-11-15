@@ -552,7 +552,46 @@ class ConnectionService : Service() {
         const val ACTION_START = "com.airbridge.app.connection.START"
         const val ACTION_STOP = "com.airbridge.app.connection.STOP"
         private const val CHANNEL_ID = "airbridge_connection"
+        private const val SHARED_NOTIF_CHANNEL_ID = "airbridge_shared_notifications"
         private const val NOTIFICATION_ID = 3411
+
+        fun postSharedNotification(context: Context, title: String, body: String, appName: String?) {
+            if (!Prefs(context).notificationSharing) return
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    SHARED_NOTIF_CHANNEL_ID,
+                    "AirBridge Shared Notifications",
+                    NotificationManager.IMPORTANCE_DEFAULT,
+                ).apply {
+                    description = "Displays notifications mirrored from paired AirBridge devices"
+                }
+                nm.createNotificationChannel(channel)
+            }
+            val notifTitle = if (!appName.isNullOrBlank()) "$appName: $title" else title
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Notification.Builder(context, SHARED_NOTIF_CHANNEL_ID)
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(context)
+            }
+            val open = PendingIntent.getActivity(
+                context,
+                0,
+                Intent(context, MainActivity::class.java).setPackage(context.packageName),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            val notification = builder
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle(notifTitle)
+                .setContentText(body)
+                .setStyle(Notification.BigTextStyle().bigText(body))
+                .setContentIntent(open)
+                .setAutoCancel(true)
+                .build()
+
+            nm.notify((System.currentTimeMillis() and 0x7FFFFFFF).toInt(), notification)
+        }
 
         @Volatile
         private var instance: ConnectionService? = null

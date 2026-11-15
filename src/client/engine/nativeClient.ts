@@ -29,7 +29,7 @@ export class NativeClient implements AirBridgeClient {
   private snapshot: WarpClientSnapshot = {
     connectionState: 'connecting', peerId: '', pairCode: '', formattedPairCode: '', visibility: 'nearby',
     myDevice: null, lanUrls: [], localDaemon: { enabled: false, platform: 'android', hostname: '', autoSaveToDownloads: true, clipboardBridge: true },
-    peers: [], peerSecurity: {}, transfers: [], clipboardItems: [], trustedPeerKeys: [], autoClipboardSync: true, clipboardReceiveEnabled: true,
+    peers: [], peerSecurity: {}, transfers: [], clipboardItems: [], trustedPeerKeys: [], autoClipboardSync: true, clipboardReceiveEnabled: true, notificationSharing: true,
   };
 
   constructor(private readonly bridge: AirBridgeNativeBridge, private readonly options: WarpClientOptions = {}) {}
@@ -123,6 +123,9 @@ export class NativeClient implements AirBridgeClient {
   getSnapshot(): WarpClientSnapshot { return this.snapshot; }
   updateDeviceName(name: string): void { this.command('rename', { name }); }
   setVisibility(value: VisibilityMode): void { this.command('visibility', { value }); }
+  setNotificationSharing(value: boolean): void { this.snapshot.notificationSharing = value; }
+  getNotificationSharing(): boolean { return this.snapshot.notificationSharing; }
+  async sendNotification(_targetPeerId: string, _title: string, _body: string): Promise<boolean> { return false; }
   joinPairCode(value: string): void { this.command('pair', { value }); }
   rotatePairCode(): void { this.command('rotatePair'); }
   toggleTrustedPeer(key: string, value: boolean): void { this.command('trust', { key, value }); }

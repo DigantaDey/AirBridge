@@ -57,10 +57,12 @@ fun SettingsScreen(
     onSetThemeMode: (String) -> Unit,
     onSetAutoClipboard: (Boolean) -> Unit,
     onSetReceiveClipboard: (Boolean) -> Unit,
+    onSetNotificationSharing: (Boolean) -> Unit = {},
     onSetConnectionContinuity: (Boolean) -> Unit,
     onSetAccessibilityOptIn: (Boolean) -> Unit,
     onRequestBatteryExemption: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
+    onOpenNotificationListenerSettings: () -> Unit = {},
     onOpenAppSettings: () -> Unit,
     onOpenPairingSheet: () -> Unit,
     onForgetComputer: () -> Unit,
@@ -162,6 +164,31 @@ fun SettingsScreen(
                     checked = uiState.receiveClipboard,
                     onCheckedChange = onSetReceiveClipboard,
                 )
+                HorizontalDivider()
+                SwitchRow(
+                    title = "Notification sharing",
+                    subtitle = "Sync notifications bidirectionally between phone and computer",
+                    checked = uiState.notificationSharing,
+                    onCheckedChange = onSetNotificationSharing,
+                )
+                if (uiState.notificationSharing) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "Notification Listener Access",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedButton(onClick = onOpenNotificationListenerSettings) {
+                            Text("Open Settings")
+                        }
+                    }
+                }
                 HorizontalDivider()
                 SwitchRow(
                     title = "Background clipboard bridge opt-in",

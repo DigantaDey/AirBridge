@@ -125,6 +125,15 @@ export type ControlPayload =
       timestamp: number;
     }
   | {
+      kind: 'notification-beam';
+      notificationId: string;
+      title: string;
+      body: string;
+      appName?: string;
+      packageName?: string;
+      timestamp: number;
+    }
+  | {
       kind: 'history-sync';
       transfers: HistoricalTransferSummary[];
     }

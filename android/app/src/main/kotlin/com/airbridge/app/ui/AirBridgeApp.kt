@@ -100,6 +100,8 @@ fun AirBridgeApp(
     onOpenDownloads: (String?) -> Unit,
     onRequestBatteryExemption: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
+    onSetNotificationSharing: (Boolean) -> Unit = {},
+    onOpenNotificationListenerSettings: () -> Unit = {},
     onOpenAppSettings: () -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -172,8 +174,10 @@ fun AirBridgeApp(
             onSetThemeMode = { viewModel.setThemeMode(it) },
             onSetAutoClipboard = { viewModel.setAutoClipboard(it) },
             onSetReceiveClipboard = { viewModel.setReceiveClipboard(it) },
+            onSetNotificationSharing = { viewModel.setNotificationSharing(it) },
             onSetConnectionContinuity = { viewModel.setConnectionContinuity(it) },
             onSetAccessibilityOptIn = { viewModel.setAccessibilityOptIn(it) },
+            onOpenNotificationListenerSettings = onOpenNotificationListenerSettings,
             onForgetComputer = { viewModel.forgetComputer() },
         )
 
@@ -304,8 +308,10 @@ fun AirBridgeContent(
     onSetThemeMode: (String) -> Unit,
     onSetAutoClipboard: (Boolean) -> Unit,
     onSetReceiveClipboard: (Boolean) -> Unit,
+    onSetNotificationSharing: (Boolean) -> Unit = {},
     onSetConnectionContinuity: (Boolean) -> Unit,
     onSetAccessibilityOptIn: (Boolean) -> Unit,
+    onOpenNotificationListenerSettings: () -> Unit = {},
     onForgetComputer: () -> Unit,
 ) {
     if (uiState.scannerOpen) {
@@ -448,10 +454,12 @@ fun AirBridgeContent(
                             onSetThemeMode = onSetThemeMode,
                             onSetAutoClipboard = onSetAutoClipboard,
                             onSetReceiveClipboard = onSetReceiveClipboard,
+                            onSetNotificationSharing = onSetNotificationSharing,
                             onSetConnectionContinuity = onSetConnectionContinuity,
                             onSetAccessibilityOptIn = onSetAccessibilityOptIn,
                             onRequestBatteryExemption = onRequestBatteryExemption,
                             onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                            onOpenNotificationListenerSettings = onOpenNotificationListenerSettings,
                             onOpenAppSettings = onOpenAppSettings,
                             onOpenPairingSheet = onOpenPairingSheet,
                             onForgetComputer = onForgetComputer,

@@ -43,6 +43,7 @@ data class AirBridgeAppUiState(
     val themeMode: String = "dark",
     val autoClipboard: Boolean = true,
     val receiveClipboard: Boolean = true,
+    val notificationSharing: Boolean = true,
     val connectionContinuity: Boolean = true,
     val accessibilityOptIn: Boolean = false,
     val accessibilityEnabled: Boolean = false,
@@ -68,6 +69,7 @@ private data class LocalPrefsSnapshot(
     val themeMode: String,
     val autoClipboard: Boolean,
     val receiveClipboard: Boolean,
+    val notificationSharing: Boolean,
     val connectionContinuity: Boolean,
     val accessibilityOptIn: Boolean,
     val accessibilityEnabled: Boolean,
@@ -131,6 +133,7 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             themeMode = local.themeMode,
             autoClipboard = if (engine.ready) engine.autoClipboard else local.autoClipboard,
             receiveClipboard = if (engine.ready) engine.receiveClipboard else local.receiveClipboard,
+            notificationSharing = local.notificationSharing,
             connectionContinuity = local.connectionContinuity,
             accessibilityOptIn = local.accessibilityOptIn,
             accessibilityEnabled = local.accessibilityEnabled,
@@ -177,6 +180,7 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             themeMode = prefs.themeMode,
             autoClipboard = prefs.autoClipboard,
             receiveClipboard = prefs.receiveClipboard,
+            notificationSharing = prefs.notificationSharing,
             connectionContinuity = prefs.connectionContinuity,
             accessibilityOptIn = prefs.accessibilityClipboardOptIn,
             accessibilityEnabled = runCatching { ClipboardAccessibilityService.isEnabled(appContext) }.getOrDefault(false),
@@ -520,6 +524,11 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
     fun setReceiveClipboard(enabled: Boolean) {
         prefs.receiveClipboard = enabled
         ConnectionService.currentHost()?.setReceiveClipboard(enabled)
+        _local.value = readLocalSnapshot()
+    }
+
+    fun setNotificationSharing(enabled: Boolean) {
+        prefs.notificationSharing = enabled
         _local.value = readLocalSnapshot()
     }
 

@@ -158,6 +158,17 @@ data class ClipboardItem(
     val sasCode: String,
 )
 
+data class NotificationItem(
+    val notificationId: String,
+    val peerId: String,
+    val peerName: String,
+    val title: String,
+    val body: String,
+    val appName: String?,
+    val packageName: String?,
+    val timestamp: Long,
+)
+
 enum class ConnectionState { CONNECTING, CONNECTED, RECONNECTING, DISCONNECTED }
 
 data class WelcomeInfo(
@@ -177,6 +188,7 @@ interface EngineListener {
     fun onTransferChanged(transfer: TransferView) {}
     fun onClipboard(item: ClipboardItem) {}
     fun onLocalClipboardBeam(item: ClipboardItem) {}
+    fun onNotification(item: NotificationItem) {}
     fun onError(code: String, message: String) {}
 }
 

@@ -9,7 +9,7 @@ const initial = (): WarpClientSnapshot & { ready: boolean; revision: number; cli
   connectionState: 'connected', peerId: '1111111111111111', pairCode: 'ABCDEF', formattedPairCode: 'ABC-DEF',
   visibility: 'paired-only', myDevice: null, lanUrls: [],
   localDaemon: { enabled: false, platform: 'android', hostname: '', autoSaveToDownloads: true, clipboardBridge: true },
-  peers: [], peerSecurity: {}, transfers: [], clipboardItems: [], trustedPeerKeys: [], autoClipboardSync: true, clipboardReceiveEnabled: true,
+  peers: [], peerSecurity: {}, transfers: [], clipboardItems: [], trustedPeerKeys: [], autoClipboardSync: true, clipboardReceiveEnabled: true, notificationSharing: true,
 });
 const transfer = (status: TransferSessionView['status']): TransferSessionView => ({
   transferId: 'aaaaaaaaaaaaaaaa', peerId: '2222222222222222', peerName: 'Mac', peerPlatform: 'macos', sasCode: '123 · 456',

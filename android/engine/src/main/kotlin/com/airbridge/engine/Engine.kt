@@ -821,6 +821,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
             )
             "pong" -> { /* RTT display not part of the native UI yet */ }
             "clipboard-beam" -> handleClipboardBeam(fromPeerId, payload)
+            "notification-beam" -> handleNotificationBeam(fromPeerId, payload)
             "history-sync" -> handleHistorySync(fromPeerId, payload)
             "transfer-offer" -> handleTransferOffer(fromPeerId, payload)
             "transfer-accept" -> handleTransferAccept(fromPeerId, payload)
@@ -2059,6 +2060,78 @@ class AirBridgeEngine(private val config: EngineConfig) {
         )
         for (l in listeners) l.onLocalClipboardBeam(item)
         return item
+    }
+
+    var notificationSharingEnabled: Boolean = true
+
+    fun sendNotificationBeam(
+        targetPeerId: String,
+        title: String,
+        body: String,
+        appName: String? = null,
+        packageName: String? = null,
+    ) {
+        if (!notificationSharingEnabled) return
+        val session = sessionFor(targetPeerId) ?: return
+        val payload = JsonValue.Obj()
+            .put("kind", "notification-beam")
+            .put("notificationId", AirCrypto.randomHex16())
+            .put("title", title)
+            .put("body", body)
+            .put("timestamp", System.currentTimeMillis())
+        if (appName != null) payload.put("appName", appName)
+        if (packageName != null) payload.put("packageName", packageName)
+
+        val env = AirCrypto.encryptControlPayload(
+            session.aesKey,
+            payload.toJsonString().toByteArray(Charsets.UTF_8),
+        )
+        val envelope = JsonValue.Obj()
+            .put("encrypted", true)
+            .put("iv", Base64Url.encode(env.iv))
+            .put("ciphertext", Base64Url.encode(env.ciphertext))
+        val outer = JsonValue.Obj()
+            .put("type", "transfer-control")
+            .put("to", targetPeerId)
+            .put("envelope", envelope)
+        sendServer(outer)
+    }
+
+    fun broadcastNotificationBeam(
+        title: String,
+        body: String,
+        appName: String? = null,
+        packageName: String? = null,
+    ) {
+        if (!notificationSharingEnabled) return
+        val activePeers = synchronized(lock) { peers.keys.toList() }
+        for (peerId in activePeers) {
+            sendNotificationBeam(peerId, title, body, appName, packageName)
+        }
+    }
+
+    private fun handleNotificationBeam(fromPeerId: String, payload: JsonValue.Obj) {
+        if (!notificationSharingEnabled) return
+        val title = payload.optStr("title") ?: ""
+        val body = payload.optStr("body") ?: ""
+        if (title.isEmpty() && body.isEmpty()) return
+        val notifId = payload.optStr("notificationId") ?: AirCrypto.randomHex16()
+        val appName = payload.optStr("appName")
+        val pkgName = payload.optStr("packageName")
+        val timestamp = payload.optLong("timestamp") ?: System.currentTimeMillis()
+        val peerName = synchronized(lock) { peers[fromPeerId]?.device?.name } ?: "Peer"
+
+        val item = NotificationItem(
+            notificationId = notifId,
+            peerId = fromPeerId,
+            peerName = peerName,
+            title = title,
+            body = body,
+            appName = appName,
+            packageName = pkgName,
+            timestamp = timestamp,
+        )
+        for (l in listeners) l.onNotification(item)
     }
 
     // =========================================================================

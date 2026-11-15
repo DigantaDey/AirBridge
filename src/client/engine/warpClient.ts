@@ -238,6 +238,18 @@ export interface WarpClientSnapshot {
   trustedPeerKeys: string[];
   autoClipboardSync: boolean;
   clipboardReceiveEnabled: boolean;
+  notificationSharing: boolean;
+}
+
+export interface NotificationBeamItem {
+  notificationId: string;
+  peerId: string;
+  peerName: string;
+  title: string;
+  body: string;
+  appName?: string;
+  packageName?: string;
+  timestamp: number;
 }
 
 export interface WarpClientOptions {
@@ -248,6 +260,7 @@ export interface WarpClientOptions {
   enableWebRtc?: boolean;
   autoAcceptAll?: boolean;
   autoClipboardSync?: boolean;
+  onIncomingNotification?: (notification: NotificationBeamItem) => void;
   /** Instance-owned persistence for headless peers; never replace global localStorage. */
   storage?: Storage | null;
   /** Headless peers can own serialized OS writes themselves instead of sending set-host-clipboard. */
@@ -896,6 +909,7 @@ export class WarpClient {
   // Automatic universal clipboard sync state
   private autoClipboardSync = true;
   private clipboardReceiveEnabled = true;
+  private notificationSharing = true;
   private lastSyncedClipboardText = '';
   private seenBeamIds = new Set<string>();
   private lastIncomingClip: { peerId: string; text: string; ts: number } | null = null;
@@ -936,6 +950,10 @@ export class WarpClient {
         const receiveRaw = storage.getItem(`${this.storagePrefix}:clipboardReceive`);
         if (receiveRaw === '0' || receiveRaw === 'false') {
           this.clipboardReceiveEnabled = false;
+        }
+        const notifRaw = storage.getItem(`${this.storagePrefix}:notificationSharing`);
+        if (notifRaw === '0' || notifRaw === 'false') {
+          this.notificationSharing = false;
         }
         const historyRaw = storage.getItem(`${this.storagePrefix}:transferHistory`);
         if (historyRaw) {
@@ -1119,7 +1137,46 @@ export class WarpClient {
       trustedPeerKeys: Array.from(this.trustedPeerKeys),
       autoClipboardSync: this.autoClipboardSync,
       clipboardReceiveEnabled: this.clipboardReceiveEnabled,
+      notificationSharing: this.notificationSharing,
     };
+  }
+
+  public setNotificationSharing(enabled: boolean): void {
+    this.notificationSharing = enabled;
+    try {
+      this.storage?.setItem(`${this.storagePrefix}:notificationSharing`, enabled ? '1' : '0');
+    } catch (_e) {}
+    this.emit();
+  }
+
+  public getNotificationSharing(): boolean {
+    return this.notificationSharing;
+  }
+
+  public async sendNotification(
+    targetPeerId: string,
+    title: string,
+    body: string,
+    appName?: string,
+    packageName?: string
+  ): Promise<boolean> {
+    if (!this.notificationSharing) return false;
+    const peer = this.peers.find((p) => p.peerId === targetPeerId);
+    if (!peer) return false;
+
+    const notificationId = randomHex16();
+    const payload: ControlPayload = {
+      kind: 'notification-beam',
+      notificationId,
+      title: title.trim(),
+      body: body.trim(),
+      appName: appName?.trim() || 'AirBridge',
+      packageName: packageName?.trim(),
+      timestamp: Date.now(),
+    };
+
+    await this.sendControlMessage(targetPeerId, payload, true);
+    return true;
   }
 
   public updateDeviceName(newName: string): void {
@@ -2740,6 +2797,35 @@ export class WarpClient {
         const rtt = Math.max(1, Date.now() - payload.ts);
         this.peerRttMs.set(fromPeerId, rtt);
         this.emit();
+        break;
+      }
+
+      case 'notification-beam': {
+        if (typeof payload.notificationId !== 'string') break;
+        if (!this.notificationSharing) break;
+        const title = typeof payload.title === 'string' ? payload.title.trim() : '';
+        const body = typeof payload.body === 'string' ? payload.body.trim() : '';
+        const appName = typeof payload.appName === 'string' ? payload.appName.trim() : 'AirBridge';
+        const packageName = typeof payload.packageName === 'string' ? payload.packageName : '';
+        if (!title && !body) break;
+
+        const notifItem: NotificationBeamItem = {
+          notificationId: payload.notificationId,
+          peerId: fromPeerId,
+          peerName: peer?.device.name || 'Peer',
+          title,
+          body,
+          appName,
+          packageName,
+          timestamp: payload.timestamp || Date.now(),
+        };
+
+        this.opts.onIncomingNotification?.(notifItem);
+        if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+          try {
+            new Notification(`${appName}: ${title}`, { body });
+          } catch (_e) {}
+        }
         break;
       }
 

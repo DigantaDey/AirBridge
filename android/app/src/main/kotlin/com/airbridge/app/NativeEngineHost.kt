@@ -151,6 +151,7 @@ class NativeEngineHost(
     }
 
     init {
+        instance = this
         onState(_uiState.value)
         worker.execute {
             try {
@@ -214,6 +215,12 @@ class NativeEngineHost(
 
                         override fun onLocalClipboardBeam(item: ClipboardItem) = addClip(item)
 
+                        override fun onNotification(item: NotificationItem) {
+                            if (prefs.notificationSharing) {
+                                ConnectionService.postSharedNotification(context, item.title, item.body, item.appName)
+                            }
+                        }
+
                         override fun onError(code: String, message: String) {
                             if (code == "CONNECTION_FAILED") connectionError = message
                             Log.w(TAG, "$code: $message")
@@ -246,6 +253,13 @@ class NativeEngineHost(
             }
         }
         refresh()
+    }
+
+    fun broadcastNotificationBeam(title: String, body: String, appName: String? = null, packageName: String? = null) {
+        if (closed || !prefs.notificationSharing) return
+        worker.execute {
+            engine?.broadcastNotificationBeam(title, body, appName, packageName)
+        }
     }
 
     fun publishLocalClipboard(text: String, explicit: Boolean = false) {
@@ -441,11 +455,14 @@ class NativeEngineHost(
 
     override fun close() {
         closed = true
+        if (instance === this) instance = null
         engine?.stop()
         worker.shutdownNow()
     }
 
     companion object {
         private const val TAG = "AirBridgeNative"
+        @Volatile var instance: NativeEngineHost? = null
+            private set
     }
 }
