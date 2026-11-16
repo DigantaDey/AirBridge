@@ -123,7 +123,8 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          gradle -p android :engine:check :app:assembleRelease --no-daemon 2>&1 | tee gradle-build.log || {
+          gradle -p android :engine:check --no-daemon 2>&1 | tee gradle-build.log && \
+          gradle -p android :app:assembleRelease --no-daemon 2>&1 | tee -a gradle-build.log || {
             echo "::error title=Android release build failed::$(tail -n 40 gradle-build.log | tr '\n' '|' | cut -c1-3000)"
             exit 1
           }
