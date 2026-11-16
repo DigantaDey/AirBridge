@@ -145,7 +145,12 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             engine = engine,
             scannerOpen = overlay.scannerOpen,
             pairingSheetOpen = overlay.pairingSheetOpen,
-            connectError = overlay.connectError,
+            // Input validation first, else the engine's classified failure
+            // (TCP timeout vs TLS vs pair code) so the connect screen shows
+            // the same layer-specific guidance as the status card.
+            connectError = overlay.connectError ?: engine.connectionHelp
+                ?.takeIf { engine.connectionState != com.airbridge.engine.ConnectionState.CONNECTED }
+                ?.userMessage,
             isSending = overlay.isSending,
             isConnecting = overlay.isConnecting && !engine.ready,
         )
@@ -261,10 +266,12 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun connectWithLink(link: PairingLink) {
         stopDiscovery()
-        prefs.target = link.baseUrl
-        // Always replace staged code, including clearing it for a manual
-        // address. Otherwise an old unconsumed QR invite could be replayed.
-        prefs.pendingPairCode = link.pairCode.orEmpty()
+        // Replaces the whole previous invitation: target, staged code (cleared
+        // for a manual address so an old unconsumed QR invite cannot be
+        // replayed), QR alternates + TLS pin, endpoints learned on an older
+        // network. Bumps the invitation generation so ConnectionService
+        // restarts the engine even when the computer's address is unchanged.
+        prefs.stageInvitation(link)
         _overlays.value = _overlays.value.copy(
             scannerOpen = false,
             pairingSheetOpen = false,
@@ -295,6 +302,9 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                     link = nearbyLink.copy(pairCode = link.pairCode ?: nearbyLink.pairCode)
                 }
             } else if (prefs.target.isNotEmpty() && link.pairCode != null) {
+                // Joined live on the current connection: an older staged code
+                // is now obsolete and must not be claimed by a later restart.
+                prefs.consumePendingPairCode()
                 joinPairCode(link.pairCode!!)
                 _overlays.value = _overlays.value.copy(scannerOpen = false)
                 return true

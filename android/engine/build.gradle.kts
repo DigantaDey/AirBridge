@@ -39,8 +39,19 @@ val pairingLinkTest by tasks.registering(JavaExec::class) {
     outputs.upToDateWhen { false }
 }
 
+// Hotspot pairing: on-link endpoint ranking, QR alternates/pin, invitation
+// staging, multi-address TCP race and connection-failure classification.
+// (The live QR → TLS/WSS → welcome flow runs in scripts/test-native-interop.ts.)
+val hotspotPairingTest by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Runs hotspot pairing endpoint-selection and failure-classification checks"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "com.airbridge.engine.HotspotPairingTestKt"
+    outputs.upToDateWhen { false }
+}
+
 tasks.named("check") {
-    dependsOn(vectorTest, pairingLinkTest)
+    dependsOn(vectorTest, pairingLinkTest, hotspotPairingTest)
 }
 
 val filesTest by tasks.registering(JavaExec::class) {

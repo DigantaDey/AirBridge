@@ -22,10 +22,15 @@ import {
   formatPairCode,
   normalizePairCode,
 } from "../../shared/protocol.js";
+import type { LanEndpoint } from "../../shared/protocol.js";
 import type {
   ClipboardBeamItem,
   TransferSessionView,
 } from "../engine/warpClient.js";
+import {
+  buildPairingUrl,
+  choosePrimaryEndpoint,
+} from "../engine/pairingUrl.js";
 import {
   triggerBatchZipDownload,
   triggerSingleFileDownload,
@@ -35,6 +40,10 @@ import { TransferSpeed } from "./TransferSpeed.js";
 interface PairingDockProps {
   pairCode: string;
   lanUrls: string[];
+  /** lanUrls with interface details (same order). */
+  lanEndpoints?: LanEndpoint[];
+  /** TLS anchor pin; added to the QR as `ca=` so the scan authenticates TLS. */
+  tlsPin?: string | null;
   transfers: TransferSessionView[];
   clipboardItems: ClipboardBeamItem[];
   onJoinPairCode: (code: string) => void;
@@ -46,6 +55,8 @@ interface PairingDockProps {
 export function PairingDock({
   pairCode,
   lanUrls,
+  lanEndpoints,
+  tlsPin,
   transfers,
   clipboardItems,
   onJoinPairCode,
@@ -62,15 +73,46 @@ export function PairingDock({
     "transfers",
   );
 
+  // The computer cannot know which of its interfaces faces the phone. The QR
+  // carries every advertised endpoint (the Android app picks the one on its
+  // own network); the user can choose which one a phone *browser* opens.
+  const [preferredUrl, setPreferredUrl] = useState<string | null>(null);
+  const endpoints: LanEndpoint[] = useMemo(
+    () =>
+      lanEndpoints && lanEndpoints.length > 0
+        ? lanEndpoints
+        : lanUrls.map((url) => {
+            let address = url;
+            try {
+              address = new URL(url).hostname;
+            } catch {
+              /* keep raw */
+            }
+            return { url, address, interface: "", kind: "other" as const };
+          }),
+    [lanEndpoints, lanUrls],
+  );
+  const pageLocation =
+    typeof window === "undefined"
+      ? { origin: "", hostname: "localhost" }
+      : { origin: window.location.origin, hostname: window.location.hostname };
+  const primaryUrl = choosePrimaryEndpoint({
+    lanUrls,
+    pageOrigin: pageLocation.origin,
+    pageHostname: pageLocation.hostname,
+    preferredUrl,
+  });
   const pairUrl = useMemo(() => {
     if (typeof window === "undefined" || !pairCode) return "";
-    const isLocalhost =
-      window.location.hostname === "localhost" ||
-      window.location.hostname === "127.0.0.1";
-    const baseOrigin =
-      isLocalhost && lanUrls.length > 0 ? lanUrls[0] : window.location.origin;
-    return `${baseOrigin}/?pair=${pairCode}`;
-  }, [pairCode, lanUrls]);
+    return buildPairingUrl({
+      pairCode,
+      lanUrls,
+      pageOrigin: window.location.origin,
+      pageHostname: window.location.hostname,
+      preferredUrl,
+      tlsPin,
+    });
+  }, [pairCode, lanUrls, preferredUrl, tlsPin]);
 
   useEffect(() => {
     if (!pairUrl) return;
@@ -188,6 +230,39 @@ export function PairingDock({
                 )}
               </button>
             </div>
+
+            {endpoints.length > 1 && (
+              <div className="mt-2" data-testid="pairing-endpoints">
+                <p className="text-[10px] text-[var(--ab-muted)] leading-snug">
+                  This computer is on {endpoints.length} networks. The AirBridge
+                  Android app tries all of them; a phone browser opens the
+                  selected one. On a phone hotspot, pick the hotspot address.
+                </p>
+                <div className="mt-1 flex flex-wrap gap-1" role="radiogroup" aria-label="Address in the QR code">
+                  {endpoints.map((endpoint) => {
+                    const selected = endpoint.url === primaryUrl;
+                    return (
+                      <button
+                        key={endpoint.url}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        onClick={() => setPreferredUrl(endpoint.url)}
+                        title={endpoint.url}
+                        className={`px-2 py-0.5 rounded-lg text-[10px] font-mono-tabular border transition-colors cursor-pointer ${
+                          selected
+                            ? "border-sky-500 text-sky-500"
+                            : "border-[var(--ab-border)] text-[var(--ab-muted)] hover:text-[var(--ab-text)]"
+                        }`}
+                      >
+                        {endpoint.interface ? `${endpoint.interface} · ` : ""}
+                        {endpoint.address}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Join Existing Room Input */}
             <form

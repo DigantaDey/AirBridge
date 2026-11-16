@@ -31,5 +31,26 @@ fun main(args: Array<String>) {
     restored.checkServerTrusted(renewed, "RSA")
     check(!real.first().encoded.contentEquals(renewed.first().encoded))
     check(writes == 1)
-    println("TLS TRUST: ALL PASS (first-use validation, persistent CA pin, impostor rejection, leaf renewal)")
+
+    // QR `ca=` pin: authenticates the very first connection (no TOFU).
+    val qrPin = PinnedTlsTrust.pinOf(real.last().encoded)
+    check(qrPin.length == 43 && PairingLink.isValidPin(qrPin)) { "QR pin format" }
+    var qrSaved: ByteArray? = null
+    val qr = PinnedTlsTrust({ qrSaved }, { qrSaved = it }, qrPin)
+    reject { qr.checkServerTrusted(impostor, "RSA") }
+    check(qrSaved == null) { "Impostor persisted under a QR pin" }
+    qr.checkServerTrusted(real, "RSA")
+    check(qrSaved!!.contentEquals(real.last().encoded)) { "QR-authenticated anchor not saved" }
+    qr.checkServerTrusted(renewed, "RSA") // leaf renewal for a new LAN address keeps the CA
+
+    // A stale TOFU anchor (e.g. an impostor met on a hostile network, or an
+    // old install) is replaced only when the scanned QR proves the new CA.
+    var stale: ByteArray? = impostor.last().encoded
+    PinnedTlsTrust({ stale }, { stale = it }, qrPin).checkServerTrusted(real, "RSA")
+    check(stale!!.contentEquals(real.last().encoded)) { "QR pin did not replace stale anchor" }
+    // …and a QR pin never lets a different CA in, whatever is saved.
+    var kept: ByteArray? = real.last().encoded
+    reject { PinnedTlsTrust({ kept }, { kept = it }, qrPin).checkServerTrusted(impostor, "RSA") }
+    check(kept!!.contentEquals(real.last().encoded))
+    println("TLS TRUST: ALL PASS (first-use validation, persistent CA pin, impostor rejection, leaf renewal, QR pin)")
 }

@@ -68,6 +68,51 @@ try {
       await server.close();
     }
   }
+
+  // QR pairing over a phone hotspot: the Mac has a campus NIC (unreachable
+  // from the phone) and a hotspot NIC. QR → pending code → TLS (QR pin) →
+  // welcome → paired, rescan with a fresh code, failure classification.
+  {
+    const dir = path.join(base, 'qr');
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const mac = (address: string, netmask: string, cidr: string) => ({
+      address, netmask, family: 'IPv4' as const, mac: '02:00:00:00:00:01', internal: false, cidr,
+    });
+    const server = await createAirBridgeServer({
+      port: 0, host: '0.0.0.0', mode: 'test', enableMdns: false,
+      https: true, tlsDir: path.join(base, 'qr-certs'), hostClipboard: false,
+      getNetworkInterfaces: () => ({
+        lo0: [{ address: '127.0.0.1', netmask: '255.0.0.0', family: 'IPv4', mac: '00:00:00:00:00:00', internal: true, cidr: '127.0.0.1/8' }],
+        en0: [mac('10.205.95.167', '255.255.252.0', '10.205.95.167/22')],
+        en7: [mac('10.42.61.23', '255.255.255.0', '10.42.61.23/24')],
+        utun3: [mac('100.96.0.7', '255.255.255.255', '100.96.0.7/32')],
+        bridge100: [mac('192.168.64.1', '255.255.255.0', '192.168.64.1/24')],
+      }),
+    });
+    if (server.uncoveredLanAddresses.length > 0) throw new Error(`uncovered: ${server.uncoveredLanAddresses.join(', ')}`);
+    if (server.tls?.caCertPem) {
+      const caPath = path.join(dir, 'ca.pem');
+      await writeFile(caPath, server.tls.caCertPem);
+      childEnv.NODE_EXTRA_CA_CERTS = caPath;
+    }
+    // Reach the server over a non-loopback address when there is one, so the
+    // hub treats the phone as a LAN client (as on a real hotspot).
+    const dial = Object.values(os.networkInterfaces()).flat()
+      .find((i) => i && i.family === 'IPv4' && !i.internal)?.address ?? '127.0.0.1';
+    console.log(`\n=== QR pairing over hotspot (phone dials ${dial}) ===`);
+    const started = performance.now();
+    try {
+      await Promise.all([
+        run(java, ['-Xmx128m', '-cp', classpath, 'com.airbridge.engine.QrPairingE2EKt', dir, dial], 'QR phone'),
+        run(process.execPath, ['--import', 'tsx', 'scripts/e2e-qr-desktop.ts', `wss://127.0.0.1:${server.port}/ws`, dir], 'QR desktop'),
+      ]);
+      console.log(`QR hotspot pairing passed in ${((performance.now() - started) / 1000).toFixed(2)}s.`);
+    } finally {
+      for (const child of children) child.kill('SIGKILL');
+      await server.close();
+    }
+  }
 } finally {
   for (const child of children) child.kill('SIGKILL');
   await rm(base, { recursive: true, force: true });

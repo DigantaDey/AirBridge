@@ -45,6 +45,12 @@ export interface AirBridgeTlsMaterial {
   certDir?: string;
   /** DNS names and IP addresses the leaf certificate covers. */
   hosts: string[];
+  /**
+   * base64url SHA-256 of the DER of the LAST certificate in the served chain —
+   * exactly the anchor Android's PinnedTlsTrust pins. Put in the pairing QR
+   * (`ca=`) so the first connection is authenticated by the scan, not by TOFU.
+   */
+  pinSha256?: string;
 }
 
 export interface ResolveTlsOptions {
@@ -56,6 +62,12 @@ export interface ResolveTlsOptions {
   tlsKeyPath?: string;
   /** Directory for generated CA/leaf material. Defaults to `~/.airbridge/tls`. */
   tlsDir?: string;
+  /**
+   * LAN IPv4 addresses the leaf must cover. Defaults to the live LAN
+   * candidates. The server passes the exact list it advertises so the QR,
+   * mDNS and certificate SANs can never disagree.
+   */
+  lanAddresses?: string[];
 }
 
 export interface ShouldEnableHttpsOptions extends ResolveTlsOptions {
@@ -103,7 +115,9 @@ export function defaultTlsDir(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /** DNS names + IPs the leaf certificate must be valid for. */
-export function getCertificateHosts(): { dnsNames: string[]; ipAddresses: string[] } {
+export function getCertificateHosts(
+  lanAddresses: string[] = getLanIpv4Addresses()
+): { dnsNames: string[]; ipAddresses: string[] } {
   const cleanHostname = os
     .hostname()
     .replace(/\.local$/i, '')
@@ -118,8 +132,36 @@ export function getCertificateHosts(): { dnsNames: string[]; ipAddresses: string
       )
     )
   );
-  const ipAddresses = Array.from(new Set(['127.0.0.1', '::1', ...getLanIpv4Addresses()]));
+  const ipAddresses = Array.from(new Set(['127.0.0.1', '::1', ...lanAddresses]));
   return { dnsNames, ipAddresses };
+}
+
+/** Split a PEM bundle into individual certificate PEMs (in order). */
+export function splitPemChain(pem: string): string[] {
+  return pem.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? [];
+}
+
+/** base64url(SHA-256(DER)) of the last certificate in a served PEM chain. */
+export function chainAnchorPinSha256(chainPem: string): string | undefined {
+  const certs = splitPemChain(chainPem);
+  const last = certs[certs.length - 1];
+  if (!last) return undefined;
+  try {
+    return crypto.createHash('sha256').update(new crypto.X509Certificate(last).raw).digest('base64url');
+  } catch {
+    return undefined;
+  }
+}
+
+/** True when the leaf (first cert of the chain) covers this IP address. */
+export function certificateCoversIp(chainPem: string, ip: string): boolean {
+  const leaf = splitPemChain(chainPem)[0];
+  if (!leaf) return false;
+  try {
+    return new crypto.X509Certificate(leaf).checkIP(ip) === ip;
+  } catch {
+    return false;
+  }
 }
 
 function fingerprint256(pem: string): string | undefined {
@@ -250,13 +292,28 @@ export async function resolveTlsMaterial(
       fs.promises.readFile(path.resolve(certPath), 'utf8'),
       fs.promises.readFile(path.resolve(keyPath), 'utf8'),
     ]);
-    const { dnsNames, ipAddresses } = getCertificateHosts();
+    // A provided certificate covers whatever it covers; report only the
+    // hosts it actually matches so callers never advertise an address that
+    // would fail hostname verification.
+    const { dnsNames, ipAddresses } = getCertificateHosts(options.lanAddresses);
+    const covered = (() => {
+      try {
+        const leaf = new crypto.X509Certificate(splitPemChain(cert)[0] ?? cert);
+        return [
+          ...dnsNames.filter((name) => leaf.checkHost(name) === name),
+          ...ipAddresses.filter((ip) => leaf.checkIP(ip) === ip),
+        ];
+      } catch {
+        return [...dnsNames, ...ipAddresses];
+      }
+    })();
     return {
       key,
       cert,
       source: 'provided',
       leafFingerprintSha256: fingerprint256(cert),
-      hosts: [...dnsNames, ...ipAddresses],
+      hosts: covered,
+      pinSha256: chainAnchorPinSha256(cert),
     };
   }
 
@@ -268,7 +325,7 @@ export async function resolveTlsMaterial(
   const leafCertPath = path.join(certDir, 'cert.pem');
   const leafKeyPath = path.join(certDir, 'key.pem');
 
-  const { dnsNames, ipAddresses } = getCertificateHosts();
+  const { dnsNames, ipAddresses } = getCertificateHosts(options.lanAddresses);
 
   let caCert = await readFileIfExists(caCertPath);
   let caKey = await readFileIfExists(caKeyPath);
@@ -302,6 +359,7 @@ export async function resolveTlsMaterial(
     leafFingerprintSha256: fingerprint256(leafCert),
     certDir,
     hosts: [...dnsNames, ...ipAddresses],
+    pinSha256: chainAnchorPinSha256(caCert),
   };
 }
 

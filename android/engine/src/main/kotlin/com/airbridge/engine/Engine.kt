@@ -28,6 +28,21 @@ data class EngineConfig(
     val tlsTrustManager: javax.net.ssl.X509TrustManager? = null,
     /** Where incoming files are staged when the UI accepts an offer. */
     val defaultSinkFactory: FileSinkFactory? = null,
+    /**
+     * All known addresses of the computer (primary first), re-read before
+     * every attempt so learned endpoints and a rescanned QR take effect. The
+     * engine re-ranks them against [localNetworks] each time: an address on a
+     * network this phone is attached to (e.g. its own hotspot) goes first.
+     * Null = only [serverUrl]'s host.
+     */
+    val endpointHosts: (() -> List<String>)? = null,
+    /** This device's IPv4 addresses (hotspot downlink, Wi-Fi, cellular CLAT …). */
+    val localNetworks: () -> List<LocalAddress> = { LocalNetworks.snapshot() },
+    val connectTimeoutMs: Int = 10_000,
+    /** Delay before dialling the next candidate while the previous one is still pending. */
+    val endpointStaggerMs: Long = 400,
+    /** Test hook: simulated TCP reachability. */
+    val tcpConnector: TcpConnector? = null,
 )
 
 private class TransferInterrupted(message: String) : java.io.IOException(message)
@@ -351,11 +366,35 @@ class AirBridgeEngine(private val config: EngineConfig) {
         emitState(next)
     }
 
+    /** Ranked candidate hosts for the next attempt (on-link first). */
+    private fun rankedHosts(): Pair<List<String>, List<LocalAddress>> {
+        val base = runCatching { java.net.URI(normalizeWsUrl(config.serverUrl)).host }.getOrNull()
+            ?.removePrefix("[")?.removeSuffix("]")
+        val supplied = runCatching { config.endpointHosts?.invoke() }.getOrNull().orEmpty()
+        val hosts = (supplied.ifEmpty { listOfNotNull(base) }).filter { it.isNotBlank() }.distinctBy { it.lowercase() }
+        val locals = runCatching { config.localNetworks() }.getOrDefault(emptyList())
+        return EndpointSelector.order(hosts, locals) to locals
+    }
+
+    private fun urlWithHost(url: String, host: String): String {
+        val uri = java.net.URI(url)
+        val h = if (host.contains(':') && !host.startsWith("[")) "[$host]" else host
+        return java.net.URI(uri.scheme, null, h, uri.port, uri.path, uri.query, null).toString()
+    }
+
+    private fun reportFailure(diagnosis: ConnectionDiagnosis) {
+        if (diagnosis.kind == FailureKind.CANCELLED) return
+        for (l in listeners) l.onConnectionFailure(diagnosis)
+        emitError("CONNECTION_FAILED", diagnosis.userMessage)
+    }
+
     private fun connectionLoop() {
         var attempt = 0
         while (!stopped.get()) {
+            val (hosts, locals) = rankedHosts()
+            val baseUrl = normalizeWsUrl(config.serverUrl)
             val client = WebSocketClient(
-                normalizeWsUrl(config.serverUrl),
+                hosts.firstOrNull()?.let { runCatching { urlWithHost(baseUrl, it) }.getOrNull() } ?: baseUrl,
                 object : WebSocketClient.Listener {
                     override fun onText(text: String) {
                         inbound.put(IncomingWork(text.length * 2) { handleServerJson(text) })
@@ -367,6 +406,10 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 },
                 trustAllTls = config.trustAllTls,
                 tlsTrustManager = config.tlsTrustManager,
+                connectTimeoutMs = config.connectTimeoutMs,
+                alternateHosts = hosts.drop(1),
+                staggerMs = config.endpointStaggerMs,
+                tcpConnector = config.tcpConnector ?: WebSocketClient.DEFAULT_TCP_CONNECTOR,
             )
             var pingTask: java.util.concurrent.ScheduledFuture<*>? = null
             try {
@@ -375,6 +418,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 ws = client
                 client.connectBlocking()
                 if (stopped.get()) break
+                client.connectedHost?.let { host -> for (l in listeners) l.onEndpointConnected(host) }
                 sendHello(client)
                 attempt = 0
                 pingTask = runCatching {
@@ -385,9 +429,21 @@ class AirBridgeEngine(private val config: EngineConfig) {
                     }, 20, 20, TimeUnit.SECONDS)
                 }.getOrNull()
                 client.readLoop()
+                // Established connection ended. Only a remote/network close is
+                // worth reporting; our own reconnect() is not a failure.
+                if (!stopped.get() && !client.closedByClient) {
+                    reportFailure(ConnectionDiagnosis(
+                        FailureKind.WS_CLOSED,
+                        ConnectionHelp.guidance(FailureKind.WS_CLOSED, listOfNotNull(client.connectedHost), locals, emptyList()),
+                        "WebSocket closed by the computer or network",
+                    ))
+                }
+            } catch (e: ConnectFailure) {
+                if (stopped.get()) break
+                reportFailure(ConnectionHelp.fromFailure(e, locals))
             } catch (e: Exception) {
                 if (stopped.get()) break
-                emitError("CONNECTION_FAILED", e.message ?: "Connection failed")
+                reportFailure(ConnectionHelp.diagnose(e, hosts, locals))
             } finally {
                 pingTask?.cancel(false)
                 runCatching { client.close() }
@@ -703,7 +759,16 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 val envelope = msg.optObj("envelope") ?: return
                 handleIncomingControl(from, envelope)
             }
-            "error" -> emitError(msg.optStr("code") ?: "ERROR", msg.optStr("message") ?: "")
+            "error" -> {
+                val code = msg.optStr("code") ?: "ERROR"
+                val message = msg.optStr("message") ?: ""
+                emitError(code, message)
+                ConnectionHelp.forServerError(code, message)?.let { d -> for (l in listeners) l.onConnectionFailure(d) }
+            }
+            "network" -> {
+                val lanUrls = msg.optArr("lanUrls")?.items?.mapNotNull { it.asStringOrNull() } ?: emptyList()
+                for (l in listeners) l.onLanUrlsChanged(lanUrls)
+            }
             "rtc-signal" -> { /* relay-only engine */ }
         }
     }

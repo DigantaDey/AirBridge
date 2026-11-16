@@ -60,7 +60,9 @@ import com.airbridge.app.ui.connectionLabel
 import com.airbridge.app.ui.formatBytes
 import com.airbridge.app.ui.theme.AirBridgeColors
 import com.airbridge.app.ui.viewmodels.AirBridgeAppUiState
+import com.airbridge.engine.ConnectionHelp
 import com.airbridge.engine.ConnectionState
+import com.airbridge.engine.RecoveryAction
 import com.airbridge.engine.TransferStatus
 import com.airbridge.engine.TransferView
 
@@ -360,7 +362,27 @@ private fun ConnectionStatusCard(
                 )
             }
 
-            if (!uiState.engine.connectionError.isNullOrBlank()) {
+            val help = uiState.engine.connectionHelp
+            if (help != null && state != ConnectionState.CONNECTED) {
+                // Layer-specific headline + guidance: a TCP timeout says the
+                // network/route is wrong (not the code); TLS/pair-code
+                // failures say to rescan; rate limits say to wait.
+                Text(
+                    text = ConnectionHelp.title(help.kind),
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                Text(
+                    text = help.userMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                val label = ConnectionHelp.actionLabel(help.action)
+                if (label != null && help.action != RecoveryAction.RETRY) {
+                    OutlinedButton(onClick = onOpenPairingSheet) { Text(label) }
+                }
+            } else if (!uiState.engine.connectionError.isNullOrBlank()) {
                 Text(
                     text = uiState.engine.connectionError,
                     style = MaterialTheme.typography.bodySmall,

@@ -18,38 +18,40 @@ class Prefs(context: Context) {
         context.getSharedPreferences("airbridge", Context.MODE_PRIVATE)
 
     /**
+     * Invitation state (target, QR alternates, TLS pin, staged/saved pair
+     * code, learned endpoints). Lives in the engine module so the exact
+     * scan → stage → bootstrap sequence is covered by JVM tests.
+     */
+    val invitations = com.airbridge.engine.PairingInvitationStore(object : com.airbridge.engine.KeyValueStore {
+        override fun getString(key: String): String? = sp.getString(key, null)
+        override fun putString(key: String, value: String) { sp.edit().putString(key, value).apply() }
+        override fun remove(key: String) { sp.edit().remove(key).apply() }
+        override fun commitString(key: String, value: String): Boolean = sp.edit().putString(key, value).commit()
+    })
+
+    /**
      * Base URL of the paired computer (`https://192.168.1.5:3411`), or empty when
      * the phone has never paired. Old builds stored a `ws://…/ws` endpoint here,
-     * which [PairingLink] still understands.
+     * which [PairingLink] still understands. Set it via [stageInvitation].
      */
-    var target: String
-        get() = (sp.getString("target", null) ?: sp.getString("serverUrl", null) ?: "").trim()
-        set(value) {
-            sp.edit().putString("target", value).remove("serverUrl").apply()
-        }
+    val target: String get() = invitations.target
 
     /** The pair code from the last scanned QR (shown on the connect screen). */
     var pairCode: String
-        get() = sp.getString("pairCode", "") ?: ""
-        set(value) = sp.edit().putString("pairCode", value).apply()
+        get() = invitations.pairCode
+        set(value) { invitations.pairCode = value }
 
     /**
-     * A freshly scanned code that the next page load should claim. Consumed once:
-     * replaying a code the user rotated away from days ago would drag the phone
-     * back into a stale pairing group, so later loads rely on the web app's own
-     * stored code instead.
+     * A freshly scanned code that the next engine start must claim. Consumed
+     * once: replaying a code the user rotated away from days ago would drag the
+     * phone back into a stale pairing group.
      */
-    var pendingPairCode: String
-        get() = sp.getString("pendingPairCode", "") ?: ""
-        set(value) = sp.edit().putString("pendingPairCode", value).apply()
+    val pendingPairCode: String get() = invitations.pendingPairCode
 
-    /** Returns the code to append to the next page load, if any. */
-    fun consumePendingPairCode(): String? {
-        val code = pendingPairCode
-        if (code.isEmpty()) return null
-        pendingPairCode = ""
-        return code
-    }
+    /** Replace the whole previous invitation (code, alternates, pin, learned endpoints). */
+    fun stageInvitation(link: PairingLink) = invitations.stage(link)
+
+    fun consumePendingPairCode(): String? = invitations.consumePendingPairCode()
 
     /**
      * Background clipboard/connection is on by default after pairing. An
@@ -81,8 +83,8 @@ class Prefs(context: Context) {
         get() = sp.getInt("relayPort", 0)
         set(value) = sp.edit().putInt("relayPort", value).apply()
 
-    /** The paired computer, or null when this phone is unpaired. */
-    fun pairingLink(): PairingLink? = PairingLink.parse(target)
+    /** The paired computer (with QR alternates and pin), or null when this phone is unpaired. */
+    fun pairingLink(): PairingLink? = invitations.link()
 
     var deviceId: String
         @Synchronized
@@ -121,26 +123,13 @@ class Prefs(context: Context) {
         get() = sp.getStringSet("nativeTrustedKeys", emptySet())?.toSet() ?: emptySet()
         set(value) = sp.edit().putStringSet("nativeTrustedKeys", value).apply()
 
-    private fun tlsKey(link: PairingLink) = "tlsAnchor:" + link.authority.lowercase(java.util.Locale.ROOT)
-
-    fun tlsTrust(link: PairingLink): com.airbridge.engine.PinnedTlsTrust = com.airbridge.engine.PinnedTlsTrust(
-        loadAnchor = { sp.getString(tlsKey(link), null)?.let { android.util.Base64.decode(it, android.util.Base64.NO_WRAP) } },
-        saveAnchor = { certificate ->
-            check(sp.edit().putString(tlsKey(link), android.util.Base64.encodeToString(certificate, android.util.Base64.NO_WRAP)).commit()) {
-                "Could not save the computer's TLS identity"
-            }
-        },
-    )
+    fun tlsTrust(link: PairingLink): com.airbridge.engine.PinnedTlsTrust = invitations.tlsTrust(link)
 
     fun forget() {
-        pairingLink()?.let { sp.edit().remove(tlsKey(it)).commit() }
+        invitations.forget()
         sp.edit()
-            .remove("target")
             .remove("nativeTrustedKeys")
             .remove("nativePeerId")
-            .remove("serverUrl")
-            .remove("pairCode")
-            .remove("pendingPairCode")
             .apply()
     }
 }

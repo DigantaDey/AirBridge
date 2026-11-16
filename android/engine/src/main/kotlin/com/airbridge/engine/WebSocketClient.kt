@@ -14,9 +14,18 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLPeerUnverifiedException
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+
+/**
+ * Opens a TCP connection to one host. [register] must be called with the socket
+ * BEFORE blocking in connect so [WebSocketClient.close] can abort it.
+ */
+fun interface TcpConnector {
+    fun connect(host: String, port: Int, timeoutMs: Int, register: (Socket) -> Unit): Socket
+}
 
 /** Minimal bounded RFC 6455 client; TLS uses platform trust or an explicit LAN CA pin. */
 class WebSocketClient(
@@ -26,6 +35,18 @@ class WebSocketClient(
     private val tlsTrustManager: X509TrustManager? = null,
     private val connectTimeoutMs: Int = 10_000,
     private val maxMessageBytes: Int = 16 * 1024 * 1024,
+    /**
+     * Other addresses of the same server (same scheme and port), already
+     * ranked. The URL's host is tried first; the next candidate starts after
+     * [staggerMs] or as soon as the previous one fails, and the first TCP
+     * connection wins. TLS + hostname verification then run against the
+     * winning address only — an unreachable address can never "win" just by
+     * being first, and no address is ever trusted without a valid certificate.
+     */
+    private val alternateHosts: List<String> = emptyList(),
+    private val staggerMs: Long = 400,
+    private val tcpConnector: TcpConnector = DEFAULT_TCP_CONNECTOR,
+    private val routeProbe: (host: String, port: Int) -> String? = { h, p -> RouteProbe.sourceAddressFor(h, p) },
 ) {
     interface Listener {
         fun onText(text: String)
@@ -40,19 +61,32 @@ class WebSocketClient(
         "ws" -> false
         else -> throw IOException("Unsupported scheme: ${uri.scheme}")
     }
-    private val host: String = uri.host
+    private val primaryHost: String = uri.host?.removePrefix("[")?.removeSuffix("]")
         ?: throw IOException("URL missing host")
     private val port: Int = uri.port.takeIf { it > 0 } ?: if (secure) 443 else 80
     private val resource: String = buildString {
         append(uri.rawPath.ifNullOrEmpty("/ws"))
         if (uri.rawQuery != null) append('?').append(uri.rawQuery)
     }
+    private val candidates: List<String> =
+        (listOf(primaryHost) + alternateHosts).filter { it.isNotBlank() }.distinctBy { it.lowercase() }
 
     @Volatile
     var isOpen = false
         private set
 
+    /** The candidate address the connection was established to (null until connected). */
+    @Volatile
+    var connectedHost: String? = null
+        private set
+
+    /** Per-candidate outcomes of the last [connectBlocking] (for diagnostics). */
+    @Volatile
+    var attempts: List<EndpointAttempt> = emptyList()
+        private set
+
     @Volatile private var socket: Socket? = null
+    private val inFlight = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Socket, Boolean>())
     private var input: InputStream? = null
     private var output: OutputStream? = null
     private val writeLock = Any()
@@ -65,94 +99,196 @@ class WebSocketClient(
     private val emptyPayload = ByteArray(0)
     private val random = SecureRandom()
 
-    /** Blocking connect + HTTP upgrade. Throws on any handshake failure. */
-    fun connectBlocking() {
-        if (closed) throw IOException("Socket already closed")
-        val raw: Socket = if (secure) {
-            val ctx = SSLContext.getInstance("TLS")
-            ctx.init(null, when { tlsTrustManager != null -> arrayOf<TrustManager>(tlsTrustManager);
-                trustAllTls -> arrayOf<TrustManager>(TrustAllManager); else -> null }, null)
-            (ctx.socketFactory.createSocket() as SSLSocket).apply {
-                useClientMode = true
-                if (!trustAllTls) sslParameters = sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
-            }
-        } else Socket()
-        socket = raw
-        if (closed) { raw.close(); throw IOException("Socket closed during connect") }
-        try {
-        raw.tcpNoDelay = true
-        raw.keepAlive = true
-        // Allow Linux/Android dynamic TCP window auto-tuning (tcp_moderate_rcvbuf)
-        // to scale up to kernel limits (4MB-8MB) without setting SOCK_RCVBUF_LOCK.
-        // Guarded: setting SO_RCVBUF manually on Linux/Android clamps window to rmem_max.
-        val isLinuxOrAndroid = try {
-            val os = System.getProperty("os.name")?.lowercase() ?: ""
-            os.contains("linux") || os.contains("android")
-        } catch (_: Exception) { true }
-        if (!isLinuxOrAndroid) {
-            raw.receiveBufferSize = 4 * 1024 * 1024
-            raw.sendBufferSize = 2 * 1024 * 1024
-        }
-        raw.connect(InetSocketAddress(host, port), connectTimeoutMs)
-        raw.soTimeout = connectTimeoutMs
-        if (raw is SSLSocket) raw.startHandshake()
-        // Stream buffers enlarged to 1 MiB (1024 * 1024) to saturate high-speed links:
-        // (Baseline was: BufferedOutputStream(raw.getOutputStream(), 512 * 1024))
-        // (Baseline was: BufferedInputStream(raw.getInputStream(), 512 * 1024))
-        val streamBufferSize = 1024 * 1024
-        val out = BufferedOutputStream(raw.getOutputStream(), streamBufferSize)
-        val inp = BufferedInputStream(raw.getInputStream(), streamBufferSize)
-        output = out
-        input = inp
+    private data class TcpResult(val host: String, val socket: Socket?, val error: Throwable?)
 
-        val keyBytes = ByteArray(16).also { random.nextBytes(it) }
-        val key = Base64Url.encodeStandard(keyBytes)
-        val handshake = buildString {
-            append("GET ").append(resource).append(" HTTP/1.1\r\n")
-            append("Host: ").append(if (host.contains(':')) "[$host]" else host).append(':').append(port).append("\r\n")
-            append("Upgrade: websocket\r\n")
-            append("Connection: Upgrade\r\n")
-            append("Sec-WebSocket-Key: ").append(key).append("\r\n")
-            append("Sec-WebSocket-Version: 13\r\n")
-            append("\r\n")
+    /** Races [candidates] at the TCP layer. Returns the winner or throws [ConnectFailure] (phase TCP). */
+    private fun connectTcp(): Pair<String, Socket> {
+        val results = java.util.concurrent.LinkedBlockingQueue<TcpResult>()
+        val failures = ArrayList<EndpointAttempt>()
+        var started = 0
+        var finished = 0
+        val register: (Socket) -> Unit = { s ->
+            inFlight.add(s)
+            if (closed) runCatching { s.close() }
         }
-        synchronized(writeLock) {
-            out.write(handshake.toByteArray(Charsets.US_ASCII))
-            out.flush()
+        fun startNext() {
+            val host = candidates[started++]
+            Thread({
+                try {
+                    results.put(TcpResult(host, tcpConnector.connect(host, port, connectTimeoutMs, register), null))
+                } catch (e: Throwable) {
+                    results.put(TcpResult(host, null, e))
+                }
+            }, "airbridge-dial-$host").apply { isDaemon = true; start() }
         }
-
-        // Read status line + headers
-        val statusLine = readLine(inp)
-        if (statusLine.isEmpty()) throw EOFException("Empty handshake response")
-        val status = statusLine.split(" ")
-        val code = status.getOrNull(1)?.toIntOrNull() ?: 0
-        if (code != 101) throw IOException("WebSocket upgrade rejected: $statusLine")
-        var acceptHeader = ""
-        var sawUpgrade = false
-        var headerBytes = 0
+        startNext()
         while (true) {
-            val line = readLine(inp)
-            headerBytes += line.length
-            if (headerBytes > 64 * 1024) throw IOException("Upgrade headers too large")
-            if (line.isEmpty()) break
-            val idx = line.indexOf(':')
-            if (idx > 0) {
-                val name = line.substring(0, idx).trim().lowercase()
-                val value = line.substring(idx + 1).trim()
-                if (name == "sec-websocket-accept") acceptHeader = value
-                if (name == "upgrade" && value.equals("websocket", ignoreCase = true)) sawUpgrade = true
+            if (closed) {
+                inFlight.forEach { runCatching { it.close() } }
+                throw ConnectFailure(ConnectPhase.TCP, FailureKind.CANCELLED, primaryHost, failures, "Socket closed during connect")
             }
+            val waitMs = if (started < candidates.size) staggerMs else connectTimeoutMs.toLong() + 1_000
+            val result = results.poll(waitMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+            if (result == null) {
+                if (started < candidates.size) startNext()
+                continue
+            }
+            if (result.socket != null && !closed) {
+                // Winner: abort every other in-flight dial.
+                for (other in inFlight) if (other !== result.socket) runCatching { other.close() }
+                inFlight.clear()
+                // A later success that loses the race must be closed too.
+                Thread({
+                    repeat(candidates.size) {
+                        val late = results.poll(connectTimeoutMs.toLong() + 1_000, java.util.concurrent.TimeUnit.MILLISECONDS) ?: return@Thread
+                        late.socket?.let { runCatching { it.close() } }
+                    }
+                }, "airbridge-dial-reaper").apply { isDaemon = true; start() }
+                attempts = failures.toList()
+                return result.host to result.socket
+            }
+            result.socket?.let { runCatching { it.close() } }
+            val error = result.error ?: IOException("Socket closed during connect")
+            val kind = ConnectionHelp.classify(error, ConnectPhase.TCP, closedLocally = closed)
+            val route = if (kind == FailureKind.TCP_TIMEOUT || kind == FailureKind.NO_ROUTE) routeProbe(result.host, port) else null
+            failures += EndpointAttempt(result.host, port, kind, error.message ?: error.javaClass.simpleName, route)
+            finished++
+            if (finished == candidates.size) {
+                attempts = failures.toList()
+                val kind = summarize(failures)
+                throw ConnectFailure(
+                    ConnectPhase.TCP, kind, primaryHost, failures.toList(),
+                    failures.joinToString("; ") { "${it.host}:${it.port} ${it.kind.name.lowercase()}" + (it.routeSource?.let { r -> " via $r" } ?: "") },
+                    result.error,
+                )
+            }
+            if (started < candidates.size) startNext()
         }
-        if (!sawUpgrade || acceptHeader.isEmpty()) throw IOException("Malformed WebSocket handshake")
-        val expected = expectedAccept(key)
-        if (acceptHeader != expected) throw IOException("Bad Sec-WebSocket-Accept")
-        raw.soTimeout = 75_000
-        if (closed) throw IOException("Socket closed during upgrade")
-        isOpen = true
+    }
+
+    /**
+     * One kind for a multi-address failure. "Refused" wins because it proves
+     * some address was reachable (AirBridge not running there); then timeout
+     * (the hotspot/route case), then no-route.
+     */
+    private fun summarize(failures: List<EndpointAttempt>): FailureKind {
+        if (closed) return FailureKind.CANCELLED
+        val kinds = failures.map { it.kind }.toSet()
+        return listOf(
+            FailureKind.TCP_REFUSED, FailureKind.TCP_TIMEOUT, FailureKind.NO_ROUTE,
+            FailureKind.DNS, FailureKind.CANCELLED,
+        ).firstOrNull { it in kinds } ?: FailureKind.UNKNOWN
+    }
+
+    /** Blocking connect + HTTP upgrade. Throws [ConnectFailure] (with phase and kind) on any failure. */
+    fun connectBlocking() {
+        if (closed) throw ConnectFailure(ConnectPhase.TCP, FailureKind.CANCELLED, primaryHost, emptyList(), "Socket already closed")
+        var phase = ConnectPhase.TCP
+        var host = primaryHost
+        try {
+            val (winner, plain) = connectTcp()
+            host = winner
+            phase = ConnectPhase.TLS
+            val raw: Socket = if (secure) {
+                val ctx = SSLContext.getInstance("TLS")
+                ctx.init(null, when { tlsTrustManager != null -> arrayOf<TrustManager>(tlsTrustManager);
+                    trustAllTls -> arrayOf<TrustManager>(TrustAllManager); else -> null }, null)
+                plain.soTimeout = connectTimeoutMs
+                (ctx.socketFactory.createSocket(plain, host, port, true) as SSLSocket).apply {
+                    useClientMode = true
+                    if (!trustAllTls) sslParameters = sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+                }
+            } else plain
+            socket = raw
+            if (closed) { raw.close(); throw IOException("Socket closed during connect") }
+            raw.soTimeout = connectTimeoutMs
+            if (raw is SSLSocket) {
+                raw.startHandshake()
+                if (!trustAllTls) verifyIpSan(raw, host)
+            }
+            phase = ConnectPhase.UPGRADE
+            // Stream buffers enlarged to 1 MiB (1024 * 1024) to saturate high-speed links:
+            // (Baseline was: BufferedOutputStream(raw.getOutputStream(), 512 * 1024))
+            // (Baseline was: BufferedInputStream(raw.getInputStream(), 512 * 1024))
+            val streamBufferSize = 1024 * 1024
+            val out = BufferedOutputStream(raw.getOutputStream(), streamBufferSize)
+            val inp = BufferedInputStream(raw.getInputStream(), streamBufferSize)
+            output = out
+            input = inp
+
+            val keyBytes = ByteArray(16).also { random.nextBytes(it) }
+            val key = Base64Url.encodeStandard(keyBytes)
+            val handshake = buildString {
+                append("GET ").append(resource).append(" HTTP/1.1\r\n")
+                append("Host: ").append(if (host.contains(':')) "[$host]" else host).append(':').append(port).append("\r\n")
+                append("Upgrade: websocket\r\n")
+                append("Connection: Upgrade\r\n")
+                append("Sec-WebSocket-Key: ").append(key).append("\r\n")
+                append("Sec-WebSocket-Version: 13\r\n")
+                append("\r\n")
+            }
+            synchronized(writeLock) {
+                out.write(handshake.toByteArray(Charsets.US_ASCII))
+                out.flush()
+            }
+
+            // Read status line + headers
+            val statusLine = readLine(inp)
+            if (statusLine.isEmpty()) throw EOFException("Empty handshake response")
+            val status = statusLine.split(" ")
+            val code = status.getOrNull(1)?.toIntOrNull() ?: 0
+            if (code != 101) throw IOException("WebSocket upgrade rejected: $statusLine")
+            var acceptHeader = ""
+            var sawUpgrade = false
+            var headerBytes = 0
+            while (true) {
+                val line = readLine(inp)
+                headerBytes += line.length
+                if (headerBytes > 64 * 1024) throw IOException("Upgrade headers too large")
+                if (line.isEmpty()) break
+                val idx = line.indexOf(':')
+                if (idx > 0) {
+                    val name = line.substring(0, idx).trim().lowercase()
+                    val value = line.substring(idx + 1).trim()
+                    if (name == "sec-websocket-accept") acceptHeader = value
+                    if (name == "upgrade" && value.equals("websocket", ignoreCase = true)) sawUpgrade = true
+                }
+            }
+            if (!sawUpgrade || acceptHeader.isEmpty()) throw IOException("Malformed WebSocket handshake")
+            val expected = expectedAccept(key)
+            if (acceptHeader != expected) throw IOException("Bad Sec-WebSocket-Accept")
+            raw.soTimeout = 75_000
+            if (closed) throw IOException("Socket closed during upgrade")
+            connectedHost = host
+            isOpen = true
         } catch (e: Exception) {
+            val cancelled = closed
             closeInternal(1006, e.message ?: "Connect failed", notify = true)
-            throw e
+            if (e is ConnectFailure) throw e
+            val kind = ConnectionHelp.classify(e, phase, closedLocally = cancelled)
+            val detail = e.message ?: e.javaClass.simpleName
+            throw ConnectFailure(
+                phase, kind, host,
+                attempts + EndpointAttempt(host, port, kind, detail),
+                "${phase.name} ${kind.name.lowercase()} at $host:$port: $detail", e,
+            )
         }
+    }
+
+    /**
+     * Defense in depth: for IP-literal endpoints require an exact IP SAN, even
+     * on platforms whose TLS stack skips endpoint identification for plain
+     * X509TrustManagers. A stale leaf that does not list the dialled address
+     * fails here as TLS_HOSTNAME instead of silently succeeding.
+     */
+    private fun verifyIpSan(ssl: SSLSocket, host: String) {
+        if (LocalNetworks.ipv4ToInt(host) == null) return
+        val leaf = ssl.session.peerCertificates.firstOrNull() as? X509Certificate
+            ?: throw SSLPeerUnverifiedException("No server certificate")
+        val ok = runCatching {
+            leaf.subjectAlternativeNames?.any { (it[0] as? Int) == 7 && it[1] == host } == true
+        }.getOrDefault(false)
+        if (!ok) throw SSLPeerUnverifiedException("No subject alternative name for $host in the server certificate")
     }
 
     private fun readLine(inp: InputStream): String {
@@ -361,7 +497,15 @@ class WebSocketClient(
         }
     }
 
-    fun close() = closeInternal(1000, "client close", notify = true)
+    /** True once [close] was called by the owner (reconnect/stop), as opposed to a remote/network close. */
+    @Volatile
+    var closedByClient = false
+        private set
+
+    fun close() {
+        if (!closed) closedByClient = true
+        closeInternal(1000, "client close", notify = true)
+    }
 
     private fun closeInternal(@Suppress("UNUSED_PARAMETER") code: Int, reason: String, notify: Boolean) {
         synchronized(closeLock) {
@@ -372,6 +516,8 @@ class WebSocketClient(
         // Never wait for writeLock here: the writer may be blocked on a dead
         // network. Closing the socket is what unblocks it.
         try { socket?.close() } catch (_: Exception) {}
+        for (pending in inFlight) runCatching { pending.close() }
+        inFlight.clear()
         if (notify) listener.onClosed(reason)
     }
 
@@ -379,6 +525,31 @@ class WebSocketClient(
         if (this.isNullOrEmpty()) fallback else this
 
     companion object {
+        val DEFAULT_TCP_CONNECTOR = TcpConnector { host, port, timeoutMs, register ->
+            val s = Socket()
+            register(s)
+            s.tcpNoDelay = true
+            s.keepAlive = true
+            // Allow Linux/Android dynamic TCP window auto-tuning (tcp_moderate_rcvbuf)
+            // to scale up to kernel limits (4MB-8MB) without setting SOCK_RCVBUF_LOCK.
+            // Guarded: setting SO_RCVBUF manually on Linux/Android clamps window to rmem_max.
+            val isLinuxOrAndroid = try {
+                val os = System.getProperty("os.name")?.lowercase() ?: ""
+                os.contains("linux") || os.contains("android")
+            } catch (_: Exception) { true }
+            if (!isLinuxOrAndroid) {
+                s.receiveBufferSize = 4 * 1024 * 1024
+                s.sendBufferSize = 2 * 1024 * 1024
+            }
+            try {
+                s.connect(InetSocketAddress(host, port), timeoutMs)
+            } catch (e: Exception) {
+                runCatching { s.close() }
+                throw e
+            }
+            s
+        }
+
         object TrustAllManager : X509TrustManager {
             override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
             override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
