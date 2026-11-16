@@ -37,8 +37,17 @@ import {
 } from './hostClipboard.js';
 import { registerCliBeamRoutes, type CliBeamSession } from './cliSendSession.js';
 import { startBackgroundClipboardPeer, type BackgroundClipboardPeer } from './backgroundClipboard.js';
-import { isValidPairCode, normalizePairCode, type HostFirewallStatus, type LanEndpoint } from '../shared/protocol.js';
+import { REVERSE_CONNECT_PORT, isValidPairCode, normalizePairCode, type HostFirewallStatus, type LanEndpoint } from '../shared/protocol.js';
 import { firewallKey, readMacFirewall } from './macFirewall.js';
+import {
+  ReverseConnector,
+  browseReversePhones,
+  gatewayTargets,
+  isReversePeer,
+  markReversePeer,
+  readDefaultGateways,
+  type ReverseTarget,
+} from './reverseConnect.js';
 
 export interface AirBridgeServerOptions {
   port?: number;
@@ -95,11 +104,31 @@ export interface AirBridgeServerOptions {
   /** Interface source override for tests (defaults to `os.networkInterfaces`). */
   getNetworkInterfaces?: () => InterfaceMap;
   /**
+   * Reverse connections (this computer dials the phone when phone → computer
+   * is blocked by a firewall/VPN/routing; see reverseConnect.ts). Default on
+   * outside tests unless AIRBRIDGE_REVERSE_CONNECT=0; `false` disables.
+   */
+  reverseConnect?: false | {
+    targets?: () => Promise<ReverseTarget[]> | ReverseTarget[];
+    intervalMs?: number;
+    minSessionMs?: number;
+  };
+  /**
    * macOS Application Firewall probe (re-read every 15 s and pushed to the
    * pairing panel). Defaults to `socketfilterfw` on macOS outside tests;
    * null disables it.
    */
   readFirewall?: (() => Promise<HostFirewallStatus | null>) | null;
+}
+
+/** Loopback peer that this server did not dial itself. */
+function isLoopbackPeer(socket: net.Socket): boolean {
+  return !isReversePeer(socket) && isLoopbackAddress(socket.remoteAddress);
+}
+
+/** Peer on this machine (loopback or own interface) that this server did not dial itself. */
+function isLocalMachinePeer(socket: net.Socket): boolean {
+  return !isReversePeer(socket) && isLocalMachineAddress(socket.remoteAddress);
 }
 
 export interface AirBridgeServerInstance {
@@ -326,7 +355,7 @@ export async function createAirBridgeServer(
       const encrypted = Boolean((req.socket as TLSSocket).encrypted);
       if (
         encrypted ||
-        isLoopbackAddress(req.socket.remoteAddress) ||
+        isLoopbackPeer(req.socket) ||
         isHttpBootstrapPath(req.path)
       ) {
         next();
@@ -344,12 +373,12 @@ export async function createAirBridgeServer(
   // Received-files folder settings. Loopback only: a phone (or any LAN
   // device / website reaching this port) must not be able to move where the
   // host saves files or pop open folders on the host's screen.
-  const isLoopbackRequest = (req: Request) => isLoopbackAddress(req.socket.remoteAddress);
+  const isLoopbackRequest = (req: Request) => isLoopbackPeer(req.socket);
   // The daemon save/stream routes are restricted to this machine, not just
   // loopback: the host's own browser is often reached over a LAN IP, and the
   // WebSocket layer already treats that as a host client. Remote devices (a
   // phone, another laptop) have an address that is not one of our interfaces.
-  const isLocalMachineRequest = (req: Request) => isLocalMachineAddress(req.socket.remoteAddress);
+  const isLocalMachineRequest = (req: Request) => isLocalMachinePeer(req.socket);
   const receivedSettingsPath = options.receivedFolderSettingsPath === null || (options.receivedFolderSettingsPath === undefined && mode === 'test')
     ? null
     : options.receivedFolderSettingsPath ?? path.join(path.dirname(tls?.certDir ?? path.join(process.env.HOME ?? '', '.airbridge', 'tls')), 'settings.json');
@@ -459,7 +488,7 @@ export async function createAirBridgeServer(
       requestProtocol: (req.socket as TLSSocket).encrypted ? 'https' : 'http',
       mdnsActive: mdns?.active ?? false,
       // Full daemon status (incl. the local download path) only for the host itself.
-      localDaemon: isLocalMachineAddress(req.socket.remoteAddress) ? getDaemonStatus(daemonCfg) : { ...getDaemonStatus(daemonCfg), downloadDir: undefined },
+      localDaemon: isLocalMachinePeer(req.socket) ? getDaemonStatus(daemonCfg) : { ...getDaemonStatus(daemonCfg), downloadDir: undefined },
     });
   });
 
@@ -479,7 +508,7 @@ export async function createAirBridgeServer(
         res.status(403).json({ error: 'Local daemon mode is disabled.' });
         return;
       }
-      if (!isLocalMachineAddress(req.socket.remoteAddress)) {
+      if (!isLocalMachinePeer(req.socket)) {
         res.status(403).json({ error: 'Direct disk save is restricted to this machine.' });
         return;
       }
@@ -886,8 +915,11 @@ export async function createAirBridgeServer(
   // error). Sockets are handed over directly, never proxied, so
   // `remoteAddress` still identifies the real peer.
   let dispatcher: net.Server | null = null;
+  let dispatchSocket: (socket: net.Socket) => void = (socket) => {
+    httpServer.emit('connection', socket);
+  };
   if (httpsServer) {
-    dispatcher = net.createServer((socket) => {
+    dispatchSocket = (socket) => {
       // Relayed transfer frames are large and latency-sensitive; Nagle's
       // algorithm only adds delay here.
       socket.setNoDelay(true);
@@ -910,6 +942,7 @@ export async function createAirBridgeServer(
             secureContext: httpsSecureContext,
             ALPNProtocols: ['http/1.1'],
           });
+          if (isReversePeer(socket)) markReversePeer(tlsSocket);
           tlsSocket.on('error', () => tlsSocket.destroy());
           tlsSocket.on('secure', () => {
             httpServer.emit('connection', tlsSocket);
@@ -925,7 +958,8 @@ export async function createAirBridgeServer(
           });
         }
       });
-    });
+    };
+    dispatcher = net.createServer((socket) => dispatchSocket(socket));
   }
 
   const listeningServer: net.Server = dispatcher ?? httpServer;
@@ -953,6 +987,13 @@ export async function createAirBridgeServer(
   const addressKey = () => advertisedCandidates().map((c) => `${c.interface}=${c.address}`).join(',');
   let lastAdvertisedKey = addressKey();
   let refreshing: Promise<boolean> | null = null;
+  // Reverse-connect state (declared before refreshNetwork, which resets it).
+  let reverseConnector: ReverseConnector | null = null;
+  let discoveredPhones: ReverseTarget[] = [];
+  let lastPhoneBrowse = 0;
+  let gateways: ReverseTarget[] = [];
+  let lastGatewayRead = 0;
+
   const refreshNetwork = (): Promise<boolean> => {
     if (refreshing) return refreshing;
     refreshing = (async () => {
@@ -963,6 +1004,9 @@ export async function createAirBridgeServer(
       const key = addressKey();
       if (key === lastAdvertisedKey) return false;
       lastAdvertisedKey = key;
+      lastGatewayRead = 0;
+      lastPhoneBrowse = 0;
+      reverseConnector?.reset();
       hub.broadcastNetworkUpdate();
       mdns?.refresh();
       return true;
@@ -1000,6 +1044,39 @@ export async function createAirBridgeServer(
     : null;
   firewallTimer?.unref();
   void refreshFirewall();
+
+  // Reverse connections: dial phones we can find (hotspot gateway, mDNS,
+  // recent peers) so a blocked inbound path doesn't block pairing.
+  const reverseEnabled = options.reverseConnect === undefined
+    ? mode !== 'test' && process.env.AIRBRIDGE_REVERSE_CONNECT !== '0'
+    : options.reverseConnect !== false;
+  const reverseOpts = options.reverseConnect || {};
+  const defaultReverseTargets = async (): Promise<ReverseTarget[]> => {
+    // Route tables / mDNS change rarely; refreshNetwork() resets the dialer anyway.
+    if (Date.now() - lastGatewayRead > 10_000) {
+      lastGatewayRead = Date.now();
+      const interfaces = options.getNetworkInterfaces?.() ?? os.networkInterfaces();
+      gateways = gatewayTargets(await readDefaultGateways(), REVERSE_CONNECT_PORT, interfaces);
+    }
+    if (Date.now() - lastPhoneBrowse > 10_000) {
+      lastPhoneBrowse = Date.now();
+      discoveredPhones = (await browseReversePhones())
+        .flatMap((p) => p.addresses.map((address) => ({ address, port: p.port, source: 'mdns' as const })));
+    }
+    const recent = hub.recentRemoteAddresses().map((address) => ({ address, port: REVERSE_CONNECT_PORT, source: 'recent' as const }));
+    return [...gateways, ...discoveredPhones, ...recent];
+  };
+  reverseConnector = reverseEnabled
+    ? new ReverseConnector({
+        targets: reverseOpts.targets ?? defaultReverseTargets,
+        isConnectedFrom: (address) => hub.hasClientFrom(address),
+        isLocalAddress: (address) => isLocalMachineAddress(address),
+        inject: (socket) => dispatchSocket(socket),
+        intervalMs: reverseOpts.intervalMs,
+        minSessionMs: reverseOpts.minSessionMs,
+      })
+    : null;
+  reverseConnector?.start();
 
   if (backgroundClipboardEnabled) {
     try {
@@ -1043,6 +1120,7 @@ export async function createAirBridgeServer(
     async close() {
       if (networkTimer) clearInterval(networkTimer);
       if (firewallTimer) clearInterval(firewallTimer);
+      reverseConnector?.stop();
       mdns?.close();
       backgroundPeer?.stop();
       hub.setBackgroundClipboardActive(false);

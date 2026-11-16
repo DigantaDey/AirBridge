@@ -49,6 +49,16 @@ data class EngineConfig(
      * sitting on "Reconnecting…" with no explanation.
      */
     val welcomeTimeoutMs: Long = 15_000,
+    /**
+     * Port for the computer's reverse connections ([ReverseListener]); 0 picks
+     * a free port (tests), null disables the reverse path.
+     */
+    val reverseListenPort: Int? = ReverseListener.DEFAULT_PORT,
+    /**
+     * Whether reverse connections may be used right now. Default: only over
+     * TLS with a pinned/saved computer identity ([PinnedTlsTrust.isAnchored]).
+     */
+    val allowReverse: (() -> Boolean)? = null,
 )
 
 private class TransferInterrupted(message: String) : java.io.IOException(message)
@@ -206,6 +216,40 @@ class AirBridgeEngine(private val config: EngineConfig) {
     @Volatile private var ws: WebSocketClient? = null
     /** Set by the inbound worker when the current connection's welcome arrives. */
     @Volatile private var welcomedClient: WebSocketClient? = null
+    @Volatile private var reverseListener: ReverseListener? = null
+
+    /** Local port of the reverse listener (null when disabled or the port was busy). */
+    val reversePort: Int? get() = reverseListener?.port
+
+    @Volatile private var reverseBindReported = false
+    private val reverseLock = Any()
+
+    /**
+     * (Re)binds the reverse listener. Retried before every attempt: after a
+     * rescan the previous engine may still be closing and hold the port.
+     */
+    private fun ensureReverseListener() {
+        val port = config.reverseListenPort ?: return
+        if (reverseListener != null || stopped.get()) return
+        try {
+            synchronized(reverseLock) {
+                if (reverseListener != null || stopped.get()) return
+                reverseListener = ReverseListener(port, active = {
+                    !stopped.get() && connectionState != ConnectionState.CONNECTED && reverseAllowed()
+                })
+            }
+        } catch (e: Exception) {
+            // Port busy: forward dialling still works; report once.
+            if (!reverseBindReported) {
+                reverseBindReported = true
+                emitError("REVERSE_UNAVAILABLE", "Reverse connection port $port unavailable: ${e.message}")
+            }
+        }
+    }
+
+    private fun reverseAllowed(): Boolean = config.allowReverse?.invoke()
+        ?: (normalizeWsUrl(config.serverUrl).startsWith("wss://") &&
+            (config.tlsTrustManager as? PinnedTlsTrust)?.isAnchored() == true)
     private val outbound = OutboundQueue()
     // Stage 1: Fast control + frame routing thread ("airbridge-control").
     // Expanded inbound queue capacity (16 MiB) to avoid blocking transport reader.
@@ -320,6 +364,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 }
             } catch (_: InterruptedException) {}
         }, "airbridge-receiver").apply { isDaemon = true; start() }
+        ensureReverseListener()
         connectionThread = Thread({ connectionLoop() }, "airbridge-connection").apply {
             isDaemon = true
             start()
@@ -332,6 +377,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
 
     fun stop() {
         if (!stopped.compareAndSet(false, true)) return
+        synchronized(reverseLock) { runCatching { reverseListener?.close() } }
         outbound.close()
         inbound.close()
         try { ws?.close() } catch (_: Exception) {}
@@ -403,6 +449,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
     private fun connectionLoop() {
         var attempt = 0
         while (!stopped.get()) {
+            ensureReverseListener()
             val (hosts, locals) = rankedHosts()
             val baseUrl = normalizeWsUrl(config.serverUrl)
             val client = WebSocketClient(
@@ -422,6 +469,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 alternateHosts = hosts.drop(1),
                 staggerMs = config.endpointStaggerMs,
                 tcpConnector = config.tcpConnector ?: WebSocketClient.DEFAULT_TCP_CONNECTOR,
+                inbound = reverseListener?.takeIf { reverseAllowed() },
             )
             var pingTask: java.util.concurrent.ScheduledFuture<*>? = null
             var welcomeTask: java.util.concurrent.ScheduledFuture<*>? = null
@@ -441,7 +489,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 for (l in listeners) l.onConnectAttempt(hosts)
                 client.connectBlocking()
                 if (stopped.get()) break
-                client.connectedHost?.let { host -> for (l in listeners) l.onEndpointConnected(host) }
+                client.connectedHost?.let { host -> for (l in listeners) l.onEndpointConnected(host, client.connectedViaReverse) }
                 sendHello(client)
                 attempt = 0
                 welcomeTask = runCatching {

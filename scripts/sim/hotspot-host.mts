@@ -5,7 +5,10 @@ import { buildPairingUrl } from '../../src/client/engine/pairingUrl.ts';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 mkdirSync('/tmp/airbridge-sim', { recursive: true });
 rmSync('/tmp/airbridge-sim/certs', { recursive: true, force: true });
-const server = await createAirBridgeServer({ port: 3000, host: '0.0.0.0', mode: 'test', https: true, enableMdns: false, hostClipboard: false, tlsDir: '/tmp/airbridge-sim/certs', daemonConfig: { enabled: false } as never });
+const server = await createAirBridgeServer({ port: 3000, host: '0.0.0.0', mode: 'test', https: true, enableMdns: false, hostClipboard: false, tlsDir: '/tmp/airbridge-sim/certs', daemonConfig: { enabled: false } as never,
+  // Real reverse dialer with real target discovery (this namespace's routing table).
+  // AIRBRIDGE_SIM_REVERSE=0 shows the forward-only behaviour.
+  reverseConnect: process.env.AIRBRIDGE_SIM_REVERSE === '0' ? false : {} });
 const code = server.hub.getDefaultPairCode();
 console.log('advertised', JSON.stringify(server.lanEndpoints.map((e) => `${e.interface}=${e.address}`)));
 console.log('uncovered', JSON.stringify(server.uncoveredLanAddresses));

@@ -152,3 +152,48 @@ class ServerDiscovery(
         private const val TAG = "AirBridgeNsd"
     }
 }
+
+/**
+ * Advertises this phone's reverse-connection listener (`_airbridge-rv._tcp`,
+ * see com.airbridge.engine.ReverseListener) so a computer on the same Wi-Fi
+ * whose firewall blocks inbound connections can dial the phone instead. On the
+ * phone's own hotspot the computer needs no mDNS: it dials its default gateway.
+ * The instance name is a neutral id, not the user's device name.
+ */
+class ReverseAdvertiser(context: Context) {
+    private val nsd = context.getSystemService(Context.NSD_SERVICE) as NsdManager
+    @Volatile private var listener: NsdManager.RegistrationListener? = null
+
+    fun start(port: Int, deviceId: String, addresses: List<String>) {
+        if (listener != null) return
+        val info = NsdServiceInfo().apply {
+            serviceName = "AirBridge-" + deviceId.take(6).ifEmpty { "phone" }
+            serviceType = com.airbridge.engine.ReverseListener.SERVICE_TYPE
+            setPort(port)
+            setAttribute("v", "1")
+            if (addresses.isNotEmpty()) setAttribute("a", addresses.take(4).joinToString(","))
+        }
+        val l = object : NsdManager.RegistrationListener {
+            override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
+                Log.i(TAG, "reverse service registered: ${serviceInfo.serviceName}:$port")
+            }
+            override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                Log.w(TAG, "reverse service registration failed: $errorCode")
+                listener = null
+            }
+            override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {}
+            override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
+        }
+        listener = l
+        runCatching { nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, l) }
+            .onFailure { Log.w(TAG, "reverse service unavailable: ${it.message}"); listener = null }
+    }
+
+    fun stop() {
+        val l = listener ?: return
+        listener = null
+        runCatching { nsd.unregisterService(l) }
+    }
+
+    private companion object { const val TAG = "AirBridgeReverse" }
+}

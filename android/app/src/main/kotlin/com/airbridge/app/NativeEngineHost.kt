@@ -60,6 +60,7 @@ class NativeEngineHost(
     private val onState: (NativeEngineUiState) -> Unit = {},
 ) : AutoCloseable {
     private val prefs = Prefs(context)
+    private val reverseAdvertiser = ReverseAdvertiser(context)
     private val configuredTarget = prefs.target
     private val worker = Executors.newSingleThreadExecutor { r ->
         Thread(r, "airbridge-native-commands").apply { isDaemon = true }
@@ -214,13 +215,17 @@ class NativeEngineHost(
                             refresh()
                         }
 
-                        override fun onEndpointConnected(host: String) {
+                        override fun onEndpointConnected(host: String, viaReverse: Boolean) {
                             if (closed) return
                             // Keep the previous failure until welcome arrives:
                             // transport-up alone is not "connected".
-                            connectionProgress = "Reached $host, waiting for AirBridge on the computer…"
+                            connectionProgress = if (viaReverse) {
+                                "The computer ($host) connected to this phone, securing the connection…"
+                            } else {
+                                "Reached $host, waiting for AirBridge on the computer…"
+                            }
                             prefs.invitations.markConnected(host)
-                            Log.i(TAG, "Connected via $host")
+                            Log.i(TAG, "Connected via $host" + if (viaReverse) " (computer dialled in)" else "")
                             refresh()
                         }
 
@@ -283,6 +288,12 @@ class NativeEngineHost(
                     return@execute
                 }
                 created.start()
+                created.reversePort?.let { port ->
+                    val lan = runCatching {
+                        com.airbridge.engine.LocalNetworks.snapshot().filter { it.isLan }.map { it.address }
+                    }.getOrDefault(emptyList())
+                    reverseAdvertiser.start(port, prefs.deviceId, lan)
+                }
                 refresh()
             } catch (e: Exception) {
                 connectionError = e.message ?: "Native engine startup failed"
@@ -507,6 +518,7 @@ class NativeEngineHost(
 
     override fun close() {
         closed = true
+        reverseAdvertiser.stop()
         if (instance === this) instance = null
         engine?.stop()
         worker.shutdownNow()

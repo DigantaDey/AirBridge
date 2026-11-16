@@ -31,6 +31,16 @@ class PinnedTlsTrust(
     private val expectedPinSha256: String? = null,
 ) : X509TrustManager {
     override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+
+    /**
+     * True when the computer's identity is fixed (QR pin or a saved anchor),
+     * i.e. trust is never decided by whoever answers first. Required before the
+     * phone accepts reverse connections: an unanchored trust-on-first-use
+     * would let any LAN host that dials the phone become "the computer".
+     */
+    fun isAnchored(): Boolean =
+        expectedPinSha256?.let { PairingLink.isValidPin(it) } == true ||
+            runCatching { loadAnchor() != null }.getOrDefault(false)
     override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
         throw CertificateException("Client certificates are not supported")
     }

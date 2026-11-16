@@ -195,6 +195,13 @@ export interface LanEndpoint {
   kind: 'wifi' | 'ethernet' | 'tether' | 'other';
 }
 
+/**
+ * TCP port the AirBridge phone app listens on for *reverse* connections (the
+ * computer dials the phone when phone → computer is blocked). Must match
+ * ReverseListener.DEFAULT_PORT in the Android engine.
+ */
+export const REVERSE_CONNECT_PORT = 47390;
+
 /** macOS Application Firewall state of the computer (null/absent elsewhere or unknown). */
 export interface HostFirewallStatus {
   enabled: boolean;

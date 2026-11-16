@@ -54,6 +54,7 @@ fun main() {
     classificationAndGuidance()
     tcpRace()
     welcomeTimeout()
+    reversePath()
     println("HotspotPairing: $passed passed, $failed failed")
     if (failed > 0) exitProcess(1)
 }
@@ -436,4 +437,110 @@ private fun welcomeTimeout() {
             engine.stop()
         }
     }
+}
+
+/** Hands out sockets "the computer opened" (here: pre-dialled to the fake server) after [delayMs]. */
+private class FakeInbound(private val make: () -> Socket?, private val delayMs: Long = 0) : InboundConnections {
+    val rejected = java.util.Collections.synchronizedList(mutableListOf<String>())
+    @Volatile var served = 0
+    override fun await(timeoutMs: Long, cancelled: () -> Boolean, register: (Socket) -> Unit): Socket? {
+        val until = System.currentTimeMillis() + minOf(delayMs, timeoutMs)
+        while (System.currentTimeMillis() < until) { if (cancelled()) return null; Thread.sleep(10) }
+        if (delayMs > timeoutMs || cancelled()) return null
+        val s = make() ?: return null
+        register(s); served++
+        return s
+    }
+    override fun reject(host: String) { rejected += host }
+}
+
+/**
+ * Reverse path: the computer dials the phone when every phone → computer dial
+ * is blocked (inbound firewall, VPN, routing). The phone races its own dials
+ * against an inbound socket; whichever wins runs the same TLS/upgrade.
+ */
+private fun reversePath() {
+    FakeWsServer().use { server ->
+        val dialToServer = { Socket().apply { connect(InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), server.port), 2_000) } }
+        // 1. Firewalled computer: forward blackholed, inbound arrives after 300 ms → wins.
+        run {
+            val net = SimulatedNetwork(routes = emptyMap(), blackholed = setOf(CAMPUS, HOTSPOT))
+            val inbound = FakeInbound(dialToServer, delayMs = 300)
+            val ws = WebSocketClient("ws://$CAMPUS:${server.port}/ws", silentListener, connectTimeoutMs = 2_000,
+                alternateHosts = listOf(HOTSPOT), staggerMs = 100, tcpConnector = net, routeProbe = { _, _ -> null }, inbound = inbound)
+            val started = System.currentTimeMillis()
+            ws.connectBlocking()
+            val elapsed = System.currentTimeMillis() - started
+            check("reverse: connected despite blocked forward path", ws.isOpen)
+            check("reverse: flagged as computer-dialled", ws.connectedViaReverse)
+            eq("reverse: host is the dialling computer", ws.connectedHost, "127.0.0.1")
+            check("reverse: no wait for forward timeouts", elapsed < 1_500) { "elapsed=$elapsed" }
+            ws.close()
+        }
+        // 2. Forward works: it wins, the inbound waiter is cancelled and never consumes a socket.
+        run {
+            val net = SimulatedNetwork(routes = mapOf(HOTSPOT to server.port), blackholed = emptySet())
+            val inbound = FakeInbound(dialToServer, delayMs = 1_500)
+            val ws = WebSocketClient("ws://$HOTSPOT:${server.port}/ws", silentListener, connectTimeoutMs = 2_000,
+                tcpConnector = net, routeProbe = { _, _ -> null }, inbound = inbound)
+            ws.connectBlocking()
+            check("forward wins when it works", ws.isOpen && !ws.connectedViaReverse)
+            Thread.sleep(1_700)
+            eq("cancelled inbound waiter took no socket", inbound.served, 0)
+            ws.close()
+        }
+        // 3. Forward fails fast (no route); computer dials in within the grace window → still connects.
+        run {
+            val net = SimulatedNetwork(routes = emptyMap(), blackholed = emptySet()) // every host: NoRouteToHost
+            val inbound = FakeInbound(dialToServer, delayMs = 800)
+            val ws = WebSocketClient("ws://$CAMPUS:${server.port}/ws", silentListener, connectTimeoutMs = 300,
+                tcpConnector = net, routeProbe = { _, _ -> null }, inbound = inbound, reverseGraceMs = 2_000)
+            ws.connectBlocking()
+            check("grace: inbound after forward failure still wins", ws.isOpen && ws.connectedViaReverse)
+            ws.close()
+        }
+        // 4. Nothing dials in: failure names both directions.
+        run {
+            val net = SimulatedNetwork(routes = emptyMap(), blackholed = setOf(CAMPUS))
+            val inbound = FakeInbound({ null }, delayMs = 60_000)
+            val ws = WebSocketClient("ws://$CAMPUS:${server.port}/ws", silentListener, connectTimeoutMs = 300,
+                tcpConnector = net, routeProbe = { _, _ -> null }, inbound = inbound, reverseGraceMs = 300)
+            val f = runCatching { ws.connectBlocking() }.exceptionOrNull() as? ConnectFailure
+            check("no inbound: fails", f != null)
+            eq("no inbound: kind from the forward attempt", f?.kind, FailureKind.TCP_TIMEOUT)
+            check("no inbound: detail mentions computer→phone", f?.message?.contains("computer→phone: no connection") == true) { "${f?.message}" }
+        }
+    }
+
+    // 5. Listener gate: inactive (unpinned trust / connected) → closed on accept.
+    val gate = java.util.concurrent.atomic.AtomicBoolean(false)
+    ReverseListener(0, active = { gate.get() }).use { listener ->
+        val refused = Socket("127.0.0.1", listener.port).use { s -> s.soTimeout = 2_000; runCatching { s.getInputStream().read() }.getOrNull() }
+        eq("inactive listener closes the socket", refused, -1)
+        gate.set(true)
+        val client = Socket("127.0.0.1", listener.port)
+        val accepted = listener.await(2_000, { false }) {}
+        check("active listener hands the socket over", accepted != null && accepted.isConnected)
+        listener.reject("127.0.0.1")
+        val again = Socket("127.0.0.1", listener.port).use { s -> s.soTimeout = 2_000; runCatching { s.getInputStream().read() }.getOrNull() }
+        eq("rejected peer (failed TLS) is refused", again, -1)
+        accepted?.close(); client.close()
+    }
+
+    // 6. Trust gate: TOFU without a pin or saved anchor must never accept reverse sockets.
+    val unanchored = PinnedTlsTrust({ null }, {}, null)
+    check("unanchored trust is not anchored", !unanchored.isAnchored())
+    check("QR pin anchors", PinnedTlsTrust({ null }, {}, "A".repeat(43)).isAnchored())
+    check("saved anchor anchors", PinnedTlsTrust({ ByteArray(1) }, {}, null).isAnchored())
+    val engine = AirBridgeEngine(EngineConfig(serverUrl = "wss://$CAMPUS:3000/ws", deviceName = "gate", tlsTrustManager = unanchored,
+        reverseListenPort = 0, connectTimeoutMs = 300, tcpConnector = SimulatedNetwork(emptyMap(), setOf(CAMPUS))))
+    engine.start()
+    try {
+        val port = engine.reversePort
+        check("engine bound a reverse port", port != null)
+        if (port != null) {
+            val r = Socket("127.0.0.1", port).use { s -> s.soTimeout = 2_000; runCatching { s.getInputStream().read() }.getOrNull() }
+            eq("unpinned engine refuses reverse sockets", r, -1)
+        }
+    } finally { engine.stop() }
 }
