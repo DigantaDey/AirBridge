@@ -262,7 +262,9 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
     fun connectWithLink(link: PairingLink) {
         stopDiscovery()
         prefs.target = link.baseUrl
-        link.pairCode?.let { prefs.pendingPairCode = it }
+        // Always replace staged code, including clearing it for a manual
+        // address. Otherwise an old unconsumed QR invite could be replayed.
+        prefs.pendingPairCode = link.pairCode.orEmpty()
         _overlays.value = _overlays.value.copy(
             scannerOpen = false,
             pairingSheetOpen = false,
