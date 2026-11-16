@@ -181,14 +181,39 @@ export type ClientToServerMessage =
       text: string;
     };
 
+/**
+ * One address a LAN peer may use to reach the computer. All endpoints are
+ * covered by the server's TLS certificate (when HTTPS is on) and advertised by
+ * mDNS; the pairing QR carries every one of them so the phone can choose the
+ * address on a network it is actually attached to.
+ */
+export interface LanEndpoint {
+  url: string;
+  address: string;
+  /** OS interface name, e.g. en0 / wlan0. */
+  interface: string;
+  kind: 'wifi' | 'ethernet' | 'tether' | 'other';
+}
+
 export type ServerToClientMessage =
   | {
       type: 'welcome';
       peerId: string;
       pairCode: string;
       lanUrls: string[];
+      /** Same order as lanUrls, with interface details. Optional for older servers. */
+      lanEndpoints?: LanEndpoint[];
+      /** base64url SHA-256 of the TLS chain anchor, for the QR `ca=` pin. */
+      tlsPin?: string | null;
       localDaemon: LocalDaemonStatus;
       peers: PeerSummary[];
+    }
+  | {
+      /** The computer's reachable addresses changed (joined a hotspot, new DHCP lease …). */
+      type: 'network';
+      lanUrls: string[];
+      lanEndpoints: LanEndpoint[];
+      tlsPin: string | null;
     }
   | {
       type: 'pair-updated';

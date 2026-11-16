@@ -38,6 +38,7 @@ class ConnectionService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val actions = Executors.newSingleThreadExecutor()
     @Volatile private var engineHost: NativeEngineHost? = null
+    /** [com.airbridge.engine.PairingInvitationStore.engineKey] of the running engine; a rescan changes it. */
     private var engineTarget = ""
     private var engineGeneration = 0L
     private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
@@ -452,12 +453,18 @@ class ConnectionService : Service() {
         !Prefs(this).connectionContinuity && android.os.SystemClock.elapsedRealtime() >= shareUntil
 
     private fun ensureEngine() {
-        val target = Prefs(this).target
+        val prefs = Prefs(this)
+        val target = prefs.target
         if (target.isEmpty()) return
-        if (engineHost != null && engineTarget == target) return
+        // Restart for a new invitation even when the computer's address is
+        // unchanged: rescanning the same Mac with a fresh code (or new QR
+        // alternates/pin) must be consumed now, not left staged and replayed
+        // by some later restart.
+        val key = prefs.invitations.engineKey
+        if (engineHost != null && engineTarget == key) return
         val old = engineHost
         if (old != null) actions.execute { old.close() }
-        engineTarget = target
+        engineTarget = key
         nativeState = ConnectionState.CONNECTING
         transferActive = false
         pendingOffers = false

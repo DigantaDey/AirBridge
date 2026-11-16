@@ -10,8 +10,10 @@ import { fileURLToPath } from 'node:url';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import { asyncRoute, isSameOriginRequest, requestErrorHandler } from './httpSafety.js';
 import { SignalingHub, isLocalMachineAddress } from './signalingHub.js';
-import { getLanUrls, startMdnsResponder, type MdnsHandle } from './mdnsService.js';
+import { getLanCandidates, startMdnsResponder, type MdnsHandle } from './mdnsService.js';
+import { candidateUrl, type InterfaceMap, type LanCandidate } from './lanAddresses.js';
 import {
+  certificateCoversIp,
   isLoopbackAddress,
   resolveTlsMaterial,
   shouldEnableHttps,
@@ -35,7 +37,7 @@ import {
 } from './hostClipboard.js';
 import { registerCliBeamRoutes, type CliBeamSession } from './cliSendSession.js';
 import { startBackgroundClipboardPeer, type BackgroundClipboardPeer } from './backgroundClipboard.js';
-import { isValidPairCode, normalizePairCode } from '../shared/protocol.js';
+import { isValidPairCode, normalizePairCode, type LanEndpoint } from '../shared/protocol.js';
 
 export interface AirBridgeServerOptions {
   port?: number;
@@ -82,6 +84,15 @@ export interface AirBridgeServerOptions {
   clientAssets?: Record<string, string>;
   /** App version reported by /api/downloads (desktop entries pass pkg.version). */
   version?: string;
+  /**
+   * How often to re-read network interfaces (ms). When the computer joins a
+   * hotspot or gets a new DHCP lease, the TLS leaf is re-issued to cover the
+   * new address and clients receive a `network` update. Defaults to 3000
+   * outside tests, 0 (off) in tests — tests call `refreshNetwork()`.
+   */
+  networkPollMs?: number;
+  /** Interface source override for tests (defaults to `os.networkInterfaces`). */
+  getNetworkInterfaces?: () => InterfaceMap;
 }
 
 export interface AirBridgeServerInstance {
@@ -89,14 +100,21 @@ export interface AirBridgeServerInstance {
   httpServer: http.Server;
   /** HTTPS server sharing the same app/port when TLS is enabled, else null. */
   httpsServer: https.Server | null;
-  /** Certificate material in use, or null in plain-HTTP mode. */
-  tls: AirBridgeTlsMaterial | null;
+  /** Certificate material in use (live: re-issued when LAN addresses change), or null in plain-HTTP mode. */
+  readonly tls: AirBridgeTlsMaterial | null;
   /** Protocol used for LAN (phone-facing) URLs. */
   protocol: 'http' | 'https';
   hub: SignalingHub;
   backgroundClipboard: BackgroundClipboardPeer | null;
   port: number;
-  lanUrls: string[];
+  /** Phone-facing URLs: LAN candidates covered by the current TLS certificate. Live. */
+  readonly lanUrls: string[];
+  /** Same as lanUrls with interface details. Live. */
+  readonly lanEndpoints: LanEndpoint[];
+  /** LAN candidates the current certificate does NOT cover (only non-empty for provided certs or mid-refresh). */
+  readonly uncoveredLanAddresses: string[];
+  /** Re-read interfaces now; re-issues the TLS leaf if needed. Resolves true when advertised endpoints changed. */
+  refreshNetwork: () => Promise<boolean>;
   close: () => Promise<void>;
 }
 
@@ -134,14 +152,46 @@ export async function createAirBridgeServer(
     tlsKeyPath: options.tlsKeyPath,
     tlsDir: options.tlsDir,
   });
-  const tls = tlsEnabled
-    ? await resolveTlsMaterial({
-        tlsCertPath: options.tlsCertPath,
-        tlsKeyPath: options.tlsKeyPath,
-        tlsDir: options.tlsDir,
-      })
+  const readInterfaces = options.getNetworkInterfaces ?? (() => os.networkInterfaces());
+  const currentCandidates = (): LanCandidate[] => getLanCandidates(readInterfaces());
+  const issueTls = (lanAddresses: string[]) =>
+    resolveTlsMaterial({
+      tlsCertPath: options.tlsCertPath,
+      tlsKeyPath: options.tlsKeyPath,
+      tlsDir: options.tlsDir,
+      lanAddresses,
+    });
+  let tls: AirBridgeTlsMaterial | null = tlsEnabled
+    ? await issueTls(currentCandidates().map((candidate) => candidate.address))
     : null;
   const protocol: 'http' | 'https' = tls ? 'https' : 'http';
+  // certificateCoversIp parses X.509; memoise per certificate generation.
+  let coverage = new Map<string, boolean>();
+  const tlsCovers = (address: string): boolean => {
+    if (!tls) return true;
+    let covered = coverage.get(address);
+    if (covered === undefined) {
+      covered = certificateCoversIp(tls.cert, address);
+      coverage.set(address, covered);
+    }
+    return covered;
+  };
+  /**
+   * The single source of truth for what a phone is told: QR (via welcome /
+   * network messages), /api/health, mDNS. Only addresses the live certificate
+   * covers, so a phone can never be handed a URL that fails hostname checks.
+   */
+  const advertisedCandidates = (): LanCandidate[] => currentCandidates().filter((c) => tlsCovers(c.address));
+  const advertisedUrls = (): string[] =>
+    advertisedCandidates().map((c) => candidateUrl(c, activePort, protocol));
+  const advertisedEndpoints = (): LanEndpoint[] =>
+    advertisedCandidates().map((c) => ({
+      url: candidateUrl(c, activePort, protocol),
+      address: c.address,
+      interface: c.interface,
+      kind: c.kind,
+    }));
+  const tlsPin = (): string | null => tls?.pinSha256 ?? null;
 
   const daemonCfg = createMacDaemonConfig(options.daemonConfig);
   const cliSessions = options.cliSessions ?? new Map<string, CliBeamSession>();
@@ -195,9 +245,16 @@ export async function createAirBridgeServer(
   const httpServer = http.createServer(app);
   const httpsServer = tls ? https.createServer({ key: tls.key, cert: tls.cert }, app) : null;
   // SecureContext for the dispatcher's explicit TLS termination (see below).
-  const httpsSecureContext = tls
+  // Reassigned when the leaf is re-issued for a new LAN address.
+  let httpsSecureContext = tls
     ? tlsModule.createSecureContext({ key: tls.key, cert: tls.cert })
     : null;
+  const applyTls = (next: AirBridgeTlsMaterial) => {
+    tls = next;
+    coverage = new Map();
+    httpsSecureContext = tlsModule.createSecureContext({ key: next.key, cert: next.cert });
+    httpsServer?.setSecureContext({ key: next.key, cert: next.cert });
+  };
   // Disable Nagle on transfer sockets (also covers dispatcher-handed sockets
   // in TLS mode, which arrive via emit('connection')).
   httpServer.on('connection', (socket) => (socket as net.Socket).setNoDelay(true));
@@ -217,7 +274,9 @@ export async function createAirBridgeServer(
         : null;
 
   const hub = new SignalingHub({
-    getLanUrls: () => getLanUrls(activePort, protocol),
+    getLanUrls: advertisedUrls,
+    getLanEndpoints: advertisedEndpoints,
+    getTlsPin: tlsPin,
     getDaemonStatus: () => getDaemonStatus(daemonCfg),
     clipboardProvider,
     clipboardPollMs: options.hostClipboardPollMs,
@@ -235,7 +294,7 @@ export async function createAirBridgeServer(
     // Local CA download for first-time trust setup on the phone. Registered
     // before the redirect so it also works over plain HTTP (see above).
     const serveCa = (_req: Request, res: Response) => {
-      if (!tls.caCertPem) {
+      if (!tls?.caCertPem) {
         res
           .status(404)
           .send('This server uses a provided TLS certificate; there is no generated CA to install.');
@@ -379,7 +438,9 @@ export async function createAirBridgeServer(
       e2ee: 'ECDH-P256-AES-256-GCM',
       uptimeSec: Math.round(process.uptime()),
       ...hub.getStats(),
-      lanUrls: getLanUrls(activePort, protocol),
+      lanUrls: advertisedUrls(),
+      lanEndpoints: advertisedEndpoints(),
+      tlsPin: tlsPin(),
       https: tls !== null,
       tlsSource: tls?.source ?? null,
       caFingerprintSha256: tls?.caFingerprintSha256 ?? null,
@@ -868,8 +929,46 @@ export async function createAirBridgeServer(
   });
 
   if (options.enableMdns !== false && mode !== 'test') {
-    mdns = startMdnsResponder(activePort);
+    mdns = startMdnsResponder(activePort, {
+      protocol,
+      getAddresses: () => advertisedCandidates().map((c) => c.address),
+    });
   }
+
+  // Network watcher: a laptop that joins a phone hotspot after AirBridge
+  // started gets a new address. Re-issue the leaf so that address passes
+  // hostname verification, then push the new endpoints to clients.
+  const addressKey = () => advertisedCandidates().map((c) => `${c.interface}=${c.address}`).join(',');
+  let lastAdvertisedKey = addressKey();
+  let refreshing: Promise<boolean> | null = null;
+  const refreshNetwork = (): Promise<boolean> => {
+    if (refreshing) return refreshing;
+    refreshing = (async () => {
+      const addresses = currentCandidates().map((c) => c.address);
+      if (tls?.source === 'generated' && addresses.some((address) => !tlsCovers(address))) {
+        applyTls(await issueTls(addresses));
+      }
+      const key = addressKey();
+      if (key === lastAdvertisedKey) return false;
+      lastAdvertisedKey = key;
+      hub.broadcastNetworkUpdate();
+      mdns?.refresh();
+      return true;
+    })().finally(() => {
+      refreshing = null;
+    });
+    return refreshing;
+  };
+  const networkPollMs = options.networkPollMs ?? (mode === 'test' ? 0 : 3000);
+  const networkTimer =
+    networkPollMs > 0
+      ? setInterval(() => {
+          refreshNetwork().catch((err) => {
+            console.warn('AirBridge network refresh failed:', err instanceof Error ? err.message : err);
+          });
+        }, networkPollMs)
+      : null;
+  networkTimer?.unref();
 
   if (backgroundClipboardEnabled) {
     try {
@@ -890,13 +989,27 @@ export async function createAirBridgeServer(
     app,
     httpServer,
     httpsServer,
-    tls,
+    get tls() {
+      return tls;
+    },
     protocol,
     hub,
     backgroundClipboard: backgroundPeer,
     port: activePort,
-    lanUrls: getLanUrls(activePort, protocol),
+    get lanUrls() {
+      return advertisedUrls();
+    },
+    get lanEndpoints() {
+      return advertisedEndpoints();
+    },
+    get uncoveredLanAddresses() {
+      return currentCandidates()
+        .map((c) => c.address)
+        .filter((address) => !tlsCovers(address));
+    },
+    refreshNetwork,
     async close() {
+      if (networkTimer) clearInterval(networkTimer);
       mdns?.close();
       backgroundPeer?.stop();
       hub.setBackgroundClipboardActive(false);
@@ -924,6 +1037,11 @@ export function describeTlsSetup(instance: AirBridgeServerInstance): string[] {
   lines.push(`⚡ AirBridge Warp Server listening on port ${instance.port}`);
   lines.push(`💻 On this Mac:        http://localhost:${instance.port}  (secure as-is)`);
   lines.push(`📱 On your phone:      ${lanList}`);
+  if (instance.uncoveredLanAddresses.length > 0) {
+    lines.push(
+      `⚠️  Not advertised (the TLS certificate does not cover them): ${instance.uncoveredLanAddresses.join(', ')}`
+    );
+  }
   if (!instance.tls) {
     lines.push(
       '⚠️  HTTPS is OFF: phone browsers will block AirBridge on a Wi-Fi address ("Secure connection required"). Restart without AIRBRIDGE_HTTPS=0 / --http to enable it.'

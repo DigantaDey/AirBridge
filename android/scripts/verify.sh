@@ -71,6 +71,9 @@ CP="$OUT/engine"
 echo "==> running pairing-link checks"
 "$JAVA" -cp "$CP" com.airbridge.engine.PairingLinkTestKt
 
+echo "==> running hotspot pairing checks (endpoint ranking, TCP race, failure classification)"
+"$JAVA" -cp "$CP" com.airbridge.engine.HotspotPairingTestKt
+
 echo "==> running append-only file journal checks"
 "$JAVA" -cp "$CP" com.airbridge.engine.FilesTestKt
 

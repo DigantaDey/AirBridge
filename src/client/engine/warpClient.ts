@@ -2,6 +2,7 @@ import {
   type ClientToServerMessage,
   type ControlPayload,
   type DeviceProfile,
+  type LanEndpoint,
   type FileManifestItem,
   type HistoricalTransferSummary,
   type LocalDaemonStatus,
@@ -230,6 +231,10 @@ export interface WarpClientSnapshot {
   visibility: VisibilityMode;
   myDevice: DeviceProfile | null;
   lanUrls: string[];
+  /** lanUrls with interface details (same order); absent with older servers. */
+  lanEndpoints?: LanEndpoint[];
+  /** TLS anchor pin for the pairing QR `ca=` parameter. */
+  tlsPin?: string | null;
   localDaemon: LocalDaemonStatus;
   peers: PeerSummary[];
   peerSecurity: Record<string, PeerSecurityInfo>;
@@ -876,6 +881,8 @@ export class WarpClient {
   private pairCode = '';
   private visibility: VisibilityMode = 'nearby';
   private lanUrls: string[] = [];
+  private lanEndpoints: LanEndpoint[] = [];
+  private tlsPin: string | null = null;
   private localDaemon: LocalDaemonStatus = {
     enabled: false,
     platform: 'unknown',
@@ -1129,6 +1136,8 @@ export class WarpClient {
       visibility: this.visibility,
       myDevice: this.myDevice,
       lanUrls: this.lanUrls,
+      lanEndpoints: this.lanEndpoints,
+      tlsPin: this.tlsPin,
       localDaemon: this.localDaemon,
       peers: [...this.peers],
       peerSecurity,
@@ -2579,8 +2588,20 @@ export class WarpClient {
         this.pairCode = msg.pairCode;
         this.persistPairCode(msg.pairCode);
         this.lanUrls = msg.lanUrls;
+        this.lanEndpoints = msg.lanEndpoints ?? [];
+        this.tlsPin = msg.tlsPin ?? null;
         this.localDaemon = msg.localDaemon;
         this.syncPeers(msg.peers);
+        break;
+      }
+
+      case 'network': {
+        // The computer joined/left a network (e.g. a phone hotspot): refresh
+        // the endpoints so an open pairing QR is regenerated immediately.
+        this.lanUrls = Array.isArray(msg.lanUrls) ? msg.lanUrls : [];
+        this.lanEndpoints = Array.isArray(msg.lanEndpoints) ? msg.lanEndpoints : [];
+        this.tlsPin = msg.tlsPin ?? null;
+        this.emit();
         break;
       }
 

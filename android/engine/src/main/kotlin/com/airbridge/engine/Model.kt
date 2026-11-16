@@ -190,6 +190,15 @@ interface EngineListener {
     fun onLocalClipboardBeam(item: ClipboardItem) {}
     fun onNotification(item: NotificationItem) {}
     fun onError(code: String, message: String) {}
+    /**
+     * A classified connection or pairing failure with recovery guidance.
+     * Never called for our own cancellations (reconnect / network change).
+     */
+    fun onConnectionFailure(diagnosis: ConnectionDiagnosis) {}
+    /** TLS + WebSocket established to this candidate address. */
+    fun onEndpointConnected(host: String) {}
+    /** The computer reported new reachable addresses (`network` message). */
+    fun onLanUrlsChanged(lanUrls: List<String>) {}
 }
 
 // ---------------------------------------------------------------------------

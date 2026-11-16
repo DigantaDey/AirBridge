@@ -4,6 +4,13 @@ package com.airbridge.engine
  * A pairing invitation: the desktop address a phone should talk to, plus the
  * optional six-character pair code baked into the QR the desktop prints.
  *
+ * A computer is often on several networks at once (Wi-Fi + dock/USB tether +
+ * phone hotspot) and cannot know which one faces the phone, so current QRs
+ * also carry `alt=ip2,ip3` (every other advertised address, same scheme and
+ * port) and `ca=<base64url SHA-256>` (the TLS chain anchor). The phone ranks
+ * [host] + [alternateHosts] by which address is on a network it is attached
+ * to (see [EndpointSelector]) and verifies TLS against [tlsPin].
+ *
  * The Android service connects directly to this endpoint; the bundled UI only
  * observes it. Invitations specify the computer, transport, port and pair code. QRs are produced as `https://<host>:<port>/?pair=ABC-DEF`
  * (see packaging/desktop-entry.ts) but the parser also accepts the
@@ -19,6 +26,10 @@ data class PairingLink(
     val port: Int,
     /** Normalised pair code, or null when the invitation carries none. */
     val pairCode: String?,
+    /** Other addresses of the same computer (same scheme + port), in desktop rank order. */
+    val alternateHosts: List<String> = emptyList(),
+    /** base64url SHA-256 of the TLS chain anchor from the QR, or null. */
+    val tlsPin: String? = null,
 ) {
     val secure: Boolean get() = scheme == "https"
 
@@ -36,9 +47,29 @@ data class PairingLink(
     fun webUrl(code: String? = pairCode): String =
         if (code == null) "$baseUrl/" else "$baseUrl/?pair=$code"
 
+    /** Primary host first, then alternates; de-duplicated. */
+    val candidateHosts: List<String>
+        get() = (listOf(host) + alternateHosts).filter { it.isNotEmpty() }
+            .distinctBy { it.lowercase() }
+
+    /** Same invitation pointed at another of the computer's addresses. */
+    fun withHost(other: String): PairingLink = copy(host = other)
+
     companion object {
         /** Port the desktop server binds unless told otherwise. */
         const val DEFAULT_PORT = 3000
+
+        /** Upper bound on alternates accepted from a QR (desktop sends at most 5). */
+        const val MAX_ALTERNATES = 8
+
+        private val PIN = Regex("^[A-Za-z0-9_-]{43}$")
+        private val IPV4 = Regex("^(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}$")
+        private val HOSTNAME = Regex("^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
+
+        /** IPv4 literal or DNS name; IPv6/ports/paths are not valid alternates. */
+        fun isValidAlternateHost(host: String): Boolean = IPV4.matches(host) || (HOSTNAME.matches(host) && !host.all { it.isDigit() || it == '.' })
+
+        fun isValidPin(pin: String?): Boolean = pin != null && PIN.matches(pin)
 
         /** Parses a scanned QR payload or a manually typed address. Null when unusable. */
         fun parse(raw: String): PairingLink? {
@@ -129,7 +160,29 @@ data class PairingLink(
             if (port !in 1..65535) return null
 
             val code = pairCodeFrom(query) ?: pairCodeFrom(fragment)
-            return PairingLink(scheme = scheme, host = host, port = port, pairCode = code)
+            val alternates = alternatesFrom(query).filter { !it.equals(host, ignoreCase = true) }
+            val pin = paramFrom(query, "ca")?.takeIf { isValidPin(it) && scheme == "https" }
+            return PairingLink(
+                scheme = scheme, host = host, port = port, pairCode = code,
+                alternateHosts = alternates, tlsPin = pin,
+            )
+        }
+
+        private fun paramFrom(params: String, name: String): String? {
+            if (params.isEmpty()) return null
+            for (part in params.split('&')) {
+                val equals = part.indexOf('=')
+                if (equals < 0) continue
+                if (!part.substring(0, equals).equals(name, ignoreCase = true)) continue
+                return percentDecode(part.substring(equals + 1)).trim()
+            }
+            return null
+        }
+
+        private fun alternatesFrom(params: String): List<String> {
+            val raw = paramFrom(params, "alt") ?: return emptyList()
+            return raw.split(',').map { it.trim() }.filter { isValidAlternateHost(it) }
+                .distinctBy { it.lowercase() }.take(MAX_ALTERNATES)
         }
 
         private fun pairCodeFrom(params: String): String? {

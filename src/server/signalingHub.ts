@@ -5,6 +5,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import {
   type ClientToServerMessage,
   type DeviceProfile,
+  type LanEndpoint,
   type LocalDaemonStatus,
   type PeerSummary,
   type ServerToClientMessage,
@@ -149,17 +150,31 @@ export class SignalingHub {
   private backgroundClipboardActive = false;
   private backgroundClipboardSink: ((text: string) => void) | null = null;
   private getLanUrls: () => string[];
+  private getLanEndpoints: () => LanEndpoint[];
+  private getTlsPin: () => string | null;
   private getDaemonStatus: () => LocalDaemonStatus;
   private onHostPairCodeChange?: (pairCode: string) => void;
 
   constructor(opts: {
     getLanUrls: () => string[];
+    /** Detailed form of getLanUrls (same order). Defaults to URL-only entries. */
+    getLanEndpoints?: () => LanEndpoint[];
+    getTlsPin?: () => string | null;
     getDaemonStatus: () => LocalDaemonStatus;
     clipboardProvider?: HostClipboardProvider | null;
     clipboardPollMs?: number;
     onHostPairCodeChange?: (pairCode: string) => void;
   }) {
     this.getLanUrls = opts.getLanUrls;
+    this.getLanEndpoints =
+      opts.getLanEndpoints ??
+      (() =>
+        this.getLanUrls().map((url) => {
+          let address = url;
+          try { address = new URL(url).hostname; } catch { /* keep raw */ }
+          return { url, address, interface: '', kind: 'other' as const };
+        }));
+    this.getTlsPin = opts.getTlsPin ?? (() => null);
     this.getDaemonStatus = opts.getDaemonStatus;
     this.onHostPairCodeChange = opts.onHostPairCodeChange;
     this.clipboardMonitor =
@@ -432,6 +447,8 @@ export class SignalingHub {
           peerId,
           pairCode,
           lanUrls: this.getLanUrls(),
+          lanEndpoints: this.getLanEndpoints(),
+          tlsPin: this.getTlsPin(),
           localDaemon: this.resolveClientDaemonStatus(registeredClient),
           peers: this.computeVisiblePeers(registeredClient),
         });
@@ -702,6 +719,21 @@ export class SignalingHub {
         });
       }
     }
+  }
+
+  /**
+   * Tell every connected client that the computer's reachable addresses
+   * changed, so an open pairing QR is regenerated and phones learn the new
+   * endpoint before their current path disappears.
+   */
+  broadcastNetworkUpdate(): void {
+    const msg: ServerToClientMessage = {
+      type: 'network',
+      lanUrls: this.getLanUrls(),
+      lanEndpoints: this.getLanEndpoints(),
+      tlsPin: this.getTlsPin(),
+    };
+    for (const client of this.clients.values()) this.sendJson(client.ws, msg);
   }
 
   private sendJson(ws: WebSocket, msg: ServerToClientMessage): void {

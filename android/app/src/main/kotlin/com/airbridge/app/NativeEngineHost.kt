@@ -37,6 +37,8 @@ data class NativeEngineUiState(
     val formattedPairCode: String = "",
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
     val connectionError: String? = null,
+    /** Classified failure behind [connectionError], with its recovery action. */
+    val connectionHelp: ConnectionDiagnosis? = null,
     val lanUrls: List<String> = emptyList(),
     val peers: List<PeerUiState> = emptyList(),
     val transfers: List<TransferView> = emptyList(),
@@ -64,6 +66,7 @@ class NativeEngineHost(
     @Volatile private var engine: AirBridgeEngine? = null
     @Volatile private var closed = false
     @Volatile private var connectionError: String? = null
+    @Volatile private var connectionGuidance: ConnectionDiagnosis? = null
 
     private val _uiState = MutableStateFlow(
         NativeEngineUiState(
@@ -155,17 +158,13 @@ class NativeEngineHost(
         onState(_uiState.value)
         worker.execute {
             try {
-                val link = prefs.pairingLink() ?: return@execute
-                // connectWithLink stores the QR's code in pendingPairCode while
-                // persisting only baseUrl. Consume it before falling back to
-                // invitation/saved codes so a scan cannot silently use stale state.
-                val pendingScannedCode = prefs.consumePendingPairCode()
-                val targetPairCode = PairingCodeBootstrap.resolve(
-                    pendingScanned = pendingScannedCode,
-                    invitation = link.pairCode,
-                    saved = prefs.pairCode,
-                )
-                targetPairCode.takeIf { it.isNotBlank() }?.let { prefs.pairCode = it }
+                // connectWithLink stages the QR's code as pendingPairCode.
+                // bootstrap() consumes it (exactly once) before falling back to
+                // invitation/saved codes via PairingCodeBootstrap.resolve, so a
+                // fresh scan always beats a stale persisted code.
+                val plan = prefs.invitations.bootstrap() ?: return@execute
+                val link = plan.link
+                val targetPairCode = plan.pairCode
                 val created = AirBridgeEngine(
                     EngineConfig(
                         serverUrl = link.wsUrl,
@@ -177,6 +176,9 @@ class NativeEngineHost(
                         visibility = prefs.visibility,
                         tlsTrustManager = prefs.tlsTrust(link),
                         defaultSinkFactory = AndroidFileSinkFactory(context),
+                        // Primary + QR alternates + addresses the computer
+                        // reported last time; ranked on-link-first per attempt.
+                        endpointHosts = { prefs.invitations.candidateHosts() },
                     ),
                 )
                 created.autoClipboardSend = prefs.autoClipboard
@@ -193,9 +195,34 @@ class NativeEngineHost(
                         override fun onWelcome(info: WelcomeInfo) {
                             if (closed) return
                             connectionError = null
+                            connectionGuidance = null
                             prefs.peerId = info.peerId
                             prefs.pairCode = info.pairCode
                             synchronized(stateLock) { lanUrls = info.lanUrls }
+                            prefs.invitations.learn(info.lanUrls)
+                            refresh()
+                        }
+
+                        override fun onEndpointConnected(host: String) {
+                            if (closed) return
+                            connectionError = null
+                            connectionGuidance = null
+                            prefs.invitations.markConnected(host)
+                            Log.i(TAG, "Connected via $host")
+                        }
+
+                        override fun onLanUrlsChanged(lanUrls: List<String>) {
+                            if (closed) return
+                            synchronized(stateLock) { this@NativeEngineHost.lanUrls = lanUrls }
+                            prefs.invitations.learn(lanUrls)
+                            refresh()
+                        }
+
+                        override fun onConnectionFailure(diagnosis: ConnectionDiagnosis) {
+                            if (closed) return
+                            connectionError = diagnosis.userMessage
+                            connectionGuidance = diagnosis
+                            Log.w(TAG, "${diagnosis.kind}: ${diagnosis.detail}")
                             refresh()
                         }
 
@@ -232,7 +259,7 @@ class NativeEngineHost(
                         }
 
                         override fun onError(code: String, message: String) {
-                            if (code == "CONNECTION_FAILED") connectionError = ConnectionHelp.message(message)
+                            // Classified failures arrive via onConnectionFailure.
                             Log.w(TAG, "$code: $message")
                             refresh()
                         }
@@ -348,6 +375,7 @@ class NativeEngineHost(
             formattedPairCode = PairCode.format(code),
             connectionState = current.currentState,
             connectionError = connectionError,
+            connectionHelp = connectionGuidance,
             lanUrls = urlsSnapshot,
             peers = peerViews,
             transfers = transfers,
