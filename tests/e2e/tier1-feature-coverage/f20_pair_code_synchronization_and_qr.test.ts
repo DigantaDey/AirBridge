@@ -89,6 +89,57 @@ describe('F20: Strict Pair Code Synchronization, QR Link Parsing & Room Rotation
     }
   });
 
+  it('assigns a unique default pair code to every remote device and enforces strict room isolation', async () => {
+    const hub = new SignalingHub({
+      getLanUrls: () => ['http://192.168.1.150:3000'],
+      getDaemonStatus: () => ({ enabled: true, platform: 'macos', hostname: 'MacBook', autoSaveToDownloads: true }),
+    });
+
+    const server = hub.wss;
+    const serverPort = 3997;
+    const http = (await import('node:http')).createServer();
+    http.on('upgrade', (req, socket, head) => {
+      server.handleUpgrade(req, socket, head, (ws) => {
+        server.emit('connection', ws, req);
+      });
+    });
+    await new Promise<void>((r) => http.listen(serverPort, '127.0.0.1', r));
+    const wsUrl = `ws://127.0.0.1:${serverPort}/ws`;
+
+    const phone1 = new WarpClient({
+      wsUrl,
+      deviceOverride: { name: 'Phone 1', platform: 'android', model: 'Galaxy', formFactor: 'phone' },
+    });
+    const phone2 = new WarpClient({
+      wsUrl,
+      deviceOverride: { name: 'Phone 2', platform: 'android', model: 'Pixel', formFactor: 'phone' },
+    });
+
+    try {
+      await phone1.start();
+      await phone2.start();
+
+      await waitFor(() => phone1.getSnapshot().pairCode.length === 6, 'phone1 pair code length');
+      await waitFor(() => phone2.getSnapshot().pairCode.length === 6, 'phone2 pair code length');
+
+      // Every remote device MUST start with a unique pair code
+      expect(phone1.getSnapshot().pairCode).not.toBe(phone2.getSnapshot().pairCode);
+
+      phone1.setVisibility('paired-only');
+      phone2.setVisibility('paired-only');
+
+      // Unpaired devices MUST NOT see each other in paired-only mode
+      await new Promise((r) => setTimeout(r, 200));
+      expect(phone1.getSnapshot().peers.length).toBe(0);
+      expect(phone2.getSnapshot().peers.length).toBe(0);
+    } finally {
+      phone1.stop();
+      phone2.stop();
+      hub.close();
+      http.close();
+    }
+  });
+
   it('delivers notification beams when enabled and ignores them when notificationSharing is false', async () => {
     const hub = new SignalingHub({
       getLanUrls: () => ['http://192.168.1.150:3000'],

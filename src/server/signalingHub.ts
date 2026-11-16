@@ -137,8 +137,7 @@ export class SignalingHub {
    * explicit `?pair=`/`join-pair` is always honored. Scanning the terminal
    * QR requires the same physical access as reading the code on screen.
    */
-  private defaultPairCode = generatePairCode(crypto.randomBytes(8));
-  private defaultPairCodeClaimed = false;
+  private hostPairCode = generatePairCode(crypto.randomBytes(8));
   /** Last pair code per peerId so reconnects rejoin their existing group. */
   private readonly pairCodeByPeer = new Map<string, string>();
 
@@ -202,15 +201,15 @@ export class SignalingHub {
     this.pingTimer.unref();
   }
 
-  /** Pair code embedded in the startup QR (claimed by the first client). */
+  /** Pair code embedded in the startup QR (shared by host desktop clients). */
   getDefaultPairCode(): string {
-    return this.defaultPairCode;
+    return this.hostPairCode;
   }
 
   /** The daemon's persisted group must also be the startup QR's group. */
   setDefaultPairCode(raw: string): void {
     const code = normalizePairCode(raw);
-    if (isValidPairCode(code)) this.defaultPairCode = code;
+    if (isValidPairCode(code)) this.hostPairCode = code;
   }
 
   private rememberPairCode(peerId: string, pairCode: string): void {
@@ -388,10 +387,7 @@ export class SignalingHub {
         } else if (this.pairCodeByPeer.has(peerId)) {
           pairCode = this.pairCodeByPeer.get(peerId)!;
         } else if (this.isHostDesktopClient({ isLoopback, device } as ConnectedClient)) {
-          pairCode = this.defaultPairCode;
-        } else if (!this.defaultPairCodeClaimed) {
-          pairCode = this.defaultPairCode;
-          this.defaultPairCodeClaimed = true;
+          pairCode = this.hostPairCode;
         } else {
           pairCode = generatePairCode(crypto.randomBytes(8));
         }
@@ -485,7 +481,7 @@ export class SignalingHub {
           const fresh = generatePairCode(crypto.randomBytes(8));
 
           if (this.isHostDesktopClient(registeredClient)) {
-            this.defaultPairCode = fresh;
+            this.hostPairCode = fresh;
             this.onHostPairCodeChange?.(fresh);
             for (const client of this.clients.values()) {
               if (this.isHostDesktopClient(client) && client.pairCode === prevPairCode) {
