@@ -59,6 +59,45 @@ the real Android engine in the phone namespace.
 | `firewall`: like hotspot-only, inbound 3000 dropped | same 10 s timeout, same generic text | `TCP_TIMEOUT`: "…is on this phone's ap0 network but didn't answer. Most likely the computer's firewall…" |
 | hotspot joined after start | `SSLHandshakeException` (stale SANs) | leaf re-issued (same CA, so same QR pin) and `network` pushed to clients |
 
+## Update (v0.0.3 field report): the Mac is *only* on the hotspot and it still times out
+
+The root cause above needs the Mac to be on a second network. A later report
+shows otherwise: the Mac is on the phone's hotspot **only**, the pairing panel
+lists only `10.205.95.167`, and the app stays on "Reconnecting…" with no error.
+So `10.205.95.167` is the address the phone's hotspot gave the Mac (Android
+picks random hotspot subnets, including in `10.0.0.0/8`), and choosing a
+different address can't fix this case. On a stock phone, Android puts its
+hotspot subnet in the `local_network` routing table, which an app's ordinary
+sockets use, so the phone should reach the Mac directly. That leaves two
+explanations, and only a test on the device can tell them apart:
+
+| Where the SYN goes | What it means | How to tell |
+|---|---|---|
+| Reaches the Mac, gets no answer | **macOS Application Firewall** drops it. Release binaries are ad-hoc signed, so each update is a new app that needs approval again. | Mac: `sudo tcpdump -ni any tcp port 3000` shows SYNs from the phone's hotspot address |
+| Never reaches the Mac (leaves via `192.0.0.2`) | The phone routes it over mobile data | Mac: tcpdump shows nothing; the phone's detail line ends in `via 192.0.0.2` |
+
+Changes from this report:
+
+- **The Mac reports its firewall state.** The server reads `socketfilterfw`
+  (no root needed) every 15 s and sends it in `welcome`/`network` and
+  `/api/health`. The pairing panel then shows a red notice for "Block all
+  incoming connections" or a blocked AirBridge, or an amber notice when this
+  build hasn't been approved yet. Both include the exact
+  `socketfilterfw --add … --unblockapp …` command.
+- **The app no longer hides failures.**
+  - A failed attempt now shows its raw per-address result, for example
+    `10.205.95.167:3000 tcp_timeout via 192.0.0.2`. This shows which network
+    the phone actually used, so a screenshot is enough to tell the two cases
+    apart.
+  - While an attempt runs, the card says `Trying <addresses>…`, then
+    `Reached <host>, waiting for AirBridge on the computer…`.
+  - "Socket closed" counts as *cancelled* only when the app closed the socket
+    itself. Other closes are shown.
+  - The service's first network callback no longer aborts the first dial.
+  - If TCP, TLS and the WebSocket upgrade succeed but `welcome` doesn't arrive
+    within 15 s, the app reports `NO_WELCOME`. Before, it waited indefinitely
+    on "Reconnecting…".
+
 ## The fix
 
 **Desktop**

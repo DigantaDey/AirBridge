@@ -36,6 +36,8 @@ enum class FailureKind {
     WS_REJECTED,
     /** The connection was closed by the server or network after it was established. */
     WS_CLOSED,
+    /** Transport (TCP + TLS + WebSocket) is up, but AirBridge never answered our hello. */
+    NO_WELCOME,
     PAIR_CODE_INVALID,
     RATE_LIMITED,
     /** We closed the socket ourselves (reconnect / network change / stop). Not an error to show. */
@@ -118,7 +120,9 @@ object ConnectionHelp {
                 chain(t).any { it is NoRouteToHostException } || "unreachable" in lower || "no route" in lower -> FailureKind.NO_ROUTE
                 chain(t).any { it is UnknownHostException } -> FailureKind.DNS
                 chain(t).any { it is ConnectException } || "refused" in lower -> FailureKind.TCP_REFUSED
-                "socket closed" in lower -> FailureKind.CANCELLED
+                // Only a close *we* initiated is a cancellation (handled by
+                // closedLocally above); anything else must stay visible.
+                "socket closed" in lower -> FailureKind.UNKNOWN
                 else -> FailureKind.UNKNOWN
             }
             ConnectPhase.TLS -> {
@@ -179,7 +183,7 @@ object ConnectionHelp {
 
     fun actionFor(kind: FailureKind): RecoveryAction = when (kind) {
         FailureKind.TCP_TIMEOUT, FailureKind.NO_ROUTE -> RecoveryAction.FIX_NETWORK
-        FailureKind.TCP_REFUSED, FailureKind.WS_REJECTED -> RecoveryAction.RETRY
+        FailureKind.TCP_REFUSED, FailureKind.WS_REJECTED, FailureKind.NO_WELCOME -> RecoveryAction.RETRY
         FailureKind.DNS, FailureKind.TLS_UNTRUSTED, FailureKind.TLS_HOSTNAME, FailureKind.TLS_HANDSHAKE,
         FailureKind.PAIR_CODE_INVALID -> RecoveryAction.RESCAN
         FailureKind.TLS_PIN_MISMATCH -> RecoveryAction.FORGET_AND_RESCAN
@@ -199,6 +203,7 @@ object ConnectionHelp {
         FailureKind.TLS_HOSTNAME -> "Certificate doesn't cover this address"
         FailureKind.WS_REJECTED -> "Connection refused by AirBridge"
         FailureKind.WS_CLOSED -> "Connection closed"
+        FailureKind.NO_WELCOME -> "Computer connected but didn't answer"
         FailureKind.PAIR_CODE_INVALID -> "Pair code rejected"
         FailureKind.RATE_LIMITED -> "Too many pairing attempts"
         FailureKind.CANCELLED -> "Reconnecting"
@@ -248,6 +253,7 @@ object ConnectionHelp {
             FailureKind.TLS_HANDSHAKE -> "Reached $hostList, but the secure (TLS) handshake failed. Make sure the computer runs AirBridge with HTTPS on, then scan its QR code again."
             FailureKind.WS_REJECTED -> "The computer refused the AirBridge connection. Update AirBridge on both devices and scan the QR code again."
             FailureKind.WS_CLOSED -> "The connection to the computer was closed. AirBridge will keep retrying; if it persists, check the computer is awake and on the same network."
+            FailureKind.NO_WELCOME -> "Reached $hostList securely, but AirBridge on the computer didn't answer within a few seconds. Quit and reopen AirBridge on the computer, then tap Reconnect now."
             FailureKind.PAIR_CODE_INVALID -> "The computer rejected that pair code. Scan its QR code again."
             FailureKind.RATE_LIMITED -> "Too many pairing attempts. Wait a minute and try again."
             FailureKind.CANCELLED -> "Reconnecting…"

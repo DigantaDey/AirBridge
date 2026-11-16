@@ -43,6 +43,12 @@ data class EngineConfig(
     val endpointStaggerMs: Long = 400,
     /** Test hook: simulated TCP reachability. */
     val tcpConnector: TcpConnector? = null,
+    /**
+     * After TCP+TLS+upgrade, the computer must answer hello with welcome within
+     * this time; otherwise the attempt is reported as NO_WELCOME instead of
+     * sitting on "Reconnecting…" with no explanation.
+     */
+    val welcomeTimeoutMs: Long = 15_000,
 )
 
 private class TransferInterrupted(message: String) : java.io.IOException(message)
@@ -198,6 +204,8 @@ class AirBridgeEngine(private val config: EngineConfig) {
     private val started = AtomicBoolean(false)
 
     @Volatile private var ws: WebSocketClient? = null
+    /** Set by the inbound worker when the current connection's welcome arrives. */
+    @Volatile private var welcomedClient: WebSocketClient? = null
     private val outbound = OutboundQueue()
     // Stage 1: Fast control + frame routing thread ("airbridge-control").
     // Expanded inbound queue capacity (16 MiB) to avoid blocking transport reader.
@@ -383,7 +391,11 @@ class AirBridgeEngine(private val config: EngineConfig) {
     }
 
     private fun reportFailure(diagnosis: ConnectionDiagnosis) {
-        if (diagnosis.kind == FailureKind.CANCELLED) return
+        if (diagnosis.kind == FailureKind.CANCELLED) {
+            // Not user-facing, but keep a trace so a cancel loop is diagnosable.
+            for (l in listeners) l.onError("CONNECT_CANCELLED", diagnosis.detail)
+            return
+        }
         for (l in listeners) l.onConnectionFailure(diagnosis)
         emitError("CONNECTION_FAILED", diagnosis.userMessage)
     }
@@ -412,15 +424,34 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 tcpConnector = config.tcpConnector ?: WebSocketClient.DEFAULT_TCP_CONNECTOR,
             )
             var pingTask: java.util.concurrent.ScheduledFuture<*>? = null
+            var welcomeTask: java.util.concurrent.ScheduledFuture<*>? = null
+            val noWelcome = java.util.concurrent.atomic.AtomicBoolean(false)
+            fun reportNoWelcome() {
+                val host = client.connectedHost ?: hosts.firstOrNull() ?: "the computer"
+                reportFailure(ConnectionDiagnosis(
+                    FailureKind.NO_WELCOME,
+                    ConnectionHelp.guidance(FailureKind.NO_WELCOME, listOf(host), locals, emptyList()),
+                    "$host: connected, no welcome within ${config.welcomeTimeoutMs} ms",
+                ))
+            }
             try {
                 // Keep the connecting socket reachable so stop() also cancels
                 // DNS/connect/upgrade work instead of leaking a late socket.
                 ws = client
+                for (l in listeners) l.onConnectAttempt(hosts)
                 client.connectBlocking()
                 if (stopped.get()) break
                 client.connectedHost?.let { host -> for (l in listeners) l.onEndpointConnected(host) }
                 sendHello(client)
                 attempt = 0
+                welcomeTask = runCatching {
+                    timerExecutor.schedule({
+                        if (ws === client && welcomedClient !== client && !stopped.get()) {
+                            noWelcome.set(true)
+                            runCatching { client.close() }
+                        }
+                    }, config.welcomeTimeoutMs, TimeUnit.MILLISECONDS)
+                }.getOrNull()
                 pingTask = runCatching {
                     timerExecutor.scheduleWithFixedDelay({
                         try {
@@ -431,7 +462,9 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 client.readLoop()
                 // Established connection ended. Only a remote/network close is
                 // worth reporting; our own reconnect() is not a failure.
-                if (!stopped.get() && !client.closedByClient) {
+                if (!stopped.get() && noWelcome.get()) {
+                    reportNoWelcome()
+                } else if (!stopped.get() && !client.closedByClient) {
                     reportFailure(ConnectionDiagnosis(
                         FailureKind.WS_CLOSED,
                         ConnectionHelp.guidance(FailureKind.WS_CLOSED, listOfNotNull(client.connectedHost), locals, emptyList()),
@@ -443,9 +476,11 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 reportFailure(ConnectionHelp.fromFailure(e, locals))
             } catch (e: Exception) {
                 if (stopped.get()) break
-                reportFailure(ConnectionHelp.diagnose(e, hosts, locals))
+                if (noWelcome.get()) reportNoWelcome()
+                else reportFailure(ConnectionHelp.diagnose(e, hosts, locals))
             } finally {
                 pingTask?.cancel(false)
+                welcomeTask?.cancel(false)
                 runCatching { client.close() }
                 if (ws === client) ws = null
                 outbound.clear()
@@ -742,6 +777,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
                     peerId = id
                     pairCode = code
                 }
+                welcomedClient = ws
                 for (l in listeners) l.onWelcome(WelcomeInfo(id, code, lanUrls))
                 for (l in listeners) l.onPairCodeChanged(code)
                 setConnectionState(ConnectionState.CONNECTED)

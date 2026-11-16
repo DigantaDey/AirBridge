@@ -3,6 +3,7 @@ import {
   type ControlPayload,
   type DeviceProfile,
   type LanEndpoint,
+  type HostFirewallStatus,
   type FileManifestItem,
   type HistoricalTransferSummary,
   type LocalDaemonStatus,
@@ -235,6 +236,8 @@ export interface WarpClientSnapshot {
   lanEndpoints?: LanEndpoint[];
   /** TLS anchor pin for the pairing QR `ca=` parameter. */
   tlsPin?: string | null;
+  /** macOS firewall state of the computer this client is attached to. */
+  hostFirewall?: HostFirewallStatus | null;
   localDaemon: LocalDaemonStatus;
   peers: PeerSummary[];
   peerSecurity: Record<string, PeerSecurityInfo>;
@@ -883,6 +886,7 @@ export class WarpClient {
   private lanUrls: string[] = [];
   private lanEndpoints: LanEndpoint[] = [];
   private tlsPin: string | null = null;
+  private hostFirewall: HostFirewallStatus | null = null;
   private localDaemon: LocalDaemonStatus = {
     enabled: false,
     platform: 'unknown',
@@ -1138,6 +1142,7 @@ export class WarpClient {
       lanUrls: this.lanUrls,
       lanEndpoints: this.lanEndpoints,
       tlsPin: this.tlsPin,
+      hostFirewall: this.hostFirewall,
       localDaemon: this.localDaemon,
       peers: [...this.peers],
       peerSecurity,
@@ -2590,6 +2595,7 @@ export class WarpClient {
         this.lanUrls = msg.lanUrls;
         this.lanEndpoints = msg.lanEndpoints ?? [];
         this.tlsPin = msg.tlsPin ?? null;
+        this.hostFirewall = msg.hostFirewall ?? null;
         this.localDaemon = msg.localDaemon;
         this.syncPeers(msg.peers);
         break;
@@ -2601,6 +2607,7 @@ export class WarpClient {
         this.lanUrls = Array.isArray(msg.lanUrls) ? msg.lanUrls : [];
         this.lanEndpoints = Array.isArray(msg.lanEndpoints) ? msg.lanEndpoints : [];
         this.tlsPin = msg.tlsPin ?? null;
+        this.hostFirewall = msg.hostFirewall ?? null;
         this.emit();
         break;
       }

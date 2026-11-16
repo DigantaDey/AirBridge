@@ -197,6 +197,8 @@ interface EngineListener {
     fun onConnectionFailure(diagnosis: ConnectionDiagnosis) {}
     /** TLS + WebSocket established to this candidate address. */
     fun onEndpointConnected(host: String) {}
+    /** A connection attempt to [hosts] (ranked, first is preferred) has started. */
+    fun onConnectAttempt(hosts: List<String>) {}
     /** The computer reported new reachable addresses (`network` message). */
     fun onLanUrlsChanged(lanUrls: List<String>) {}
 }

@@ -39,6 +39,8 @@ data class NativeEngineUiState(
     val connectionError: String? = null,
     /** Classified failure behind [connectionError], with its recovery action. */
     val connectionHelp: ConnectionDiagnosis? = null,
+    /** Live progress while not connected, e.g. "Trying 10.205.95.167…". */
+    val connectionProgress: String? = null,
     val lanUrls: List<String> = emptyList(),
     val peers: List<PeerUiState> = emptyList(),
     val transfers: List<TransferView> = emptyList(),
@@ -67,6 +69,7 @@ class NativeEngineHost(
     @Volatile private var closed = false
     @Volatile private var connectionError: String? = null
     @Volatile private var connectionGuidance: ConnectionDiagnosis? = null
+    @Volatile private var connectionProgress: String? = null
 
     private val _uiState = MutableStateFlow(
         NativeEngineUiState(
@@ -196,6 +199,7 @@ class NativeEngineHost(
                             if (closed) return
                             connectionError = null
                             connectionGuidance = null
+                            connectionProgress = null
                             prefs.peerId = info.peerId
                             prefs.pairCode = info.pairCode
                             synchronized(stateLock) { lanUrls = info.lanUrls }
@@ -203,12 +207,21 @@ class NativeEngineHost(
                             refresh()
                         }
 
+                        override fun onConnectAttempt(hosts: List<String>) {
+                            if (closed) return
+                            connectionProgress = "Trying " + hosts.take(3).joinToString(", ") + "…"
+                            Log.i(TAG, "Connecting to ${hosts.joinToString()}")
+                            refresh()
+                        }
+
                         override fun onEndpointConnected(host: String) {
                             if (closed) return
-                            connectionError = null
-                            connectionGuidance = null
+                            // Keep the previous failure until welcome arrives:
+                            // transport-up alone is not "connected".
+                            connectionProgress = "Reached $host, waiting for AirBridge on the computer…"
                             prefs.invitations.markConnected(host)
                             Log.i(TAG, "Connected via $host")
+                            refresh()
                         }
 
                         override fun onLanUrlsChanged(lanUrls: List<String>) {
@@ -376,6 +389,7 @@ class NativeEngineHost(
             connectionState = current.currentState,
             connectionError = connectionError,
             connectionHelp = connectionGuidance,
+            connectionProgress = connectionProgress,
             lanUrls = urlsSnapshot,
             peers = peerViews,
             transfers = transfers,

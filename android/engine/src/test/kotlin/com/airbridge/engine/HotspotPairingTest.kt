@@ -53,6 +53,7 @@ fun main() {
     invitationStaging()
     classificationAndGuidance()
     tcpRace()
+    welcomeTimeout()
     println("HotspotPairing: $passed passed, $failed failed")
     if (failed > 0) exitProcess(1)
 }
@@ -179,6 +180,8 @@ private fun classificationAndGuidance() {
     eq("ENETUNREACH", ConnectionHelp.classify(ConnectException("Network is unreachable"), tcp), FailureKind.NO_ROUTE)
     eq("dns", ConnectionHelp.classify(UnknownHostException("mac.local"), tcp), FailureKind.DNS)
     eq("locally closed", ConnectionHelp.classify(IOException("Socket closed"), tcp, closedLocally = true), FailureKind.CANCELLED)
+    // A close we did not initiate must stay visible (it was silently dropped as CANCELLED).
+    check("foreign close is visible", ConnectionHelp.classify(IOException("Socket closed"), tcp) != FailureKind.CANCELLED)
 
     val tls = ConnectPhase.TLS
     eq("stale SAN", ConnectionHelp.classify(SSLHandshakeException("No subject alternative names matching IP address $HOTSPOT found"), tls), FailureKind.TLS_HOSTNAME)
@@ -385,5 +388,52 @@ private fun tcpRace() {
         t.join(2_000)
         check("cancel unblocks connect promptly", !t.isAlive)
         eq("cancel kind", (error.get() as? ConnectFailure)?.kind, FailureKind.CANCELLED)
+    }
+}
+
+/**
+ * Transport up (TCP + upgrade) but the server never answers hello: the engine
+ * must report NO_WELCOME with the reached host instead of sitting on
+ * "Reconnecting…" forever with no error, and must announce each attempt.
+ */
+private fun welcomeTimeout() {
+    FakeWsServer().use { server ->
+        val failures = java.util.concurrent.LinkedBlockingQueue<ConnectionDiagnosis>()
+        val attempts = java.util.Collections.synchronizedList(mutableListOf<List<String>>())
+        val reached = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val engine = AirBridgeEngine(
+            EngineConfig(
+                serverUrl = "ws://127.0.0.1:${server.port}/ws",
+                deviceName = "Silent server probe",
+                welcomeTimeoutMs = 600,
+            ),
+        )
+        engine.addListener(object : EngineListener {
+            override fun onConnectionFailure(diagnosis: ConnectionDiagnosis) { failures.put(diagnosis) }
+            override fun onConnectAttempt(hosts: List<String>) { attempts += hosts }
+            override fun onEndpointConnected(host: String) { reached += host }
+        })
+        val started = System.currentTimeMillis()
+        engine.start()
+        try {
+            val d = failures.poll(10, java.util.concurrent.TimeUnit.SECONDS)
+            val elapsed = System.currentTimeMillis() - started
+            check("no-welcome reported", d != null) { "no failure within 10s" }
+            if (d != null) {
+                eq("no-welcome kind", d.kind, FailureKind.NO_WELCOME)
+                eq("no-welcome action", ConnectionHelp.actionFor(d.kind), RecoveryAction.RETRY)
+                check("no-welcome names host", "127.0.0.1" in d.userMessage && "127.0.0.1" in d.detail) { d.userMessage + " / " + d.detail }
+                check("no-welcome not a pair-code hint", "pair code" !in d.userMessage.lowercase()) { d.userMessage }
+                check("no-welcome after timeout", elapsed in 500..8000) { "elapsed=$elapsed" }
+            }
+            check("attempt announced", attempts.firstOrNull()?.firstOrNull() == "127.0.0.1") { attempts.toString() }
+            check("transport reached", reached.firstOrNull() == "127.0.0.1") { reached.toString() }
+            eq("still not connected", engine.currentState == ConnectionState.CONNECTED, false)
+            // Retries keep going (and keep reporting) rather than hanging.
+            val again = failures.poll(10, java.util.concurrent.TimeUnit.SECONDS)
+            eq("retry reports again", again?.kind, FailureKind.NO_WELCOME)
+        } finally {
+            engine.stop()
+        }
     }
 }

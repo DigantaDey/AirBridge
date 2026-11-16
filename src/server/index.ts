@@ -37,7 +37,8 @@ import {
 } from './hostClipboard.js';
 import { registerCliBeamRoutes, type CliBeamSession } from './cliSendSession.js';
 import { startBackgroundClipboardPeer, type BackgroundClipboardPeer } from './backgroundClipboard.js';
-import { isValidPairCode, normalizePairCode, type LanEndpoint } from '../shared/protocol.js';
+import { isValidPairCode, normalizePairCode, type HostFirewallStatus, type LanEndpoint } from '../shared/protocol.js';
+import { firewallKey, readMacFirewall } from './macFirewall.js';
 
 export interface AirBridgeServerOptions {
   port?: number;
@@ -93,6 +94,12 @@ export interface AirBridgeServerOptions {
   networkPollMs?: number;
   /** Interface source override for tests (defaults to `os.networkInterfaces`). */
   getNetworkInterfaces?: () => InterfaceMap;
+  /**
+   * macOS Application Firewall probe (re-read every 15 s and pushed to the
+   * pairing panel). Defaults to `socketfilterfw` on macOS outside tests;
+   * null disables it.
+   */
+  readFirewall?: (() => Promise<HostFirewallStatus | null>) | null;
 }
 
 export interface AirBridgeServerInstance {
@@ -115,6 +122,8 @@ export interface AirBridgeServerInstance {
   readonly uncoveredLanAddresses: string[];
   /** Re-read interfaces now; re-issues the TLS leaf if needed. Resolves true when advertised endpoints changed. */
   refreshNetwork: () => Promise<boolean>;
+  /** Re-read the macOS firewall state now (tests; normally polled). */
+  refreshFirewall: () => Promise<void>;
   close: () => Promise<void>;
 }
 
@@ -192,6 +201,7 @@ export async function createAirBridgeServer(
       kind: c.kind,
     }));
   const tlsPin = (): string | null => tls?.pinSha256 ?? null;
+  let hostFirewall: HostFirewallStatus | null = null;
 
   const daemonCfg = createMacDaemonConfig(options.daemonConfig);
   const cliSessions = options.cliSessions ?? new Map<string, CliBeamSession>();
@@ -277,6 +287,7 @@ export async function createAirBridgeServer(
     getLanUrls: advertisedUrls,
     getLanEndpoints: advertisedEndpoints,
     getTlsPin: tlsPin,
+    getHostFirewall: () => hostFirewall,
     getDaemonStatus: () => getDaemonStatus(daemonCfg),
     clipboardProvider,
     clipboardPollMs: options.hostClipboardPollMs,
@@ -441,6 +452,7 @@ export async function createAirBridgeServer(
       lanUrls: advertisedUrls(),
       lanEndpoints: advertisedEndpoints(),
       tlsPin: tlsPin(),
+      hostFirewall,
       https: tls !== null,
       tlsSource: tls?.source ?? null,
       caFingerprintSha256: tls?.caFingerprintSha256 ?? null,
@@ -970,6 +982,25 @@ export async function createAirBridgeServer(
       : null;
   networkTimer?.unref();
 
+  // A phone on this Mac's own subnet whose connection times out is almost
+  // always the Application Firewall; report it so the pairing panel can say so.
+  const readFirewall = options.readFirewall === undefined
+    ? (mode === 'test' ? null : () => readMacFirewall())
+    : options.readFirewall;
+  const refreshFirewall = async (): Promise<void> => {
+    if (!readFirewall) return;
+    const next = await readFirewall().catch(() => null);
+    if (firewallKey(next) === firewallKey(hostFirewall)) return;
+    hostFirewall = next;
+    hub.broadcastNetworkUpdate();
+  };
+  const pollFirewall = !!readFirewall && (!!options.readFirewall || process.platform === 'darwin');
+  const firewallTimer = pollFirewall
+    ? setInterval(() => { void refreshFirewall(); }, 15_000)
+    : null;
+  firewallTimer?.unref();
+  void refreshFirewall();
+
   if (backgroundClipboardEnabled) {
     try {
       backgroundPeer = startBackgroundClipboardPeer({
@@ -1008,8 +1039,10 @@ export async function createAirBridgeServer(
         .filter((address) => !tlsCovers(address));
     },
     refreshNetwork,
+    refreshFirewall,
     async close() {
       if (networkTimer) clearInterval(networkTimer);
+      if (firewallTimer) clearInterval(firewallTimer);
       mdns?.close();
       backgroundPeer?.stop();
       hub.setBackgroundClipboardActive(false);

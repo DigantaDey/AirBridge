@@ -6,6 +6,7 @@ import {
   type ClientToServerMessage,
   type DeviceProfile,
   type LanEndpoint,
+  type HostFirewallStatus,
   type LocalDaemonStatus,
   type PeerSummary,
   type ServerToClientMessage,
@@ -151,6 +152,7 @@ export class SignalingHub {
   private backgroundClipboardSink: ((text: string) => void) | null = null;
   private getLanUrls: () => string[];
   private getLanEndpoints: () => LanEndpoint[];
+  private getHostFirewall: () => HostFirewallStatus | null;
   private getTlsPin: () => string | null;
   private getDaemonStatus: () => LocalDaemonStatus;
   private onHostPairCodeChange?: (pairCode: string) => void;
@@ -159,6 +161,7 @@ export class SignalingHub {
     getLanUrls: () => string[];
     /** Detailed form of getLanUrls (same order). Defaults to URL-only entries. */
     getLanEndpoints?: () => LanEndpoint[];
+    getHostFirewall?: () => HostFirewallStatus | null;
     getTlsPin?: () => string | null;
     getDaemonStatus: () => LocalDaemonStatus;
     clipboardProvider?: HostClipboardProvider | null;
@@ -166,6 +169,7 @@ export class SignalingHub {
     onHostPairCodeChange?: (pairCode: string) => void;
   }) {
     this.getLanUrls = opts.getLanUrls;
+    this.getHostFirewall = opts.getHostFirewall ?? (() => null);
     this.getLanEndpoints =
       opts.getLanEndpoints ??
       (() =>
@@ -449,6 +453,7 @@ export class SignalingHub {
           lanUrls: this.getLanUrls(),
           lanEndpoints: this.getLanEndpoints(),
           tlsPin: this.getTlsPin(),
+          hostFirewall: this.getHostFirewall(),
           localDaemon: this.resolveClientDaemonStatus(registeredClient),
           peers: this.computeVisiblePeers(registeredClient),
         });
@@ -732,6 +737,7 @@ export class SignalingHub {
       lanUrls: this.getLanUrls(),
       lanEndpoints: this.getLanEndpoints(),
       tlsPin: this.getTlsPin(),
+      hostFirewall: this.getHostFirewall(),
     };
     for (const client of this.clients.values()) this.sendJson(client.ws, msg);
   }

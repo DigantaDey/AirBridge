@@ -378,6 +378,17 @@ private fun ConnectionStatusCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )
+                if (help.detail.isNotBlank()) {
+                    // Raw per-address outcome, e.g. "10.205.95.167:3000
+                    // tcp_timeout via 192.0.0.2": tells which network the
+                    // phone actually used, so a screenshot is diagnosable.
+                    Text(
+                        text = help.detail,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 val label = ConnectionHelp.actionLabel(help.action)
                 if (label != null && help.action != RecoveryAction.RETRY) {
                     OutlinedButton(onClick = onOpenPairingSheet) { Text(label) }
@@ -387,6 +398,15 @@ private fun ConnectionStatusCard(
                     text = uiState.engine.connectionError,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
+                )
+            }
+
+            val progress = uiState.engine.connectionProgress
+            if (state != ConnectionState.CONNECTED && !progress.isNullOrBlank()) {
+                Text(
+                    text = progress,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
