@@ -14,20 +14,20 @@ fun main(args: Array<String>) {
     println("ranked candidates: ${EndpointSelector.rank(store.candidateHosts(), locals).map { "${it.host}${it.via?.let { v -> " (on-link via ${v.interfaceName})" } ?: " (off-link)"}" }}")
     val plan = store.bootstrap()!!
     println("pair code used: ${plan.pairCode} (fresh scan: ${plan.freshScan})")
-    var welcome: WelcomeInfo? = null; var host: String? = null; var failure: ConnectionDiagnosis? = null
+    var welcome: WelcomeInfo? = null; var host: String? = null; var reverse = false; var failure: ConnectionDiagnosis? = null
     val t0 = System.currentTimeMillis()
     val engine = AirBridgeEngine(EngineConfig(serverUrl = plan.link.wsUrl, deviceName = "Probe", initialPairCode = plan.pairCode,
         tlsTrustManager = store.tlsTrust(plan.link), endpointHosts = { store.candidateHosts() }, connectTimeoutMs = 4000))
     engine.addListener(object : EngineListener {
         override fun onWelcome(info: WelcomeInfo) { welcome = info }
-        override fun onEndpointConnected(h: String) { host = h }
+        override fun onEndpointConnected(h: String, viaReverse: Boolean) { host = h; reverse = viaReverse }
         override fun onConnectionFailure(d: ConnectionDiagnosis) { if (failure == null) failure = d }
     })
     engine.start()
     while (welcome == null && failure == null && System.currentTimeMillis() - t0 < 20_000) Thread.sleep(20)
     val ms = System.currentTimeMillis() - t0
     engine.stop()
-    welcome?.let { println("CONNECTED via $host in ${ms}ms — TLS (QR pin) + WSS + welcome, pairCode=${it.pairCode}"); exitProcess(0) }
+    welcome?.let { println("CONNECTED via $host${if (reverse) " (computer dialled the phone)" else ""} in ${ms}ms — TLS (QR pin) + WSS + welcome, pairCode=${it.pairCode}"); exitProcess(0) }
     failure?.let {
         println("FAILED after ${ms}ms: ${it.kind} → action ${it.action}")
         println("  title:   ${ConnectionHelp.title(it.kind)}")

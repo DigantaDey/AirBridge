@@ -113,6 +113,62 @@ try {
       await server.close();
     }
   }
+
+  // Reverse connection: every phone → computer dial is blackholed (firewall,
+  // VPN, phone routing via mobile data). The desktop dials the phone's real
+  // ReverseListener; TLS stays pinned to the QR; welcome must arrive.
+  {
+    const dir = path.join(base, 'reverse');
+    const { mkdir, readFile: read } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const { buildPairingUrl } = await import('../src/client/engine/pairingUrl.js');
+    const { chainAnchorPinSha256 } = await import('../src/server/tls.js');
+    const server = await createAirBridgeServer({
+      port: 0, host: '127.0.0.1', mode: 'test', enableMdns: false,
+      https: true, tlsDir: path.join(base, 'reverse-certs'), hostClipboard: false,
+      reverseConnect: {
+        intervalMs: 300,
+        minSessionMs: 2_000,
+        targets: async () => {
+          const port = Number((await read(path.join(dir, 'rv-port.txt'), 'utf8').catch(() => '')).trim());
+          return port > 0 ? [{ address: '127.0.0.1', port, source: 'static' as const }] : [];
+        },
+      },
+    });
+    const qr = buildPairingUrl({
+      pairCode: server.hub.getDefaultPairCode(),
+      lanUrls: [`https://127.0.0.1:${server.port}`],
+      pageOrigin: `https://127.0.0.1:${server.port}`,
+      pageHostname: '127.0.0.1',
+      tlsPin: chainAnchorPinSha256(server.tls!.cert),
+    });
+    await writeFile(path.join(dir, 'qr.txt'), qr);
+    console.log('\n=== Reverse connection (forward path blackholed) ===');
+    const started = performance.now();
+    try {
+      const phone = run(java, ['-Xmx128m', '-cp', classpath, 'com.airbridge.engine.ReverseConnectE2EKt', dir], 'Reverse phone');
+      const desktop = (async () => {
+        const done = path.join(dir, 'k-done.txt');
+        const deadline = Date.now() + 90_000;
+        let peerId = '';
+        while (!(peerId = (await read(done, 'utf8').catch(() => '')).trim())) {
+          if (Date.now() > deadline) throw new Error('phone never reached welcome');
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        const clients = [...(server.hub as unknown as { clients: Map<string, { peerId: string; isLoopback: boolean; device: { name: string } }> }).clients.values()];
+        const phoneClient = clients.find((c) => c.device.name === 'Reverse Phone');
+        if (!phoneClient) throw new Error(`desktop has no Reverse Phone client (${clients.map((c) => c.device.name).join(', ')})`);
+        if (phoneClient.isLoopback) throw new Error('dialled phone was treated as this machine');
+        console.log('  ok: desktop sees the dialled phone as a LAN peer, not as the host');
+        await writeFile(path.join(dir, 'd-done.txt'), 'ok');
+      })();
+      await Promise.all([phone, desktop]);
+      console.log(`Reverse connection passed in ${((performance.now() - started) / 1000).toFixed(2)}s.`);
+    } finally {
+      for (const child of children) child.kill('SIGKILL');
+      await server.close();
+    }
+  }
 } finally {
   for (const child of children) child.kill('SIGKILL');
   await rm(base, { recursive: true, force: true });

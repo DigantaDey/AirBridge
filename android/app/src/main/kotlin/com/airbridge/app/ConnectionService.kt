@@ -42,6 +42,7 @@ class ConnectionService : Service() {
     private var engineTarget = ""
     private var engineGeneration = 0L
     private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+    private var networkCallbackPrimed = false
     private var defaultNetwork: android.net.Network? = null
     private var lockRefreshScheduled = false
     private var notificationScheduled = false
@@ -101,7 +102,13 @@ class ConnectionService : Service() {
                 val previousNetwork = defaultNetwork
                 val changed = previousNetwork != null && previousNetwork != network
                 defaultNetwork = network
-                if (changed || previousNetwork == null || nativeState == ConnectionState.RECONNECTING) {
+                // The first callback after registering only reports the current
+                // network; reconnecting then would abort the engine's first dial
+                // mid-flight (a silent CANCELLED). Reconnect only on a real switch
+                // or when a network comes back after being lost.
+                val firstReport = !networkCallbackPrimed
+                networkCallbackPrimed = true
+                if (!firstReport && (changed || previousNetwork == null || nativeState == ConnectionState.RECONNECTING)) {
                     engineHost?.reconnect()
                 }
                 val prefs = Prefs(this@ConnectionService)

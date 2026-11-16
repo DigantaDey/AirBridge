@@ -47,6 +47,14 @@ class WebSocketClient(
     private val staggerMs: Long = 400,
     private val tcpConnector: TcpConnector = DEFAULT_TCP_CONNECTOR,
     private val routeProbe: (host: String, port: Int) -> String? = { h, p -> RouteProbe.sourceAddressFor(h, p) },
+    /**
+     * Reverse path: sockets the computer opened to this phone race the forward
+     * dials (see [InboundConnections]). TLS, the IP-SAN check and the upgrade
+     * then run on the winner exactly as for a dialled socket.
+     */
+    private val inbound: InboundConnections? = null,
+    /** After every forward dial failed, how long to keep waiting for the computer to dial in. */
+    private val reverseGraceMs: Long = 3_500,
 ) {
     interface Listener {
         fun onText(text: String)
@@ -80,6 +88,11 @@ class WebSocketClient(
     var connectedHost: String? = null
         private set
 
+    /** True when the connection is a socket the computer opened to this phone. */
+    @Volatile
+    var connectedViaReverse = false
+        private set
+
     /** Per-candidate outcomes of the last [connectBlocking] (for diagnostics). */
     @Volatile
     var attempts: List<EndpointAttempt> = emptyList()
@@ -99,14 +112,24 @@ class WebSocketClient(
     private val emptyPayload = ByteArray(0)
     private val random = SecureRandom()
 
-    private data class TcpResult(val host: String, val socket: Socket?, val error: Throwable?)
+    private data class TcpResult(val host: String, val socket: Socket?, val error: Throwable?, val reverse: Boolean = false)
 
-    /** Races [candidates] at the TCP layer. Returns the winner or throws [ConnectFailure] (phase TCP). */
-    private fun connectTcp(): Pair<String, Socket> {
+    private data class TcpWinner(val host: String, val socket: Socket, val reverse: Boolean)
+
+    /**
+     * Races [candidates] at the TCP layer, plus (with [inbound]) a socket the
+     * computer opens to this phone. Returns the winner or throws
+     * [ConnectFailure] (phase TCP).
+     */
+    private fun connectTcp(): TcpWinner {
         val results = java.util.concurrent.LinkedBlockingQueue<TcpResult>()
         val failures = ArrayList<EndpointAttempt>()
+        val raceDone = java.util.concurrent.atomic.AtomicBoolean(false)
         var started = 0
         var finished = 0
+        var forwardDoneAt = 0L
+        var inboundPending = false
+        var reverseNote: String? = null
         val register: (Socket) -> Unit = { s ->
             inFlight.add(s)
             if (closed) runCatching { s.close() }
@@ -121,48 +144,81 @@ class WebSocketClient(
                 }
             }, "airbridge-dial-$host").apply { isDaemon = true; start() }
         }
+        val source = inbound
+        if (source != null) {
+            inboundPending = true
+            Thread({
+                try {
+                    val s = source.await(connectTimeoutMs.toLong() + reverseGraceMs + 1_000, { closed || raceDone.get() }, register)
+                    if (s == null) results.put(TcpResult("", null, NoInboundConnection(), reverse = true))
+                    else results.put(TcpResult(ReverseListener.normalizeHost(s.inetAddress.hostAddress), s, null, reverse = true))
+                } catch (e: Throwable) {
+                    results.put(TcpResult("", null, e, reverse = true))
+                }
+            }, "airbridge-inbound").apply { isDaemon = true; start() }
+        }
+        fun allFailed(last: Throwable?): Nothing {
+            raceDone.set(true)
+            attempts = failures.toList()
+            val kind = summarize(failures)
+            val reverse = if (source != null) "; computer→phone: ${reverseNote ?: "no connection"}" else ""
+            throw ConnectFailure(
+                ConnectPhase.TCP, kind, primaryHost, failures.toList(),
+                failures.joinToString("; ") { "${it.host}:${it.port} ${it.kind.name.lowercase()}" + (it.routeSource?.let { r -> " via $r" } ?: "") } + reverse,
+                last,
+            )
+        }
         startNext()
+        var lastError: Throwable? = null
         while (true) {
             if (closed) {
+                raceDone.set(true)
                 inFlight.forEach { runCatching { it.close() } }
                 throw ConnectFailure(ConnectPhase.TCP, FailureKind.CANCELLED, primaryHost, failures, "Socket closed during connect")
             }
-            val waitMs = if (started < candidates.size) staggerMs else connectTimeoutMs.toLong() + 1_000
+            val forwardDone = finished == candidates.size
+            val waitMs = when {
+                started < candidates.size -> staggerMs
+                !forwardDone -> connectTimeoutMs.toLong() + 1_000
+                // Only the reverse path is left: a short grace for the computer to dial in.
+                else -> maxOf(0L, forwardDoneAt + reverseGraceMs - System.currentTimeMillis())
+            }
             val result = results.poll(waitMs, java.util.concurrent.TimeUnit.MILLISECONDS)
             if (result == null) {
                 if (started < candidates.size) startNext()
+                else if (forwardDone && inboundPending) allFailed(lastError)
                 continue
             }
             if (result.socket != null && !closed) {
-                // Winner: abort every other in-flight dial.
+                raceDone.set(true)
+                // Winner: abort every other in-flight dial / queued inbound socket.
                 for (other in inFlight) if (other !== result.socket) runCatching { other.close() }
                 inFlight.clear()
                 // A later success that loses the race must be closed too.
                 Thread({
-                    repeat(candidates.size) {
-                        val late = results.poll(connectTimeoutMs.toLong() + 1_000, java.util.concurrent.TimeUnit.MILLISECONDS) ?: return@Thread
+                    repeat(candidates.size + 1) {
+                        val late = results.poll(connectTimeoutMs.toLong() + reverseGraceMs + 2_000, java.util.concurrent.TimeUnit.MILLISECONDS) ?: return@Thread
                         late.socket?.let { runCatching { it.close() } }
                     }
                 }, "airbridge-dial-reaper").apply { isDaemon = true; start() }
                 attempts = failures.toList()
-                return result.host to result.socket
+                return TcpWinner(result.host, result.socket, result.reverse)
             }
             result.socket?.let { runCatching { it.close() } }
-            val error = result.error ?: IOException("Socket closed during connect")
-            val kind = ConnectionHelp.classify(error, ConnectPhase.TCP, closedLocally = closed)
-            val route = if (kind == FailureKind.TCP_TIMEOUT || kind == FailureKind.NO_ROUTE) routeProbe(result.host, port) else null
-            failures += EndpointAttempt(result.host, port, kind, error.message ?: error.javaClass.simpleName, route)
-            finished++
-            if (finished == candidates.size) {
-                attempts = failures.toList()
-                val kind = summarize(failures)
-                throw ConnectFailure(
-                    ConnectPhase.TCP, kind, primaryHost, failures.toList(),
-                    failures.joinToString("; ") { "${it.host}:${it.port} ${it.kind.name.lowercase()}" + (it.routeSource?.let { r -> " via $r" } ?: "") },
-                    result.error,
-                )
+            if (result.reverse) {
+                inboundPending = false
+                if (result.error !is NoInboundConnection) reverseNote = result.error?.message
+            } else {
+                val error = result.error ?: IOException("Socket closed during connect")
+                lastError = error
+                val kind = ConnectionHelp.classify(error, ConnectPhase.TCP, closedLocally = closed)
+                val route = if (kind == FailureKind.TCP_TIMEOUT || kind == FailureKind.NO_ROUTE) routeProbe(result.host, port) else null
+                failures += EndpointAttempt(result.host, port, kind, error.message ?: error.javaClass.simpleName, route)
+                finished++
+                if (finished == candidates.size) forwardDoneAt = System.currentTimeMillis()
+                if (started < candidates.size) startNext()
             }
-            if (started < candidates.size) startNext()
+            if (finished == candidates.size && !inboundPending) allFailed(lastError)
         }
     }
 
@@ -185,9 +241,12 @@ class WebSocketClient(
         if (closed) throw ConnectFailure(ConnectPhase.TCP, FailureKind.CANCELLED, primaryHost, emptyList(), "Socket already closed")
         var phase = ConnectPhase.TCP
         var host = primaryHost
+        var viaReverse = false
         try {
-            val (winner, plain) = connectTcp()
+            val (winner, plain, reverse) = connectTcp()
             host = winner
+            viaReverse = reverse
+            connectedViaReverse = reverse
             phase = ConnectPhase.TLS
             val raw: Socket = if (secure) {
                 val ctx = SSLContext.getInstance("TLS")
@@ -263,6 +322,9 @@ class WebSocketClient(
             isOpen = true
         } catch (e: Exception) {
             val cancelled = closed
+            // A dialled-in peer that fails TLS is not our computer: stop
+            // accepting it for a while so it can't starve the real one.
+            if (viaReverse && phase != ConnectPhase.TCP && !cancelled) inbound?.reject(host)
             closeInternal(1006, e.message ?: "Connect failed", notify = true)
             if (e is ConnectFailure) throw e
             val kind = ConnectionHelp.classify(e, phase, closedLocally = cancelled)

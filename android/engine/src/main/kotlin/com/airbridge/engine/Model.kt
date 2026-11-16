@@ -197,6 +197,10 @@ interface EngineListener {
     fun onConnectionFailure(diagnosis: ConnectionDiagnosis) {}
     /** TLS + WebSocket established to this candidate address. */
     fun onEndpointConnected(host: String) {}
+    /** Like [onEndpointConnected]; [viaReverse] = the computer opened the connection to this phone. */
+    fun onEndpointConnected(host: String, viaReverse: Boolean) { onEndpointConnected(host) }
+    /** A connection attempt to [hosts] (ranked, first is preferred) has started. */
+    fun onConnectAttempt(hosts: List<String>) {}
     /** The computer reported new reachable addresses (`network` message). */
     fun onLanUrlsChanged(lanUrls: List<String>) {}
 }

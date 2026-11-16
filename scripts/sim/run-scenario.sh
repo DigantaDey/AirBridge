@@ -19,7 +19,7 @@ mkdir -p "$PROBE"
 trap 'sudo scripts/sim/hotspot-netns.sh down >/dev/null 2>&1 || true' EXIT
 sudo scripts/sim/hotspot-netns.sh up "$SCENARIO"
 rm -f /tmp/airbridge-sim/qr.txt
-sudo ip netns exec abmac sudo -u "$USER" env PATH="$PATH" HOME="$HOME" timeout 60 npx tsx scripts/sim/hotspot-host.mts &
+sudo ip netns exec abmac sudo -u "$USER" env PATH="$PATH" HOME="$HOME" AIRBRIDGE_SIM_REVERSE="${AIRBRIDGE_SIM_REVERSE:-1}" timeout 60 npx tsx scripts/sim/hotspot-host.mts &
 for _ in $(seq 1 80); do [[ -s /tmp/airbridge-sim/qr.txt ]] && break; sleep 0.5; done
 echo "--- phone (netns abphone)"
 sudo ip netns exec abphone sudo -u "$USER" "$JAVA" -cp "$PROBE:$(realpath "$ENGINE_CLASSES"):$STDLIB" HotspotProbeKt "$(cat /tmp/airbridge-sim/qr.txt)" || true

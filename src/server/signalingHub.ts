@@ -6,6 +6,7 @@ import {
   type ClientToServerMessage,
   type DeviceProfile,
   type LanEndpoint,
+  type HostFirewallStatus,
   type LocalDaemonStatus,
   type PeerSummary,
   type ServerToClientMessage,
@@ -20,6 +21,7 @@ import {
 } from '../shared/protocol.js';
 import { HostClipboardMonitor, type HostClipboardProvider } from './hostClipboard.js';
 import { isLoopbackAddress } from './tls.js';
+import { isReversePeer } from './reverseConnect.js';
 
 interface ConnectedClient {
   peerId: string;
@@ -32,6 +34,12 @@ interface ConnectedClient {
   connectedAt: number;
   isAlive: boolean;
   joinPairAttempts: number[];
+  /** Normalized IPv4 of the peer socket (dialled-in phones included). */
+  remoteAddress: string;
+}
+
+function normalizeRemote(address: string | undefined): string {
+  return (address ?? '').replace(/^::ffff:/, '');
 }
 
 function deriveNetworkKey(req: IncomingMessage): string {
@@ -151,6 +159,8 @@ export class SignalingHub {
   private backgroundClipboardSink: ((text: string) => void) | null = null;
   private getLanUrls: () => string[];
   private getLanEndpoints: () => LanEndpoint[];
+  private getHostFirewall: () => HostFirewallStatus | null;
+  private readonly recentRemotes = new Map<string, number>();
   private getTlsPin: () => string | null;
   private getDaemonStatus: () => LocalDaemonStatus;
   private onHostPairCodeChange?: (pairCode: string) => void;
@@ -159,6 +169,7 @@ export class SignalingHub {
     getLanUrls: () => string[];
     /** Detailed form of getLanUrls (same order). Defaults to URL-only entries. */
     getLanEndpoints?: () => LanEndpoint[];
+    getHostFirewall?: () => HostFirewallStatus | null;
     getTlsPin?: () => string | null;
     getDaemonStatus: () => LocalDaemonStatus;
     clipboardProvider?: HostClipboardProvider | null;
@@ -166,6 +177,7 @@ export class SignalingHub {
     onHostPairCodeChange?: (pairCode: string) => void;
   }) {
     this.getLanUrls = opts.getLanUrls;
+    this.getHostFirewall = opts.getHostFirewall ?? (() => null);
     this.getLanEndpoints =
       opts.getLanEndpoints ??
       (() =>
@@ -350,7 +362,8 @@ export class SignalingHub {
 
   private handleConnection(ws: WebSocket, req: IncomingMessage): void {
     const networkKey = deriveNetworkKey(req);
-    const isLoopback = isLocalMachineAddress(req.socket.remoteAddress);
+    // A phone this server dialled (reverse connection) is never "this machine".
+    const isLoopback = !isReversePeer(req.socket) && isLocalMachineAddress(req.socket.remoteAddress);
     let registeredClient: ConnectedClient | null = null;
     // Count even sockets which have not sent hello; otherwise an idle client
     // can bypass both limits and retain unbounded upgraded connections.
@@ -434,7 +447,13 @@ export class SignalingHub {
           connectedAt: Date.now(),
           isAlive: true,
           joinPairAttempts: [],
+          remoteAddress: normalizeRemote(req.socket.remoteAddress),
         };
+        // Only phone apps run the reverse listener; remember where they were.
+        if (!isLoopback && registeredClient.remoteAddress && device.platform === 'android') {
+          this.recentRemotes.set(registeredClient.remoteAddress, Date.now());
+          if (this.recentRemotes.size > 32) this.recentRemotes.delete(this.recentRemotes.keys().next().value!);
+        }
 
         this.clients.set(peerId, registeredClient);
         this.syncClipboardWatchState();
@@ -449,6 +468,7 @@ export class SignalingHub {
           lanUrls: this.getLanUrls(),
           lanEndpoints: this.getLanEndpoints(),
           tlsPin: this.getTlsPin(),
+          hostFirewall: this.getHostFirewall(),
           localDaemon: this.resolveClientDaemonStatus(registeredClient),
           peers: this.computeVisiblePeers(registeredClient),
         });
@@ -726,12 +746,28 @@ export class SignalingHub {
    * changed, so an open pairing QR is regenerated and phones learn the new
    * endpoint before their current path disappears.
    */
+  /** A registered, open client is connected from this address. */
+  hasClientFrom(address: string): boolean {
+    const want = normalizeRemote(address);
+    for (const client of this.clients.values()) {
+      if (client.remoteAddress === want && client.ws.readyState === WebSocket.OPEN) return true;
+    }
+    return false;
+  }
+
+  /** Non-loopback addresses peers connected from within [maxAgeMs] (reverse-dial candidates). */
+  recentRemoteAddresses(maxAgeMs = 24 * 60 * 60 * 1000): string[] {
+    const cutoff = Date.now() - maxAgeMs;
+    return [...this.recentRemotes].filter(([, at]) => at >= cutoff).map(([address]) => address);
+  }
+
   broadcastNetworkUpdate(): void {
     const msg: ServerToClientMessage = {
       type: 'network',
       lanUrls: this.getLanUrls(),
       lanEndpoints: this.getLanEndpoints(),
       tlsPin: this.getTlsPin(),
+      hostFirewall: this.getHostFirewall(),
     };
     for (const client of this.clients.values()) this.sendJson(client.ws, msg);
   }

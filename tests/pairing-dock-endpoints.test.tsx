@@ -108,3 +108,43 @@ describe("WarpClient network updates", () => {
     client.stop();
   });
 });
+
+describe("PairingDock firewall notice (single hotspot address, phone times out)", () => {
+  it("renders the block notice with the unblock command, and nothing once allowed", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (app: "blocked" | "allowed") =>
+      act(async () => {
+        root.render(
+          <PairingDock
+            pairCode="ABC234"
+            lanUrls={["https://10.205.95.167:3000"]}
+            tlsPin={PIN}
+            hostFirewall={{ enabled: true, blockAll: false, stealth: true, app, appPath: "/Applications/AirBridge" }}
+            transfers={[]}
+            clipboardItems={[]}
+            onJoinPairCode={() => {}}
+            onRotatePairCode={() => {}}
+            onCancelTransfer={() => {}}
+          />,
+        );
+      });
+    try {
+      await render("blocked");
+      const notice = container.querySelector('[data-testid="firewall-notice"]');
+      expect(notice?.getAttribute("role")).toBe("alert");
+      expect(notice?.textContent).toContain("macOS Firewall is blocking AirBridge");
+      expect(notice?.querySelector("code")?.textContent).toBe(
+        'sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "/Applications/AirBridge" --unblockapp "/Applications/AirBridge"',
+      );
+      // Single address: no multi-network chooser.
+      expect(container.querySelector('[data-testid="pairing-endpoints"]')).toBeNull();
+      await render("allowed");
+      expect(container.querySelector('[data-testid="firewall-notice"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+});

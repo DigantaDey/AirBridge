@@ -195,6 +195,25 @@ export interface LanEndpoint {
   kind: 'wifi' | 'ethernet' | 'tether' | 'other';
 }
 
+/**
+ * TCP port the AirBridge phone app listens on for *reverse* connections (the
+ * computer dials the phone when phone → computer is blocked). Must match
+ * ReverseListener.DEFAULT_PORT in the Android engine.
+ */
+export const REVERSE_CONNECT_PORT = 47390;
+
+/** macOS Application Firewall state of the computer (null/absent elsewhere or unknown). */
+export interface HostFirewallStatus {
+  enabled: boolean;
+  /** "Block all incoming connections": no phone can reach AirBridge. */
+  blockAll: boolean;
+  stealth: boolean;
+  /** Firewall verdict for the running AirBridge binary. */
+  app: 'allowed' | 'blocked' | 'not-listed' | 'unknown';
+  /** Path of the running binary (for the unblock command). */
+  appPath: string;
+}
+
 export type ServerToClientMessage =
   | {
       type: 'welcome';
@@ -205,6 +224,7 @@ export type ServerToClientMessage =
       lanEndpoints?: LanEndpoint[];
       /** base64url SHA-256 of the TLS chain anchor, for the QR `ca=` pin. */
       tlsPin?: string | null;
+      hostFirewall?: HostFirewallStatus | null;
       localDaemon: LocalDaemonStatus;
       peers: PeerSummary[];
     }
@@ -214,6 +234,7 @@ export type ServerToClientMessage =
       lanUrls: string[];
       lanEndpoints: LanEndpoint[];
       tlsPin: string | null;
+      hostFirewall?: HostFirewallStatus | null;
     }
   | {
       type: 'pair-updated';

@@ -22,7 +22,7 @@ import {
   formatPairCode,
   normalizePairCode,
 } from "../../shared/protocol.js";
-import type { LanEndpoint } from "../../shared/protocol.js";
+import type { HostFirewallStatus, LanEndpoint } from "../../shared/protocol.js";
 import type {
   ClipboardBeamItem,
   TransferSessionView,
@@ -44,6 +44,8 @@ interface PairingDockProps {
   lanEndpoints?: LanEndpoint[];
   /** TLS anchor pin; added to the QR as `ca=` so the scan authenticates TLS. */
   tlsPin?: string | null;
+  /** macOS Application Firewall state; a blocking firewall looks like a network timeout on the phone. */
+  hostFirewall?: HostFirewallStatus | null;
   transfers: TransferSessionView[];
   clipboardItems: ClipboardBeamItem[];
   onJoinPairCode: (code: string) => void;
@@ -57,6 +59,7 @@ export function PairingDock({
   lanUrls,
   lanEndpoints,
   tlsPin,
+  hostFirewall,
   transfers,
   clipboardItems,
   onJoinPairCode,
@@ -263,6 +266,8 @@ export function PairingDock({
                 </div>
               </div>
             )}
+
+            <FirewallNotice status={hostFirewall} />
 
             {/* Join Existing Room Input */}
             <form
@@ -596,5 +601,62 @@ export function PairingDock({
         )}
       </div>
     </aside>
+  );
+}
+
+/**
+ * A phone on this computer's own network (e.g. its hotspot) whose connection
+ * times out is, in practice, the macOS Application Firewall dropping it. The
+ * phone can't tell that apart from a wrong network, so say it here.
+ */
+export function firewallNotice(status: HostFirewallStatus | null | undefined): {
+  severity: "block" | "warn";
+  text: string;
+  command?: string;
+} | null {
+  if (!status || !status.enabled) return null;
+  const quoted = `"${status.appPath.replace(/"/g, '\\"')}"`;
+  const unblock = `sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add ${quoted} --unblockapp ${quoted}`;
+  if (status.blockAll) {
+    return {
+      severity: "block",
+      text: "macOS Firewall is blocking all incoming connections, so phones can't reach AirBridge. Turn off \u201cBlock all incoming connections\u201d in System Settings \u2192 Network \u2192 Firewall \u2192 Options.",
+    };
+  }
+  if (status.app === "blocked") {
+    return {
+      severity: "block",
+      text: "macOS Firewall is blocking AirBridge, so phones time out. In System Settings \u2192 Network \u2192 Firewall \u2192 Options set AirBridge to \u201cAllow incoming connections\u201d, or run:",
+      command: unblock,
+    };
+  }
+  if (status.app === "allowed") return null;
+  return {
+    severity: "warn",
+    text: "macOS Firewall is on and hasn't approved this AirBridge build (each update needs approval again). If your phone shows \u201cnot reachable\u201d, allow incoming connections for AirBridge in System Settings \u2192 Network \u2192 Firewall \u2192 Options, or run:",
+    command: unblock,
+  };
+}
+
+function FirewallNotice({ status }: { status: HostFirewallStatus | null | undefined }) {
+  const notice = firewallNotice(status);
+  if (!notice) return null;
+  return (
+    <div
+      role={notice.severity === "block" ? "alert" : "note"}
+      data-testid="firewall-notice"
+      className={`mt-2 rounded-xl border px-2.5 py-2 text-[10px] leading-snug ${
+        notice.severity === "block"
+          ? "border-red-500/50 text-red-500"
+          : "border-amber-500/50 text-amber-600 dark:text-amber-400"
+      }`}
+    >
+      <p>{notice.text}</p>
+      {notice.command && (
+        <code className="mt-1 block break-all select-all font-mono-tabular text-[var(--ab-text)]">
+          {notice.command}
+        </code>
+      )}
+    </div>
   );
 }

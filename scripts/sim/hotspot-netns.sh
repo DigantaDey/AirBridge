@@ -19,6 +19,8 @@
 #   hotspot-only  Mac en0 = 10.205.95.167/24 *is* on the phone's hotspot.
 #   firewall      like hotspot-only, but the Mac drops inbound TCP/3000 on en0
 #                 (models the macOS application firewall in stealth mode).
+#                 Connects via the reverse path (the Mac dials the phone, its
+#                 default gateway); AIRBRIDGE_SIM_REVERSE=0 shows the old failure.
 #
 # Requires root (ip netns). Not run in CI. End-to-end probe (real server +
 # real Android engine): scripts/sim/run-scenario.sh <scenario>.
