@@ -110,6 +110,35 @@ fun main() {
     check("insecure scheme", !PairingLink.parse("http://192.168.1.5:3411")!!.secure, "secure flag")
 
     check("default signalling port", defaultPort.wsUrl == "wss://airbridge.local:3000/ws", defaultPort.wsUrl)
+
+    // QR connect persists only the base URL and stages the invitation separately.
+    // A staged scan must win over stale saved data and be consumed only once.
+    check(
+        "scanned QR code overrides stale saved code",
+        PairingCodeBootstrap.resolve("NEW234", null, "OLD567") == "NEW234",
+    )
+    check(
+        "embedded invitation overrides saved code",
+        PairingCodeBootstrap.resolve(null, "QR2345", "OLD567") == "QR2345",
+    )
+    check(
+        "saved code is reconnect fallback",
+        PairingCodeBootstrap.resolve(null, null, "OLD567") == "OLD567",
+    )
+    check(
+        "empty code remains empty",
+        PairingCodeBootstrap.resolve(null, null, null).isEmpty(),
+    )
+    check(
+        "network timeout explains same-Wi-Fi and fresh QR recovery",
+        ConnectionHelp.message("failed to connect to /10.0.0.4 after 10000ms").contains("same Wi-Fi") &&
+            ConnectionHelp.message("failed to connect to /10.0.0.4 after 10000ms").contains("current QR code"),
+    )
+    check(
+        "non-network errors stay specific and are bounded",
+        ConnectionHelp.message("UNTRUSTED_CERTIFICATE") == "UNTRUSTED_CERTIFICATE" &&
+            ConnectionHelp.message("x".repeat(500)).length == 320,
+    )
     check("explicit standard HTTPS port", PairingLink.parse("https://airbridge.local:443")!!.wsUrl == "wss://airbridge.local:443/ws")
 
     println("PairingLink: $passed passed, $failed failed")

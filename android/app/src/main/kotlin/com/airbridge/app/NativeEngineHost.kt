@@ -156,8 +156,16 @@ class NativeEngineHost(
         worker.execute {
             try {
                 val link = prefs.pairingLink() ?: return@execute
-                val targetPairCode = link.pairCode ?: prefs.pairCode
-                link.pairCode?.let { prefs.pairCode = it }
+                // connectWithLink stores the QR's code in pendingPairCode while
+                // persisting only baseUrl. Consume it before falling back to
+                // invitation/saved codes so a scan cannot silently use stale state.
+                val pendingScannedCode = prefs.consumePendingPairCode()
+                val targetPairCode = PairingCodeBootstrap.resolve(
+                    pendingScanned = pendingScannedCode,
+                    invitation = link.pairCode,
+                    saved = prefs.pairCode,
+                )
+                targetPairCode.takeIf { it.isNotBlank() }?.let { prefs.pairCode = it }
                 val created = AirBridgeEngine(
                     EngineConfig(
                         serverUrl = link.wsUrl,
@@ -224,7 +232,7 @@ class NativeEngineHost(
                         }
 
                         override fun onError(code: String, message: String) {
-                            if (code == "CONNECTION_FAILED") connectionError = message
+                            if (code == "CONNECTION_FAILED") connectionError = ConnectionHelp.message(message)
                             Log.w(TAG, "$code: $message")
                             refresh()
                         }
