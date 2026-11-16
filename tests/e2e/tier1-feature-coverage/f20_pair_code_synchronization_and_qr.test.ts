@@ -122,8 +122,11 @@ describe('F20: Strict Pair Code Synchronization, QR Link Parsing & Room Rotation
       await waitFor(() => phone1.getSnapshot().pairCode.length === 6, 'phone1 pair code length');
       await waitFor(() => phone2.getSnapshot().pairCode.length === 6, 'phone2 pair code length');
 
-      // Every remote device MUST start with a unique pair code
+      // Every remote device MUST start with a unique pair code, distinct from
+      // the host QR room. The server must guard against even random collisions.
       expect(phone1.getSnapshot().pairCode).not.toBe(phone2.getSnapshot().pairCode);
+      expect(phone1.getSnapshot().pairCode).not.toBe(hub.getDefaultPairCode());
+      expect(phone2.getSnapshot().pairCode).not.toBe(hub.getDefaultPairCode());
 
       phone1.setVisibility('paired-only');
       phone2.setVisibility('paired-only');

@@ -212,6 +212,21 @@ export class SignalingHub {
     if (isValidPairCode(code)) this.hostPairCode = code;
   }
 
+  /** Generate a room code that cannot accidentally merge unrelated active rooms. */
+  private generateUnusedPairCode(except?: string): string {
+    const occupied = new Set<string>([this.hostPairCode]);
+    for (const client of this.clients.values()) {
+      if (client.pairCode !== except) occupied.add(client.pairCode);
+    }
+    // With a 32^6 code space a collision is extraordinarily unlikely; bounded
+    // retries keep connection/rotation work predictable even under stress.
+    for (let attempt = 0; attempt < 64; attempt++) {
+      const candidate = generatePairCode(crypto.randomBytes(8));
+      if (!occupied.has(candidate)) return candidate;
+    }
+    throw new Error('Unable to allocate a unique pairing code');
+  }
+
   private rememberPairCode(peerId: string, pairCode: string): void {
     if (this.pairCodeByPeer.size >= 512) {
       const oldest = this.pairCodeByPeer.keys().next().value;
@@ -389,7 +404,7 @@ export class SignalingHub {
         } else if (this.isHostDesktopClient({ isLoopback, device } as ConnectedClient)) {
           pairCode = this.hostPairCode;
         } else {
-          pairCode = generatePairCode(crypto.randomBytes(8));
+          pairCode = this.generateUnusedPairCode();
         }
         this.rememberPairCode(peerId, pairCode);
 
@@ -478,7 +493,7 @@ export class SignalingHub {
 
         case 'rotate-pair': {
           const prevPairCode = registeredClient.pairCode;
-          const fresh = generatePairCode(crypto.randomBytes(8));
+          const fresh = this.generateUnusedPairCode(prevPairCode);
 
           if (this.isHostDesktopClient(registeredClient)) {
             this.hostPairCode = fresh;
