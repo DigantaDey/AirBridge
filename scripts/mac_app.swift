@@ -684,23 +684,46 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
         Bundle.main.bundleIdentifier != nil && Bundle.main.bundlePath.hasSuffix(".app")
     }
 
+    private var eventPort = ""
+
+    private func startEventStream(notifications: Bool) {
+        events?.stop()
+        // Without notification permission the service keeps using osascript.
+        let caps = notifications ? ["notification", "lifecycle"] : ["lifecycle"]
+        let stream = ShellEventStream(port: eventPort, capabilities: caps)
+        stream.onEvent = { [weak self] type, json in self?.handleServiceEvent(type, json) }
+        stream.start()
+        events = stream
+        supervisor.log("event stream started (\(caps.joined(separator: ",")))")
+    }
+
     private func setUpEventStream(port: String) {
-        let startStream: (Bool) -> Void = { [weak self] notificationsAllowed in
-            guard let self = self else { return }
-            // Without permission the service keeps using osascript for notifications.
-            let caps = notificationsAllowed ? ["notification", "lifecycle"] : ["lifecycle"]
-            let stream = ShellEventStream(port: port, capabilities: caps)
-            stream.onEvent = { [weak self] type, json in self?.handleServiceEvent(type, json) }
-            stream.start()
-            self.events = stream
-            self.supervisor.log("event stream started (\(caps.joined(separator: ",")))")
-        }
-        guard canUseUserNotifications else { startStream(false); return }
+        eventPort = port
+        // Lifecycle events (relaunch after an update) must never wait for the
+        // user to answer the notification prompt: subscribe right away.
+        startEventStream(notifications: false)
+        guard canUseUserNotifications else { return }
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error = error { self.supervisor.log("notifications unavailable: \(error.localizedDescription)") }
-            DispatchQueue.main.async { startStream(granted) }
+        let upgrade: () -> Void = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self = self, !self.relaunching else { return }
+                self.startEventStream(notifications: true)
+            }
+        }
+        center.getNotificationSettings { settings in
+            switch settings.authorizationStatus {
+            case .authorized, .provisional:
+                upgrade()
+            case .denied:
+                self.supervisor.log("notifications are turned off for AirBridge in System Settings; using osascript")
+            default:
+                // Completes only when the user answers the prompt (possibly much later).
+                center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+                    if let error = error { self.supervisor.log("notifications unavailable: \(error.localizedDescription)") }
+                    if granted { upgrade() }
+                }
+            }
         }
     }
 
