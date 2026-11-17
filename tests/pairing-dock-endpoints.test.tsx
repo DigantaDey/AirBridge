@@ -148,3 +148,55 @@ describe("PairingDock firewall notice (single hotspot address, phone times out)"
     }
   });
 });
+
+describe("PairingDock while the local service is unreachable", () => {
+  let root: Root | undefined;
+  let container: HTMLDivElement | undefined;
+
+  afterEach(async () => {
+    if (root) await act(async () => root!.unmount());
+    container?.remove();
+    root = undefined;
+    container = undefined;
+  });
+
+  async function copiedLink(): Promise<string> {
+    const writeText = vi.fn((_text: string) => Promise.resolve());
+    Object.assign(navigator, { clipboard: { writeText } });
+    const button = container!.querySelector<HTMLButtonElement>('button[title="Copy direct pairing URL"]')!;
+    await act(async () => button.click());
+    return writeText.mock.calls.at(-1)![0];
+  }
+
+  it("hides the QR and the copy link while the service is unreachable (never a stale code)", async () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const el = container;
+    const render = (connected: boolean) =>
+      root!.render(
+        <PairingDock
+          connected={connected}
+          pairCode="ABC234"
+          lanUrls={endpoints.map((e) => e.url)}
+          lanEndpoints={endpoints}
+          tlsPin={PIN}
+          transfers={[]}
+          clipboardItems={[]}
+          onJoinPairCode={() => {}}
+          onRotatePairCode={() => {}}
+          onCancelTransfer={() => {}}
+        />,
+      );
+    await act(async () => render(false));
+    expect(el.querySelector('[data-testid="pairing-qr-offline"]')?.textContent).toContain("Waiting for the AirBridge service");
+    const qrBox = el.querySelector('[data-testid="pairing-qr-offline"]')!.parentElement!;
+    expect(qrBox.querySelector("svg")).toBeNull();
+    const copy = el.querySelector<HTMLButtonElement>('button[title="Copy direct pairing URL"]');
+    expect(copy?.disabled ?? true).toBe(true);
+
+    await act(async () => render(true));
+    expect(el.querySelector('[data-testid="pairing-qr-offline"]')).toBeNull();
+    expect(await copiedLink()).toContain("pair=ABC234");
+  });
+});

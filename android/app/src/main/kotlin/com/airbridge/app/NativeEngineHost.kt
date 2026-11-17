@@ -61,6 +61,20 @@ class NativeEngineHost(
 ) : AutoCloseable {
     private val prefs = Prefs(context)
     private val reverseAdvertiser = ReverseAdvertiser(context)
+    // AirBridge computers on the current networks (serviceName -> host:port).
+    // Lets a paired computer be found again after its address changed — e.g.
+    // a hotspot restart picks a new subnet. Dialled only with a pinned identity.
+    private val discovered = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Int>>()
+    private val serverDiscovery = ServerDiscovery(
+        context,
+        onFound = { url, name ->
+            runCatching { java.net.URI(url) }.getOrNull()?.let { uri ->
+                val host = uri.host?.removePrefix("[")?.removeSuffix("]")
+                if (!host.isNullOrBlank() && uri.port > 0) discovered[name] = host to uri.port
+            }
+        },
+        onLost = { name -> discovered.remove(name) },
+    )
     private val configuredTarget = prefs.target
     private val worker = Executors.newSingleThreadExecutor { r ->
         Thread(r, "airbridge-native-commands").apply { isDaemon = true }
@@ -183,6 +197,9 @@ class NativeEngineHost(
                         // Primary + QR alternates + addresses the computer
                         // reported last time; ranked on-link-first per attempt.
                         endpointHosts = { prefs.invitations.candidateHosts() },
+                        // Same-port AirBridge computers seen via mDNS (engine
+                        // uses them only when the computer's TLS identity is pinned).
+                        discoveredHosts = { discovered.values.filter { it.second == link.port }.map { it.first } },
                     ),
                 )
                 created.autoClipboardSend = prefs.autoClipboard
@@ -288,6 +305,7 @@ class NativeEngineHost(
                     return@execute
                 }
                 created.start()
+                runCatching { serverDiscovery.start() }
                 created.reversePort?.let { port ->
                     val lan = runCatching {
                         com.airbridge.engine.LocalNetworks.snapshot().filter { it.isLan }.map { it.address }
@@ -519,6 +537,7 @@ class NativeEngineHost(
     override fun close() {
         closed = true
         reverseAdvertiser.stop()
+        runCatching { serverDiscovery.stop() }
         if (instance === this) instance = null
         engine?.stop()
         worker.shutdownNow()

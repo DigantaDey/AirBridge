@@ -121,4 +121,32 @@ describe('macOS installer', () => {
     env.PORT = 'abc';
     expect(install('--no-start').stderr).toContain('PORT must be');
   });
+
+  it('stops an old AirBridge server still holding the port (any install path), but nothing else', async () => {
+    const { spawn } = await import('node:child_process');
+    // Real processes: an "older AirBridge" from another location and an unrelated program.
+    const oldDir = path.join(root, 'old install');
+    fs.mkdirSync(oldDir);
+    const oldBin = path.join(oldDir, 'airbridge-legacy');
+    fs.writeFileSync(oldBin, '#!/bin/bash\nexec /bin/sleep 60\n', { mode: 0o755 });
+    const other = path.join(root, 'other-server');
+    fs.writeFileSync(other, '#!/bin/bash\nexec /bin/sleep 60\n', { mode: 0o755 });
+    const old = spawn('bash', ['-c', `exec -a "${oldBin} --port 3105" /bin/sleep 60`], { stdio: 'ignore' });
+    const foreign = spawn('bash', ['-c', 'exec -a "python3 -m http.server 3105" /bin/sleep 60'], { stdio: 'ignore' });
+    try {
+      await new Promise((r) => setTimeout(r, 200));
+      mock('lsof', `echo ${old.pid}; echo ${foreign.pid}`);
+      mock('pgrep', 'exit 1');
+      mock('launchctl', 'echo "$*" >> "$TEST_ROOT/launchctl"');
+      const result = install('--no-start');
+      expect(result.status, result.stderr).toBe(0);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(old.exitCode !== null || old.signalCode !== null).toBe(true);
+      expect(foreign.exitCode).toBeNull();
+      expect(foreign.signalCode).toBeNull();
+    } finally {
+      old.kill('SIGKILL');
+      foreign.kill('SIGKILL');
+    }
+  });
 });

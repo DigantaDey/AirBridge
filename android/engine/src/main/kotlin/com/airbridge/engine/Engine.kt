@@ -36,6 +36,14 @@ data class EngineConfig(
      * Null = only [serverUrl]'s host.
      */
     val endpointHosts: (() -> List<String>)? = null,
+    /**
+     * Addresses of AirBridge computers found by mDNS on the phone's current
+     * networks. They rescue a paired computer whose address changed (a phone
+     * hotspot gets a new subnet every time it is turned on, so every saved
+     * address goes stale). mDNS is unauthenticated, so they are only dialled
+     * with a pinned computer identity: an impostor fails the TLS pin.
+     */
+    val discoveredHosts: (() -> List<String>)? = null,
     /** This device's IPv4 addresses (hotspot downlink, Wi-Fi, cellular CLAT …). */
     val localNetworks: () -> List<LocalAddress> = { LocalNetworks.snapshot() },
     val connectTimeoutMs: Int = 10_000,
@@ -425,7 +433,12 @@ class AirBridgeEngine(private val config: EngineConfig) {
         val base = runCatching { java.net.URI(normalizeWsUrl(config.serverUrl)).host }.getOrNull()
             ?.removePrefix("[")?.removeSuffix("]")
         val supplied = runCatching { config.endpointHosts?.invoke() }.getOrNull().orEmpty()
-        val hosts = (supplied.ifEmpty { listOfNotNull(base) }).filter { it.isNotBlank() }.distinctBy { it.lowercase() }
+        val discovered = if (reverseAllowed()) {
+            runCatching { config.discoveredHosts?.invoke() }.getOrNull().orEmpty()
+                .filter { LocalNetworks.ipv4ToInt(it) != null && LocalNetworks.isLanAddress(it) }
+        } else emptyList()
+        val hosts = (supplied.ifEmpty { listOfNotNull(base) } + discovered)
+            .filter { it.isNotBlank() }.distinctBy { it.lowercase() }
         val locals = runCatching { config.localNetworks() }.getOrDefault(emptyList())
         return EndpointSelector.order(hosts, locals) to locals
     }

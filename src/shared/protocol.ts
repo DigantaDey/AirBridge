@@ -225,6 +225,12 @@ export type ServerToClientMessage =
       /** base64url SHA-256 of the TLS chain anchor, for the QR `ca=` pin. */
       tlsPin?: string | null;
       hostFirewall?: HostFirewallStatus | null;
+      /**
+       * Version of the server build. A page loaded from an older build (a
+       * long-running app window across an update) compares it with its own
+       * and reloads. Optional for older servers.
+       */
+      serverVersion?: string;
       localDaemon: LocalDaemonStatus;
       peers: PeerSummary[];
     }

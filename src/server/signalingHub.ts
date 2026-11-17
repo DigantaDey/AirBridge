@@ -162,6 +162,7 @@ export class SignalingHub {
   private getHostFirewall: () => HostFirewallStatus | null;
   private readonly recentRemotes = new Map<string, number>();
   private getTlsPin: () => string | null;
+  private readonly serverVersion: string | undefined;
   private getDaemonStatus: () => LocalDaemonStatus;
   private onHostPairCodeChange?: (pairCode: string) => void;
 
@@ -171,6 +172,8 @@ export class SignalingHub {
     getLanEndpoints?: () => LanEndpoint[];
     getHostFirewall?: () => HostFirewallStatus | null;
     getTlsPin?: () => string | null;
+    /** Build version, sent in welcome (stale UI pages reload on mismatch). */
+    serverVersion?: string;
     getDaemonStatus: () => LocalDaemonStatus;
     clipboardProvider?: HostClipboardProvider | null;
     clipboardPollMs?: number;
@@ -187,6 +190,7 @@ export class SignalingHub {
           return { url, address, interface: '', kind: 'other' as const };
         }));
     this.getTlsPin = opts.getTlsPin ?? (() => null);
+    this.serverVersion = opts.serverVersion;
     this.getDaemonStatus = opts.getDaemonStatus;
     this.onHostPairCodeChange = opts.onHostPairCodeChange;
     this.clipboardMonitor =
@@ -469,6 +473,7 @@ export class SignalingHub {
           lanEndpoints: this.getLanEndpoints(),
           tlsPin: this.getTlsPin(),
           hostFirewall: this.getHostFirewall(),
+          ...(this.serverVersion ? { serverVersion: this.serverVersion } : {}),
           localDaemon: this.resolveClientDaemonStatus(registeredClient),
           peers: this.computeVisiblePeers(registeredClient),
         });
