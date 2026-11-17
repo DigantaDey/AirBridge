@@ -19,6 +19,10 @@ import {
   FRAME_BINARY_SACK,
   FRAME_ENCRYPTED_CHUNK,
   formatPairCode,
+  isValidPairCode,
+  base64UrlToBytes,
+  bytesToBase64Url,
+  type Admission,
   isValidClipboardImageDataUrl,
   MAX_CLIPBOARD_IMAGE_DATAURL,
   normalizePairCode,
@@ -37,6 +41,25 @@ import {
   sha256Hex,
 } from './crypto.js';
 import { loadOrCreateDeviceId } from './deviceDetect.js';
+import {
+  type DeviceIdentity,
+  type IdentityStore,
+  indexedDbIdentityStore,
+  loadOrCreateDeviceIdentity,
+  verifyIdentityBinding,
+} from './identity.js';
+import {
+  HUB_SPAKE2_IDENTITY,
+  JOIN_PROTOCOL_VERSION,
+  JOIN_SPAKE2_AAD,
+  joinerSpake2Identity,
+  nameplateFor,
+  passwordScalar,
+  verifyHubProof,
+  verifyPeerVouch,
+  vouchKeyFrom,
+} from '../../shared/pairingProof.js';
+import { Spake2, constantTimeEqual } from '../../shared/spake2.js';
 import { hashStream, Sha256Stream } from './sha256Stream.js';
 
 export const CHUNK_SIZE = 1024 * 1024; // 1 MiB — 4× fewer frame/crypto/ACK round-trips than 256 KiB
@@ -221,11 +244,24 @@ export interface PeerSecurityInfo {
   fingerprintHex: string;
   rtcConnected: boolean;
   rttMs: number | null;
+  /**
+   * 'verified': the computer that knows the pairing code vouched for this
+   * device's keys. 'unverified': older device or hub — compare sasCode.
+   */
+  verification: 'verified' | 'unverified';
+  /** Proven long-term identity key, when the peer has one. */
+  identityKey?: string;
+  /** Key that "Trust device" pins: the identity key, else the session key (older peers). */
+  trustKey: string;
+  /** A device id we know presented a different identity key than before. */
+  identityChanged: boolean;
 }
 
 export interface WarpClientSnapshot {
   connectionState: 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
   connectionError?: string;
+  /** How the hub admitted this client ('pake' = code verified without revealing it). */
+  admission?: Admission | null;
   peerId: string;
   pairCode: string;
   formattedPairCode: string;
@@ -279,6 +315,16 @@ export interface WarpClientOptions {
   onIncomingClipboard?: (item: ClipboardBeamItem) => void;
   onOutgoingAutoClipboard?: (item: ClipboardBeamItem) => void;
   onTransferCompleted?: (transfer: TransferSessionView) => void;
+  /**
+   * Where the long-term device identity lives. Default: IndexedDB (browsers);
+   * null = in-memory only (tests). Headless peers pass a file-backed store.
+   */
+  identityStore?: IdentityStore | null;
+  /**
+   * 'auto' (default): prove the code with SPAKE2 unless the hub runs on this
+   * machine. 'pake'/'legacy' force a mode (tests, diagnostics).
+   */
+  joinMode?: 'auto' | 'pake' | 'legacy';
 }
 
 interface InternalReceiveState {
@@ -920,6 +966,20 @@ export class WarpClient {
   private clipboardItems: ClipboardBeamItem[] = [];
   private trustedPeerKeys = new Set<string>();
 
+  // Device identity & code-authenticated joining (see shared/pairingProof.ts)
+  private identity: DeviceIdentity | null = null;
+  private pakeParty: Spake2 | null = null;
+  private vouchKey: Uint8Array | null = null;
+  private admission: Admission | null = null;
+  /** Set when the hub rejected our code: stop reconnecting until the code changes. */
+  private pairingError: string | null = null;
+  private connectionNotice: string | null = null;
+  /** identityKey|sig|publicKey -> binding verified. */
+  private identityChecks = new Map<string, boolean>();
+  private identityPending = new Set<string>();
+  /** deviceId -> identity key first seen (or last trusted) for that device. */
+  private knownIdentities: Record<string, string> = {};
+
   // Automatic universal clipboard sync state
   private autoClipboardSync = true;
   private clipboardReceiveEnabled = true;
@@ -949,6 +1009,10 @@ export class WarpClient {
         } else if (storedPair) {
           this.pairCode = normalizePairCode(storedPair);
         }
+        try {
+          const known = JSON.parse(storage.getItem(`${this.storagePrefix}:knownIdentities`) || '{}') as Record<string, string>;
+          if (known && typeof known === 'object') this.knownIdentities = known;
+        } catch { /* ignore */ }
         const trustedRaw = storage.getItem(`${this.storagePrefix}:trustedKeys`);
         if (trustedRaw) {
           for (const k of JSON.parse(trustedRaw) as string[]) {
@@ -1014,6 +1078,14 @@ export class WarpClient {
   public async start(deviceFactory?: (publicKeyB64: string) => DeviceProfile): Promise<void> {
     this.destroyed = false;
     this.keys = await generateIdentityKeyPair();
+    try {
+      const store = this.opts.identityStore !== undefined ? this.opts.identityStore : indexedDbIdentityStore(this.storagePrefix);
+      this.identity = await loadOrCreateDeviceIdentity(store);
+    } catch {
+      this.identity = null; // WebCrypto without ECDSA: stay a legacy (unverifiable) peer
+    }
+    const identitySig = this.identity ? await this.identity.signBinding(this.keys.publicKeyB64).catch(() => null) : null;
+    const identityFields = this.identity && identitySig ? { identityKey: this.identity.publicKeyB64, identitySig } : {};
     // Cleanup can run while WebCrypto is pending (e.g. StrictMode replay).
     // A stopped client must not open a socket or install a heartbeat.
     if (this.destroyed) return;
@@ -1026,12 +1098,14 @@ export class WarpClient {
         deviceId: fallbackDeviceId,
         ...this.opts.deviceOverride,
         publicKey: this.keys.publicKeyB64,
+        ...identityFields,
       };
     } else if (deviceFactory) {
       const profile = deviceFactory(this.keys.publicKeyB64);
       this.myDevice = {
         deviceId: fallbackDeviceId,
         ...profile,
+        ...(profile.publicKey === this.keys.publicKeyB64 ? identityFields : {}),
       };
     } else {
       this.myDevice = {
@@ -1041,6 +1115,7 @@ export class WarpClient {
         formFactor: 'laptop',
         publicKey: this.keys.publicKeyB64,
         deviceId: fallbackDeviceId,
+        ...identityFields,
       };
     }
 
@@ -1127,16 +1202,24 @@ export class WarpClient {
     for (const peer of this.peers) {
       const crypto = this.cryptoSessions.get(peer.peerId);
       const dc = this.rtcChannels.get(peer.peerId);
+      const identityKey = this.provenIdentity(peer);
+      const known = peer.device?.deviceId ? this.knownIdentities[peer.device.deviceId] : undefined;
       peerSecurity[peer.peerId] = {
         sasCode: crypto?.sasCode ?? '··· ···',
         fingerprintHex: crypto?.fingerprintHex ?? '',
         rtcConnected: dc?.readyState === 'open',
         rttMs: this.peerRttMs.get(peer.peerId) ?? null,
+        verification: this.peerVerification(peer) === 'verified' ? 'verified' : 'unverified',
+        identityKey,
+        trustKey: identityKey ?? peer.device?.publicKey,
+        identityChanged: Boolean(identityKey && known && known !== identityKey),
       };
     }
 
     return {
       connectionState: this.connectionState,
+      connectionError: this.pairingError ?? this.connectionNotice ?? undefined,
+      admission: this.admission,
       peerId: this.peerId,
       pairCode: this.pairCode,
       formattedPairCode: formatPairCode(this.pairCode),
@@ -1226,7 +1309,14 @@ export class WarpClient {
     if (clean.length !== 6) return;
     this.pairCode = clean;
     this.persistPairCode(clean);
-    this.sendServer({ type: 'join-pair', pairCode: clean });
+    this.pairingError = null;
+    if (this.admission === 'host' || this.admission === 'pake') {
+      // The hub is this computer, or already proved it knows a code: it may
+      // see the new one. It still never travels to an unauthenticated hub.
+      this.sendServer({ type: 'join-pair', pairCode: clean });
+    } else {
+      this.reconnectNow();
+    }
     this.emit();
   }
 
@@ -1235,10 +1325,19 @@ export class WarpClient {
   }
 
   public toggleTrustedPeer(publicKey: string, trusted: boolean): void {
+    // Accept either key of a connected peer and pin its proven identity.
+    const peer = this.peers.find((p) => p.device.publicKey === publicKey || p.device.identityKey === publicKey);
+    const key = peer ? this.trustKeyFor(peer) : publicKey;
     if (trusted) {
-      this.trustedPeerKeys.add(publicKey);
+      this.trustedPeerKeys.add(key);
+      const identity = peer ? this.provenIdentity(peer) : undefined;
+      if (peer?.device.deviceId && identity) {
+        this.knownIdentities[peer.device.deviceId] = identity;
+        this.persistKnownIdentities();
+      }
     } else {
-      this.trustedPeerKeys.delete(publicKey);
+      this.trustedPeerKeys.delete(key);
+      if (peer) this.trustedPeerKeys.delete(peer.device.publicKey);
     }
     try {
       const storage = this.storage;
@@ -2522,13 +2621,36 @@ export class WarpClient {
 
     ws.onopen = () => {
       if (this.destroyed || this.ws !== ws || !this.myDevice) return;
-      this.sendServer({
-        type: 'hello',
-        peerId: this.peerId,
-        device: this.myDevice,
-        pairCode: this.pairCode || undefined,
-        visibility: this.visibility,
-      });
+      this.vouchKey = null;
+      this.admission = null;
+      this.pakeParty = null;
+      const joinMode = this.opts.joinMode ?? 'auto';
+      const usePake = joinMode === 'pake' || (joinMode === 'auto' && !this.hubIsThisMachine(url));
+      if (isValidPairCode(this.pairCode) && usePake) {
+        // Prove the code without sending it (SPAKE2, shared/pairingProof.ts).
+        this.pakeParty = new Spake2(
+          'A',
+          passwordScalar(this.pairCode),
+          joinerSpake2Identity(this.myDevice.publicKey, this.myDevice.identityKey),
+          HUB_SPAKE2_IDENTITY,
+          JOIN_SPAKE2_AAD,
+        );
+        this.sendServer({
+          type: 'hello',
+          peerId: this.peerId,
+          device: this.myDevice,
+          visibility: this.visibility,
+          pake: { v: JOIN_PROTOCOL_VERSION, nameplate: nameplateFor(this.pairCode), share: bytesToBase64Url(this.pakeParty.share()) },
+        });
+      } else {
+        this.sendServer({
+          type: 'hello',
+          peerId: this.peerId,
+          device: this.myDevice,
+          pairCode: this.pairCode || undefined,
+          visibility: this.visibility,
+        });
+      }
       this.emit();
     };
 
@@ -2579,8 +2701,14 @@ export class WarpClient {
           wake({ verified: false, reason: 'Connection lost while confirming transfer.' });
         }
       }
+      this.vouchKey = null;
+      this.admission = null;
+      this.pakeParty = null;
       this.emit();
-      this.reconnectTimer = setTimeout(() => this.connectWebSocket(), 1_500);
+      // A rejected code would only be rejected again (and count as another guess).
+      if (this.pairingError) { this.connectionState = 'disconnected'; this.emit(); return; }
+      this.reconnectTimer = setTimeout(() => this.connectWebSocket(), this.reconnectDelayMs);
+      this.reconnectDelayMs = 1_500;
     };
 
     ws.onerror = () => {
@@ -2590,7 +2718,37 @@ export class WarpClient {
 
   private handleServerMessage(msg: ServerToClientMessage): void {
     switch (msg.type) {
+      case 'pake-challenge': {
+        const party = this.pakeParty;
+        this.pakeParty = null;
+        if (!party) { this.ws?.close(); break; }
+        let ok = false;
+        let ke: Uint8Array | null = null;
+        try {
+          const result = party.finish(base64UrlToBytes(msg.share));
+          ok = constantTimeEqual(result.expectedPeerConfirm, base64UrlToBytes(msg.confirm));
+          if (ok) {
+            ke = result.ke;
+            this.sendServer({ type: 'pake-confirm', confirm: bytesToBase64Url(result.confirm) });
+          }
+        } catch {
+          ok = false;
+        }
+        if (!ok || !ke) {
+          this.failPairing("This computer doesn't know that pairing code. Check the code on its screen and enter it again.");
+          break;
+        }
+        this.vouchKey = vouchKeyFrom(ke);
+        break;
+      }
+
       case 'welcome': {
+        if (this.vouchKey && !verifyHubProof(this.vouchKey, { peerId: msg.peerId, pairCode: msg.pairCode, tlsPin: msg.tlsPin }, msg.hubProof)) {
+          this.failPairing('Could not verify this computer: the connection may have been tampered with.');
+          break;
+        }
+        this.admission = msg.admission ?? (this.vouchKey ? 'pake' : 'legacy');
+        this.connectionNotice = null;
         this.connectionState = 'connected';
         this.serverVersion = msg.serverVersion ?? null;
         this.peerId = msg.peerId;
@@ -2656,13 +2814,132 @@ export class WarpClient {
       }
 
       case 'error': {
+        if (msg.code === 'PAIR_CODE_MISMATCH') {
+          this.failPairing("This computer doesn't know that pairing code. Check the code on its screen and enter it again.");
+        } else if (msg.code === 'RATE_LIMITED') {
+          this.connectionNotice = msg.message;
+          this.reconnectDelayMs = 60_000;
+          this.emit();
+        }
         break;
       }
     }
   }
 
-  private syncPeers(nextPeers: PeerSummary[]): void {
+  private reconnectDelayMs = 1_500;
+
+  /** The page talks to the AirBridge service on this same machine. */
+  private hubIsThisMachine(url: string): boolean {
+    try {
+      const host = new URL(url).hostname.replace(/^\[|\]$/g, '');
+      return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+    } catch {
+      return false;
+    }
+  }
+
+  private failPairing(message: string): void {
+    this.pairingError = message;
+    this.vouchKey = null;
+    this.connectionState = 'disconnected';
+    this.emit();
+    try { this.ws?.close(4001, 'pairing failed'); } catch { /* ignore */ }
+  }
+
+  private reconnectNow(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    const ws = this.ws;
+    if (ws && ws.readyState !== WebSocket.CLOSED) {
+      try { ws.close(4000, 'pairing code changed'); } catch { /* ignore */ }
+    } else {
+      this.connectWebSocket();
+    }
+  }
+
+  /**
+   * Did the hub that knows the pairing code vouch for this peer's keys?
+   * 'forged': the vouch is present but wrong — the entry was altered in
+   * transit, so the peer is dropped entirely.
+   */
+  private peerVerification(peer: PeerSummary): 'verified' | 'unverified' | 'forged' {
+    const attestation = peer.attestation;
+    const admitted = attestation === 'pake' || attestation === 'host';
+    if (this.vouchKey && this.admission === 'pake') {
+      if (peer.vouch === undefined) return 'unverified';
+      const ok = verifyPeerVouch(this.vouchKey, {
+        peerId: peer.peerId,
+        publicKey: peer.device?.publicKey,
+        identityKey: peer.device?.identityKey,
+        attestation: attestation ?? 'legacy',
+      }, peer.vouch);
+      if (!ok) return 'forged';
+      return admitted ? 'verified' : 'unverified';
+    }
+    if (this.admission === 'host') return admitted ? 'verified' : 'unverified';
+    return 'unverified';
+  }
+
+  private identityCacheKey(peer: PeerSummary): string | null {
+    const { identityKey, identitySig, publicKey } = peer.device ?? ({} as Partial<DeviceProfile>);
+    return identityKey && identitySig ? `${identityKey}|${identitySig}|${publicKey}` : null;
+  }
+
+  /** The peer's identity key once its signature over the session key checked out. */
+  private provenIdentity(peer: PeerSummary): string | undefined {
+    const key = this.identityCacheKey(peer);
+    return key && this.identityChecks.get(key) === true ? peer.device?.identityKey : undefined;
+  }
+
+  private trustKeyFor(peer: PeerSummary): string {
+    return this.provenIdentity(peer) ?? peer.device?.publicKey;
+  }
+
+  private isPeerTrusted(peer: PeerSummary): boolean {
+    const identity = this.provenIdentity(peer);
+    if (identity) return this.trustedPeerKeys.has(identity);
+    // A peer that claims an identity we could not (yet) prove is not trusted
+    // through its session key either.
+    if (peer.device?.identityKey) return false;
+    return this.trustedPeerKeys.has(peer.device?.publicKey);
+  }
+
+  private async checkPeerIdentity(peer: PeerSummary): Promise<boolean> {
+    const key = this.identityCacheKey(peer);
+    if (!key) return false;
+    const cached = this.identityChecks.get(key);
+    if (cached !== undefined) return cached;
+    const ok = await verifyIdentityBinding(peer.device.identityKey!, peer.device.identitySig!, peer.device.publicKey);
+    if (this.identityChecks.size > 256) this.identityChecks.delete(this.identityChecks.keys().next().value!);
+    this.identityChecks.set(key, ok);
+    if (ok && peer.device.deviceId && !this.knownIdentities[peer.device.deviceId]) {
+      this.knownIdentities[peer.device.deviceId] = peer.device.identityKey!;
+      this.persistKnownIdentities();
+    }
+    return ok;
+  }
+
+  private persistKnownIdentities(): void {
+    try {
+      const entries = Object.entries(this.knownIdentities).slice(-256);
+      this.knownIdentities = Object.fromEntries(entries);
+      this.storage?.setItem(`${this.storagePrefix}:knownIdentities`, JSON.stringify(this.knownIdentities));
+    } catch {
+      // ignore
+    }
+  }
+
+  private syncPeers(incoming: PeerSummary[]): void {
+    const nextPeers = incoming.filter((peer) => this.peerVerification(peer) !== 'forged');
+    if (nextPeers.length !== incoming.length) {
+      this.connectionNotice = 'A device entry failed verification and was ignored. Someone may be tampering with this network.';
+    }
     this.peers = nextPeers;
+    for (const peer of nextPeers) {
+      const key = this.identityCacheKey(peer);
+      if (!key || this.identityChecks.has(key) || this.identityPending.has(key)) continue;
+      this.identityPending.add(key);
+      void this.checkPeerIdentity(peer).finally(() => { this.identityPending.delete(key); this.emit(); });
+    }
     const activeIds = new Set(nextPeers.map((p) => p.peerId));
     for (const id of this.cryptoSessions.keys()) if (!activeIds.has(id)) {
       this.cryptoSessions.delete(id); this.cryptoKeyFingerprints.delete(id); this.peerRttMs.delete(id);
@@ -2730,10 +3007,14 @@ export class WarpClient {
       return existing;
     }
 
+    // Stable verification code: over the identity keys when both are proven.
+    const peerIdentity = (await this.checkPeerIdentity(peer)) ? peer.device.identityKey : undefined;
+    const myIdentity = this.myDevice?.identityKey;
     const session = await derivePeerSession(
       this.keys.privateKey,
       this.keys.publicKeyB64,
-      peer.device.publicKey
+      peer.device.publicKey,
+      myIdentity && peerIdentity ? { mine: myIdentity, peer: peerIdentity } : undefined,
     );
     if (this.destroyed || !this.peers.some((current) => current.peerId === peer.peerId && current.device.publicKey === peer.device.publicKey)) {
       throw new Error('Peer changed while establishing encryption.');
@@ -3087,7 +3368,7 @@ export class WarpClient {
         // Auto-accept if sender is marked as a Trusted Device (or autoAcceptAll enabled)
         const isTrusted =
           this.opts.autoAcceptAll ||
-          (peer ? this.trustedPeerKeys.has(peer.device.publicKey) : false);
+          (peer ? this.isPeerTrusted(peer) : false);
         if (isTrusted) {
           await this.acceptIncomingTransfer(payload.transferId);
         }

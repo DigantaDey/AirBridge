@@ -29,6 +29,7 @@ import { createCliBeamSession } from '../src/server/cliSendSession.ts';
 import { installLogCapture, startEventLoopMonitor } from '../src/server/diagnostics.ts';
 import { Updater, appBundleForExecutable, confirmUpdateHealthy, isScriptRuntime, resolvePendingUpdate } from '../src/server/updater.ts';
 import { emitShellEvent } from '../src/server/shellEvents.ts';
+import { DEFAULT_RELAY_PORT, RELAY_ENDPOINT_FILE, parseRelayEndpoint, startRelayServer } from '../src/server/relay.ts';
 import clientAssets from './clientAssets.json';
 import pkg from '../package.json';
 
@@ -50,7 +51,10 @@ interface CliOptions {
   tlsDir?: string;
   noBrowser: boolean;
   action: StartupAction | null;
-  subcommand: 'daemon' | 'send';
+  subcommand: 'daemon' | 'send' | 'relay';
+  /** `--relay host:port|off` (persisted for the login item). */
+  relayEndpoint?: string;
+  relayListen?: string;
   sendFiles: string[];
   help: boolean;
   version: boolean;
@@ -63,6 +67,7 @@ function printHelp(): void {
   Usage:
     airbridge [daemon] [options]          Start the AirBridge server
     airbridge send <file...> [options]    One-shot QR beam of files
+    airbridge relay [--listen [host:]port] Run an AirBridge relay (VPS / always-on box)
     airbridge --install-startup           Auto-start at login (user-level, no admin)
     airbridge --uninstall-startup         Remove the auto-start entry
 
@@ -75,6 +80,9 @@ function printHelp(): void {
     --tls-key <pem>       Private key for --tls-cert
     --tls-dir <path>      Where the generated CA lives (default ~/.airbridge/tls)
     --no-browser          Do not open the local UI in a browser
+    --relay <host:port>   Use this AirBridge relay when phones can't reach this
+                          computer directly (saved; \`--relay off\` removes it).
+                          Traffic stays end-to-end TLS; the relay sees ciphertext.
     -h, --help            Show this help
     -v, --version         Show version
 `);
@@ -113,6 +121,8 @@ function parseArgs(argv: string[]): CliOptions {
     else if (arg === '--tls-key' && argv[i + 1]) opts.tlsKeyPath = path.resolve(argv[++i]);
     else if (arg === '--tls-dir' && argv[i + 1]) opts.tlsDir = path.resolve(argv[++i]);
     else if (arg === '--no-browser') opts.noBrowser = true;
+    else if (arg === '--relay' && argv[i + 1]) opts.relayEndpoint = argv[++i];
+    else if (arg === '--listen' && argv[i + 1]) opts.relayListen = argv[++i];
     else if (arg === '--install-startup') opts.action = 'install';
     else if (arg === '--uninstall-startup') opts.action = 'uninstall';
     else positional.push(arg);
@@ -121,6 +131,8 @@ function parseArgs(argv: string[]): CliOptions {
   if (positional[0] === 'daemon') {
     opts.subcommand = 'daemon';
     opts.sendFiles = positional.slice(1);
+  } else if (positional[0] === 'relay') {
+    opts.subcommand = 'relay';
   } else if (positional[0] === 'send') {
     opts.subcommand = 'send';
     opts.sendFiles = positional.slice(1);
@@ -297,6 +309,23 @@ async function main(): Promise<void> {
     console.log(`airbridge ${VERSION}`);
     process.exit(0);
   }
+  if (opts.relayEndpoint) {
+    const file = path.join(opts.tlsDir ? path.dirname(opts.tlsDir) : path.join(os.homedir(), '.airbridge'), RELAY_ENDPOINT_FILE);
+    if (opts.relayEndpoint === 'off') {
+      fs.rmSync(file, { force: true });
+      console.log('Relay fallback disabled.');
+    } else {
+      const parsed = parseRelayEndpoint(opts.relayEndpoint);
+      if (!parsed) {
+        console.error(`Error: --relay expects host:port, got "${opts.relayEndpoint}"`);
+        process.exit(1);
+      }
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${parsed.endpoint}\n`);
+      console.log(`Relay fallback: ${parsed.endpoint} (saved)`);
+    }
+  }
+
   if (opts.action === 'install') {
     installStartup(opts);
     return;
@@ -314,6 +343,29 @@ async function main(): Promise<void> {
   if (opts.tlsCertPath) tlsOptions.tlsCertPath = opts.tlsCertPath;
   if (opts.tlsKeyPath) tlsOptions.tlsKeyPath = opts.tlsKeyPath;
   if (opts.tlsDir) tlsOptions.tlsDir = opts.tlsDir;
+
+  if (opts.subcommand === 'relay') {
+    const listen = opts.relayListen ?? String(DEFAULT_RELAY_PORT);
+    const m = /^(?:(.+):)?(\d{1,5})$/.exec(listen);
+    if (!m) {
+      console.error('Error: --listen expects [host:]port');
+      process.exit(1);
+    }
+    const relay = await startRelayServer({
+      host: m[1]?.replace(/^\[|\]$/g, '') || '::',
+      port: Number(m[2]),
+      log: (line) => console.log(line),
+    });
+    console.log(`Point computers at it with:  airbridge --relay <this-host>:${relay.port}`);
+    const stop = () => { void relay.close().then(() => process.exit(0)); };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+    setInterval(() => {
+      const s = relay.stats();
+      console.log(`relay: ${s.rooms} computers, ${s.standby} standby, ${s.splices} active, ${(s.bytes / 1048576).toFixed(1)} MiB relayed`);
+    }, 10 * 60_000).unref();
+    return;
+  }
 
   if (opts.subcommand === 'send') {
     if (opts.sendFiles.length === 0) {

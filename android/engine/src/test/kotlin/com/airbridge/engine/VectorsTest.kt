@@ -216,12 +216,106 @@ fun main(args: Array<String>) {
             "got ${Base64Url.encode(key)} want ${o.optStr("keyB64")}")
     }
 
+    // ---------------------------------------------------------------- SPAKE2
+    root.optArr("spake2")!!.items.forEach { v ->
+        val o = v.asObj()
+        val name = o.optStr("name")!!
+        val w = java.math.BigInteger(o.optStr("wHex")!!, 16)
+        val x = java.math.BigInteger(o.optStr("xHex")!!, 16)
+        val y = java.math.BigInteger(o.optStr("yHex")!!, 16)
+        val idA = Base64Url.decode(o.optStr("idAB64")!!)
+        val idB = Base64Url.decode(o.optStr("idBB64")!!)
+        val aad = Base64Url.decode(o.optStr("aadB64") ?: "")
+        val a = Spake2(Spake2.Role.A, w, idA, idB, aad, x)
+        val b = Spake2(Spake2.Role.B, w, idA, idB, aad, y)
+        check("spake2[$name].pA", a.share().toHex() == o.optStr("pAHex"), a.share().toHex())
+        check("spake2[$name].pB", b.share().toHex() == o.optStr("pBHex"), b.share().toHex())
+        val ra = a.finish(hexToBytes(o.optStr("pBHex")!!))
+        val rb = b.finish(hexToBytes(o.optStr("pAHex")!!))
+        check("spake2[$name].ke", ra.ke.toHex() == o.optStr("keHex") && rb.ke.toHex() == o.optStr("keHex"), ra.ke.toHex())
+        check("spake2[$name].confirmA", ra.confirm.toHex() == o.optStr("confirmAHex"), ra.confirm.toHex())
+        check("spake2[$name].confirmB", rb.confirm.toHex() == o.optStr("confirmBHex"), rb.confirm.toHex())
+        check("spake2[$name].cross", Spake2.constantTimeEquals(ra.expectedPeerConfirm, rb.confirm))
+        o.optStr("code")?.let { code ->
+            check("spake2[$name].w-from-code", PairingProof.passwordScalar(code) == w)
+        }
+    }
+    run {
+        // Wrong password: confirmations disagree; malformed shares are rejected.
+        val idA = "a".toByteArray(); val idB = "b".toByteArray()
+        val a = Spake2(Spake2.Role.A, PairingProof.passwordScalar("K7Q2XP"), idA, idB)
+        val b = Spake2(Spake2.Role.B, PairingProof.passwordScalar("K7Q2XQ"), idA, idB)
+        val ra = a.finish(b.share()); val rb = b.finish(a.share())
+        check("spake2.wrong-code", !Spake2.constantTimeEquals(ra.expectedPeerConfirm, rb.confirm))
+        val bad = Spake2(Spake2.Role.A, java.math.BigInteger.TEN, idA, idB)
+        check("spake2.reject-zero-share", runCatching { bad.finish(ByteArray(65).also { it[0] = 4 }) }.isFailure)
+        val twice = Spake2(Spake2.Role.A, java.math.BigInteger.TEN, idA, idB)
+        twice.finish(Spake2(Spake2.Role.B, java.math.BigInteger.TEN, idA, idB).share())
+        check("spake2.single-use", runCatching { twice.finish(a.share()) }.isFailure)
+    }
+
+    // ---------------------------------------------------------------- pairing proof
+    root.optArr("pairingProof")!!.items.forEach { v ->
+        val o = v.asObj()
+        val code = o.optStr("code")!!
+        check("nameplate[$code]", PairingProof.nameplateFor(code) == o.optStr("nameplate"), PairingProof.nameplateFor(code))
+        check("w[$code]", P256.to32(PairingProof.passwordScalar(code)).toHex() == o.optStr("wHex"))
+    }
+    root.optArr("vouches")!!.items.forEachIndexed { i, v ->
+        val o = v.asObj()
+        val vk = PairingProof.vouchKeyFrom(hexToBytes(o.optStr("keHex")!!))
+        check("vouch[$i].key", Base64Url.encode(vk) == o.optStr("vouchKeyB64"))
+        val vouch = PairingProof.peerVouch(vk, o.optStr("peerId")!!, o.optStr("publicKey")!!, o.optStr("identityKey"), o.optStr("attestation")!!)
+        check("vouch[$i].mac", vouch == o.optStr("vouch"), vouch)
+        check("vouch[$i].verify", PairingProof.verifyPeerVouch(vk, o.optStr("peerId")!!, o.optStr("publicKey")!!, o.optStr("identityKey"), o.optStr("attestation")!!, o.optStr("vouch")))
+        check("vouch[$i].attestation-bound", !PairingProof.verifyPeerVouch(vk, o.optStr("peerId")!!, o.optStr("publicKey")!!, o.optStr("identityKey"), "legacy", o.optStr("vouch")))
+    }
+    root.optArr("hubProofs")!!.items.forEachIndexed { i, v ->
+        val o = v.asObj()
+        val vk = PairingProof.vouchKeyFrom(hexToBytes(o.optStr("keHex")!!))
+        val proof = PairingProof.hubProof(vk, o.optStr("peerId")!!, o.optStr("pairCode")!!, o.optStr("tlsPin"))
+        check("hubProof[$i]", proof == o.optStr("proof"), proof)
+        check("hubProof[$i].pin-bound", !PairingProof.verifyHubProof(vk, o.optStr("peerId")!!, o.optStr("pairCode")!!, "other", o.optStr("proof")))
+    }
+    root.optArr("identityBindings")!!.items.forEachIndexed { i, v ->
+        val o = v.asObj()
+        val ok = PairingProof.verifyIdentityBinding(o.optStr("identityKey")!!, o.optStr("sig")!!, o.optStr("sessionKey")!!)
+        check("identityBinding[$i]", ok == (o.optBool("valid") == true), "got $ok")
+    }
+    run {
+        val dir = java.nio.file.Files.createTempDirectory("airbridge-id").toFile()
+        val file = java.io.File(dir, "identity")
+        val first = SoftwareDeviceIdentity(file)
+        val again = SoftwareDeviceIdentity(file)
+        check("identity.persistent", first.persistent && again.persistent && first.publicKeyB64 == again.publicKeyB64)
+        val session = AirCrypto.generateIdentityKeyPair().publicKeyB64
+        val sig = again.signBinding(session)
+        check("identity.kotlin-signed-verifies", PairingProof.verifyIdentityBinding(first.publicKeyB64, sig, session))
+        check("identity.der-roundtrip", EcdsaSignatures.derToRaw(EcdsaSignatures.rawToDer(Base64Url.decode(sig))).contentEquals(Base64Url.decode(sig)))
+        check("identity.memory-not-persistent", !SoftwareDeviceIdentity(null).persistent)
+        dir.deleteRecursively()
+    }
+    root.optArr("sessionsV2")!!.items.forEachIndexed { i, v ->
+        val o = v.asObj()
+        val priv = AirCrypto.importPrivateKey(Base64Url.decode(o.optStr("pkcs8")!!))
+        val session = AirCrypto.derivePeerSession(priv, o.optStr("pubA")!!, o.optStr("pubB")!!, o.optStr("idMine")!! to o.optStr("idPeer")!!)
+        check("sessionV2[$i].sas", session.sasCode == o.optStr("sas"), "got ${session.sasCode} want ${o.optStr("sas")}")
+        check("sessionV2[$i].fingerprint", session.fingerprintHex == o.optStr("fingerprint"))
+        val swapped = AirCrypto.derivePeerSession(priv, o.optStr("pubA")!!, o.optStr("pubB")!!, o.optStr("idPeer")!! to o.optStr("idMine")!!)
+        check("sessionV2[$i].symmetric", swapped.sasCode == session.sasCode)
+    }
+    check("relayRoute.parse", RelayRoute.parse("relay.example.com:4740", "a".repeat(64)) == RelayRoute("relay.example.com", 4740, "a".repeat(64)) &&
+        RelayRoute.parse("[2001:db8::1]:4740", "b".repeat(64))?.host == "2001:db8::1" &&
+        RelayRoute.parse("relay:0", "a".repeat(64)) == null && RelayRoute.parse("relay:1", "xyz") == null)
+
     if (failed > 0) {
         println("VECTORS: $failed FAILED, $passed passed")
         exitProcess(1)
     }
     println("VECTORS: ALL PASS ($passed checks)")
 }
+
+private fun ByteArray.toHex(): String = joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
 
 private fun hexToBytes(hex: String): ByteArray {
     val out = ByteArray(hex.length / 2)

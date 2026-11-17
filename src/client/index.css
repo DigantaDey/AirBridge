@@ -119,6 +119,8 @@ html.dark .transfer-heading .transfer-speed-badge[data-direction="outgoing"] .tr
 .modal-heading h2 { margin: 0; font-size: 21px; font-weight: 550; letter-spacing: -.035em; }
 .modal-close { border: 0; background: transparent; color: var(--ab-muted); font-size: 24px; line-height: 1; padding: 0 2px; }
 .modal-explainer { color: var(--ab-muted); font-size: 12px; margin: 12px 0; }
+.pairing-error { border: 1px solid var(--ab-text); border-radius: 8px; padding: 8px 10px; font-size: 12px; margin: 0 0 12px; color: var(--ab-text); font-weight: 600; }
+.security-warning { color: var(--ab-text); font-weight: 600; }
 .pairing-modal .flex.flex-col.gap-5 { gap: 0; }
 .pairing-modal .rounded-3xl { border: 0; background: transparent; box-shadow: none; padding: 10px 0 0; border-radius: 0; }
 .pairing-modal .rounded-3xl > .flex.items-center.justify-between { display: none; }

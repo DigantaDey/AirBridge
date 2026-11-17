@@ -55,7 +55,25 @@ class WebSocketClient(
     private val inbound: InboundConnections? = null,
     /** After every forward dial failed, how long to keep waiting for the computer to dial in. */
     private val reverseGraceMs: Long = 3_500,
+    /**
+     * Relay fallback: joins the race [RelayDial.delayMs] after it starts, so a
+     * working direct path always wins. TLS then runs end to end through the
+     * relay and must terminate at [RelayDial.expectedPin].
+     */
+    private val relay: RelayDial? = null,
 ) {
+    /**
+     * A relay rendezvous the code-authenticated computer offered, plus the TLS
+     * anchor it proved on that connection. Without a pinned anchor there is no
+     * relay: the operator must never be able to stand in for the computer.
+     */
+    data class RelayDial(
+        val route: RelayRoute,
+        val expectedPin: String,
+        val delayMs: Long = 2_500,
+        /** TLS name for the relayed handshake (every AirBridge leaf covers it). */
+        val tlsHostname: String = "airbridge.local",
+    )
     interface Listener {
         fun onText(text: String)
         fun onBinary(bytes: ByteArray)
@@ -93,6 +111,20 @@ class WebSocketClient(
     var connectedViaReverse = false
         private set
 
+    /**
+     * base64url SHA-256 of the TLS chain's last certificate on this connection
+     * (the QR `ca=` format); null for plain ws://. The engine compares it with
+     * the pin the code-authenticated hub vouched for.
+     */
+    @Volatile
+    var tlsAnchorPin: String? = null
+        private set
+
+    /** True when the connection runs through [relay] (TLS still ends at the computer). */
+    @Volatile
+    var connectedViaRelay = false
+        private set
+
     /** Per-candidate outcomes of the last [connectBlocking] (for diagnostics). */
     @Volatile
     var attempts: List<EndpointAttempt> = emptyList()
@@ -112,9 +144,48 @@ class WebSocketClient(
     private val emptyPayload = ByteArray(0)
     private val random = SecureRandom()
 
-    private data class TcpResult(val host: String, val socket: Socket?, val error: Throwable?, val reverse: Boolean = false)
+    private data class TcpResult(
+        val host: String, val socket: Socket?, val error: Throwable?,
+        val reverse: Boolean = false, val relayed: Boolean = false,
+    )
 
-    private data class TcpWinner(val host: String, val socket: Socket, val reverse: Boolean)
+    private data class TcpWinner(val host: String, val socket: Socket, val reverse: Boolean, val relayed: Boolean = false)
+
+    private class RelayUnavailable(message: String) : IOException(message)
+
+    /** TCP to the relay, `DIAL <room>`, wait for `GO`. The socket is then a raw pipe to the computer. */
+    private fun dialRelay(dial: RelayDial, register: (Socket) -> Unit): Socket {
+        val s = tcpConnector.connect(dial.route.host, dial.route.port, connectTimeoutMs, register)
+        try {
+            s.soTimeout = 12_000
+            s.tcpNoDelay = true
+            val out = s.getOutputStream()
+            out.write("AB-RELAY/1 DIAL ${dial.route.token}\n".toByteArray(Charsets.US_ASCII))
+            out.flush()
+            val inp = s.getInputStream()
+            val line = StringBuilder()
+            while (true) {
+                val b = inp.read()
+                if (b == -1) throw RelayUnavailable("relay closed the connection")
+                if (b == '\n'.code) break
+                line.append(b.toChar())
+                if (line.length > 160) throw RelayUnavailable("relay protocol error")
+            }
+            val reply = line.toString().trimEnd('\r')
+            if (reply != "GO") {
+                throw RelayUnavailable(when (reply) {
+                    "ERR NO_HOST" -> "the computer is not connected to the relay"
+                    "ERR BUSY" -> "relay busy"
+                    else -> "relay refused: $reply"
+                })
+            }
+            s.soTimeout = 0
+            return s
+        } catch (e: Throwable) {
+            runCatching { s.close() }
+            throw e
+        }
+    }
 
     /**
      * Races [candidates] at the TCP layer, plus (with [inbound]) a socket the
@@ -130,6 +201,8 @@ class WebSocketClient(
         var forwardDoneAt = 0L
         var inboundPending = false
         var reverseNote: String? = null
+        var relayPending = false
+        var relayNote: String? = null
         val register: (Socket) -> Unit = { s ->
             inFlight.add(s)
             if (closed) runCatching { s.close() }
@@ -157,11 +230,29 @@ class WebSocketClient(
                 }
             }, "airbridge-inbound").apply { isDaemon = true; start() }
         }
+        val relayDial = relay
+        if (relayDial != null) {
+            relayPending = true
+            Thread({
+                try {
+                    val until = System.currentTimeMillis() + relayDial.delayMs
+                    while (System.currentTimeMillis() < until && !closed && !raceDone.get()) Thread.sleep(25)
+                    if (closed || raceDone.get()) {
+                        results.put(TcpResult("", null, NoInboundConnection(), relayed = true))
+                    } else {
+                        results.put(TcpResult(relayDial.tlsHostname, dialRelay(relayDial, register), null, relayed = true))
+                    }
+                } catch (e: Throwable) {
+                    results.put(TcpResult("", null, e, relayed = true))
+                }
+            }, "airbridge-relay").apply { isDaemon = true; start() }
+        }
         fun allFailed(last: Throwable?): Nothing {
             raceDone.set(true)
             attempts = failures.toList()
             val kind = summarize(failures)
-            val reverse = if (source != null) "; computer→phone: ${reverseNote ?: "no connection"}" else ""
+            val reverse = (if (source != null) "; computer→phone: ${reverseNote ?: "no connection"}" else "") +
+                (if (relayDial != null) "; relay ${relayDial.route.host}: ${relayNote ?: "no connection"}" else "")
             throw ConnectFailure(
                 ConnectPhase.TCP, kind, primaryHost, failures.toList(),
                 failures.joinToString("; ") { "${it.host}:${it.port} ${it.kind.name.lowercase()}" + (it.routeSource?.let { r -> " via $r" } ?: "") } + reverse,
@@ -180,13 +271,15 @@ class WebSocketClient(
             val waitMs = when {
                 started < candidates.size -> staggerMs
                 !forwardDone -> connectTimeoutMs.toLong() + 1_000
+                // The relay bounds itself (connect + 12 s rendezvous).
+                relayPending -> relayDial!!.delayMs + connectTimeoutMs + 13_000L
                 // Only the reverse path is left: a short grace for the computer to dial in.
                 else -> maxOf(0L, forwardDoneAt + reverseGraceMs - System.currentTimeMillis())
             }
             val result = results.poll(waitMs, java.util.concurrent.TimeUnit.MILLISECONDS)
             if (result == null) {
                 if (started < candidates.size) startNext()
-                else if (forwardDone && inboundPending) allFailed(lastError)
+                else if (forwardDone && inboundPending && !relayPending) allFailed(lastError)
                 continue
             }
             if (result.socket != null && !closed) {
@@ -196,16 +289,19 @@ class WebSocketClient(
                 inFlight.clear()
                 // A later success that loses the race must be closed too.
                 Thread({
-                    repeat(candidates.size + 1) {
+                    repeat(candidates.size + 2) {
                         val late = results.poll(connectTimeoutMs.toLong() + reverseGraceMs + 2_000, java.util.concurrent.TimeUnit.MILLISECONDS) ?: return@Thread
                         late.socket?.let { runCatching { it.close() } }
                     }
                 }, "airbridge-dial-reaper").apply { isDaemon = true; start() }
                 attempts = failures.toList()
-                return TcpWinner(result.host, result.socket, result.reverse)
+                return TcpWinner(result.host, result.socket, result.reverse, result.relayed)
             }
             result.socket?.let { runCatching { it.close() } }
-            if (result.reverse) {
+            if (result.relayed) {
+                relayPending = false
+                if (result.error !is NoInboundConnection) relayNote = result.error?.message
+            } else if (result.reverse) {
                 inboundPending = false
                 if (result.error !is NoInboundConnection) reverseNote = result.error?.message
             } else {
@@ -218,7 +314,7 @@ class WebSocketClient(
                 if (finished == candidates.size) forwardDoneAt = System.currentTimeMillis()
                 if (started < candidates.size) startNext()
             }
-            if (finished == candidates.size && !inboundPending) allFailed(lastError)
+            if (finished == candidates.size && !inboundPending && !relayPending) allFailed(lastError)
         }
     }
 
@@ -243,10 +339,15 @@ class WebSocketClient(
         var host = primaryHost
         var viaReverse = false
         try {
-            val (winner, plain, reverse) = connectTcp()
+            val (winner, plain, reverse, relayed) = connectTcp()
             host = winner
             viaReverse = reverse
             connectedViaReverse = reverse
+            connectedViaRelay = relayed
+            if (relayed && (!secure || trustAllTls || tlsTrustManager == null)) {
+                runCatching { plain.close() }
+                throw SSLPeerUnverifiedException("Relay connections require a pinned computer identity")
+            }
             phase = ConnectPhase.TLS
             val raw: Socket = if (secure) {
                 val ctx = SSLContext.getInstance("TLS")
@@ -264,6 +365,10 @@ class WebSocketClient(
             if (raw is SSLSocket) {
                 raw.startHandshake()
                 if (!trustAllTls) verifyIpSan(raw, host)
+                tlsAnchorPin = runCatching { PinnedTlsTrust.pinOf(raw.session.peerCertificates.last().encoded) }.getOrNull()
+                if (relayed && tlsAnchorPin != relay?.expectedPin) {
+                    throw SSLPeerUnverifiedException("Relayed TLS identity changed: the relay did not lead to the paired computer")
+                }
             }
             phase = ConnectPhase.UPGRADE
             // Stream buffers enlarged to 1 MiB (1024 * 1024) to saturate high-speed links:

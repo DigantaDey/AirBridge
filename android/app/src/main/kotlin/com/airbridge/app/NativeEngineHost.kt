@@ -22,6 +22,11 @@ data class PeerUiState(
     val sasCode: String?,
     val fingerprintHex: String?,
     val trusted: Boolean,
+    /**
+     * The computer that knows the pairing code vouched for this device's keys
+     * (no need to compare [sasCode] by hand).
+     */
+    val verified: Boolean = false,
 )
 
 data class NativeEngineUiState(
@@ -46,6 +51,10 @@ data class NativeEngineUiState(
     val transfers: List<TransferView> = emptyList(),
     val clipboardItems: List<ClipboardItem> = emptyList(),
     val trustedKeys: Set<String> = emptySet(),
+    /** No direct path right now: connected through the relay (still end-to-end encrypted). */
+    val viaRelay: Boolean = false,
+    /** The computer rejected the pairing code; reconnecting waits for a new code or QR scan. */
+    val pairingError: String? = null,
 )
 
 /**
@@ -193,6 +202,10 @@ class NativeEngineHost(
                         initialPairCode = targetPairCode,
                         visibility = prefs.visibility,
                         tlsTrustManager = prefs.tlsTrust(link),
+                        // Long-term identity in the Android Keystore: computers
+                        // pin this phone, not a per-launch session key.
+                        deviceIdentity = KeystoreDeviceIdentity.load(context),
+                        initialRelay = com.airbridge.engine.RelayRoute.deserialize(prefs.relayRoute),
                         defaultSinkFactory = AndroidFileSinkFactory(context),
                         // Primary + QR alternates + addresses the computer
                         // reported last time; ranked on-link-first per attempt.
@@ -220,6 +233,7 @@ class NativeEngineHost(
                             connectionProgress = null
                             prefs.peerId = info.peerId
                             prefs.pairCode = info.pairCode
+                            if (info.admission == "pake") prefs.relayRoute = created.relayRoute?.serialize()
                             synchronized(stateLock) { lanUrls = info.lanUrls }
                             prefs.invitations.learn(info.lanUrls)
                             refresh()
@@ -243,6 +257,13 @@ class NativeEngineHost(
                             }
                             prefs.invitations.markConnected(host)
                             Log.i(TAG, "Connected via $host" + if (viaReverse) " (computer dialled in)" else "")
+                            refresh()
+                        }
+
+                        override fun onRelayConnected(relayHost: String) {
+                            if (closed) return
+                            connectionProgress = "No direct path to the computer. Connecting through the relay ($relayHost), still end-to-end encrypted…"
+                            Log.i(TAG, "Connected via relay $relayHost")
                             refresh()
                         }
 
@@ -393,7 +414,8 @@ class NativeEngineHost(
                 connectedAt = peer.connectedAt,
                 sasCode = current.sasCodeFor(peer.peerId),
                 fingerprintHex = current.fingerprintFor(peer.peerId),
-                trusted = trusted.contains(peer.device.publicKey),
+                trusted = current.isTrustedPeer(peer),
+                verified = peer.verified,
             )
         }
         val transfers = current.transfersSnapshot().sortedByDescending { it.startedAt }
@@ -424,6 +446,8 @@ class NativeEngineHost(
             transfers = transfers,
             clipboardItems = clipSnapshot,
             trustedKeys = trusted,
+            viaRelay = current.connectedViaRelay,
+            pairingError = current.pairingError,
         )
         _uiState.value = next
         onState(next)

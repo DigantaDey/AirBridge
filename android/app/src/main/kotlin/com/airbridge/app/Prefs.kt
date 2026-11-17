@@ -123,6 +123,15 @@ class Prefs(context: Context) {
         get() = sp.getStringSet("nativeTrustedKeys", emptySet())?.toSet() ?: emptySet()
         set(value) = sp.edit().putStringSet("nativeTrustedKeys", value).apply()
 
+    /**
+     * Relay route from the last code-authenticated welcome
+     * ([com.airbridge.engine.RelayRoute.serialize]); includes the TLS pin it
+     * must lead to.
+     */
+    var relayRoute: String?
+        get() = sp.getString("nativeRelayRoute", null)
+        set(value) = sp.edit().apply { if (value == null) remove("nativeRelayRoute") else putString("nativeRelayRoute", value) }.apply()
+
     fun tlsTrust(link: PairingLink): com.airbridge.engine.PinnedTlsTrust = invitations.tlsTrust(link)
 
     fun forget() {
@@ -130,6 +139,7 @@ class Prefs(context: Context) {
         sp.edit()
             .remove("nativeTrustedKeys")
             .remove("nativePeerId")
+            .remove("nativeRelayRoute")
             .apply()
     }
 }

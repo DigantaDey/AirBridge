@@ -8,15 +8,33 @@ export interface DeviceProfile {
   platform: PlatformType;
   model: string;
   formFactor: FormFactor;
-  publicKey: string; // base64url raw ECDH P-256 public key (65 bytes)
+  publicKey: string; // base64url raw ECDH P-256 public key (65 bytes), fresh per connection
   deviceId?: string; // persistent identifier for cross-reload history reconciliation
+  /**
+   * Long-term ECDSA P-256 identity key (base64url raw, 65 bytes). Survives
+   * restarts; this is what "trusted device" pins. Optional for older peers.
+   */
+  identityKey?: string;
+  /** base64url raw r‖s ECDSA signature by identityKey over identityBindingMessage(publicKey). */
+  identitySig?: string;
 }
+
+/**
+ * How the hub admitted a device: 'host' = runs on the hub computer itself,
+ * 'pake' = proved knowledge of the pairing code without revealing it,
+ * 'legacy' = older client that sent the code in the clear (or no code).
+ */
+export type Admission = 'host' | 'pake' | 'legacy';
 
 export interface PeerSummary {
   peerId: string;
   device: DeviceProfile;
   discoveryScope: 'paired' | 'nearby';
   connectedAt: number;
+  /** How the hub admitted this peer (newer hubs). */
+  attestation?: Admission;
+  /** Hub's MAC over this entry for a code-authenticated viewer (see pairingProof.ts). */
+  vouch?: string;
 }
 
 export interface LocalDaemonStatus {
@@ -151,8 +169,15 @@ export type ClientToServerMessage =
       type: 'hello';
       peerId?: string;
       device: DeviceProfile;
+      /** Legacy cleartext join. New clients send `pake` instead and never reveal the code. */
       pairCode?: string;
       visibility: VisibilityMode;
+      pake?: PakeHello;
+    }
+  | {
+      type: 'pake-confirm';
+      /** base64url HMAC confirmation (SPAKE2 cA). */
+      confirm: string;
     }
   | {
       type: 'update-profile';
@@ -214,11 +239,32 @@ export interface HostFirewallStatus {
   appPath: string;
 }
 
+export interface PakeHello {
+  v: number;
+  /** 2 hex chars of a hash of the code; picks among the hub's rooms. */
+  nameplate: string;
+  /** base64url SPAKE2 share pA (65-byte uncompressed point). */
+  share: string;
+}
+
 export type ServerToClientMessage =
+  | {
+      type: 'pake-challenge';
+      /** base64url SPAKE2 share pB. */
+      share: string;
+      /** base64url SPAKE2 confirmation cB; proves the hub knows the code. */
+      confirm: string;
+    }
   | {
       type: 'welcome';
       peerId: string;
       pairCode: string;
+      /** How this connection was admitted (newer hubs). */
+      admission?: Admission;
+      /** For admission 'pake': MAC over peerId, pairCode and tlsPin under the vouch key. */
+      hubProof?: string;
+      /** Encrypted-relay rendezvous for code-authenticated native clients (see relay docs). */
+      relay?: RelayOffer | null;
       lanUrls: string[];
       /** Same order as lanUrls, with interface details. Optional for older servers. */
       lanEndpoints?: LanEndpoint[];
@@ -271,6 +317,13 @@ export type ServerToClientMessage =
       code: string;
       message: string;
     };
+
+export interface RelayOffer {
+  /** host:port of an AirBridge relay (TCP rendezvous; traffic inside stays TLS to this computer). */
+  endpoint: string;
+  /** 64 hex chars; secret rendezvous token for this computer. */
+  token: string;
+}
 
 // ============================================================================
 // Pair Code Formatting & Generation (Unambiguous 32-char Crockford-like alphabet)

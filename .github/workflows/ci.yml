@@ -88,7 +88,7 @@ jobs:
             echo "::error title=Android Gradle build failed::$(tail -n 40 gradle-build.log | tr '\n' '|' | cut -c1-3000)"
             exit 1
           }
-      - name: Native headless interop (HTTP + TLS + QR hotspot pairing, 128 MiB heap)
+      - name: Native headless interop (HTTP + TLS + QR hotspot pairing + SPAKE2 join + relay, 128 MiB heap)
         run: npx tsx scripts/test-native-interop.ts
       - uses: actions/upload-artifact@v4
         with:

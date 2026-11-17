@@ -100,6 +100,7 @@ export interface DiagnosticsInput {
   hostFirewall: unknown;
   mdnsActive: boolean | null;
   reverseConnect: unknown;
+  relay?: unknown;
   connectedDevices: unknown[];
   shellSubscribers: number;
   update: unknown;
@@ -135,6 +136,7 @@ export function buildDiagnostics(input: DiagnosticsInput): Record<string, unknow
       mdnsActive: input.mdnsActive,
       hostFirewall: input.hostFirewall,
       reverseConnect: input.reverseConnect,
+      relay: input.relay ?? 'disabled',
     },
     tls: input.tls,
     devices: input.connectedDevices,

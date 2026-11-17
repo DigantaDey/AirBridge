@@ -62,10 +62,17 @@ export async function generateIdentityKeyPair(): Promise<IdentityKeys> {
   };
 }
 
+/**
+ * `identities`: both devices' proven long-term identity keys. When present
+ * the verification code is computed over them (v2), so it stays the same
+ * across reconnects and restarts — compare it once, like a safety number.
+ * Without them it covers the per-connection keys (v1, older peers).
+ */
 export async function derivePeerSession(
   myPrivateKey: CryptoKey,
   myPublicKeyB64: string,
-  peerPublicKeyB64: string
+  peerPublicKeyB64: string,
+  identities?: { mine: string; peer: string },
 ): Promise<PeerCryptoSession> {
   const peerRaw = base64UrlToBytes(peerPublicKeyB64);
   const peerPubKey = await globalThis.crypto.subtle.importKey(
@@ -109,12 +116,12 @@ export async function derivePeerSession(
     ['encrypt', 'decrypt']
   );
 
-  // Derive 6-digit SAS verification code & hex fingerprint from sorted public keys + shared key confirmation
+  // 6-digit verification code & hex fingerprint.
+  const sasInput = identities
+    ? `airbridge-sas-v2:${[identities.mine, identities.peer].sort().join(':')}`
+    : `airbridge-sas-v1:${sortedPubs}`;
   const sasDigest = new Uint8Array(
-    await globalThis.crypto.subtle.digest(
-      'SHA-256',
-      toArrayBuffer(utf8ToBytes(`airbridge-sas-v1:${sortedPubs}`))
-    )
+    await globalThis.crypto.subtle.digest('SHA-256', toArrayBuffer(utf8ToBytes(sasInput)))
   );
   const view = new DataView(sasDigest.buffer);
   const sixDigits = String(view.getUint32(0, false) % 1_000_000).padStart(6, '0');

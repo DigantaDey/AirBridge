@@ -401,6 +401,16 @@ private fun ConnectionStatusCard(
                 )
             }
 
+            if (state == ConnectionState.CONNECTED && uiState.engine.viaRelay) {
+                // Honest about the path: slower than Wi-Fi, but the relay only
+                // ever sees ciphertext. AirBridge switches back automatically.
+                Text(
+                    text = "Via relay: no direct path to the computer right now. Still end-to-end encrypted; switches back to the direct path automatically.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
             val progress = uiState.engine.connectionProgress
             if (state != ConnectionState.CONNECTED && !progress.isNullOrBlank()) {
                 Text(
@@ -569,15 +579,14 @@ private fun PeersSelectorCard(
                                 )
                                 Column {
                                     Text(
-                                        text = if (selectedPeer.discoveryScope == "paired") {
-                                            "Paired · E2E encrypted"
-                                        } else {
-                                            "Nearby · E2E encrypted"
-                                        },
+                                        text = (if (selectedPeer.discoveryScope == "paired") "Paired" else "Nearby") +
+                                            (if (selectedPeer.verified) " · Verified" else "") + " · E2E encrypted",
                                         style = MaterialTheme.typography.labelLarge,
                                     )
                                     val sas = selectedPeer.sasCode
-                                    if (!sas.isNullOrBlank()) {
+                                    // A vouched peer was authenticated by the pairing
+                                    // code; the SAS is only needed for older devices.
+                                    if (!sas.isNullOrBlank() && !selectedPeer.verified) {
                                         Text(
                                             text = "Verification code $sas",
                                             style = MaterialTheme.typography.labelSmall,

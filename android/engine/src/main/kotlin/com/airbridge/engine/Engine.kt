@@ -67,6 +67,25 @@ data class EngineConfig(
      * TLS with a pinned/saved computer identity ([PinnedTlsTrust.isAnchored]).
      */
     val allowReverse: (() -> Boolean)? = null,
+    /**
+     * Long-term identity (the app uses the Android Keystore). Null = an
+     * in-memory identity that changes every launch (tests).
+     */
+    val deviceIdentity: DeviceIdentity? = null,
+    /**
+     * Prove the pairing code with SPAKE2 instead of sending it (default).
+     * False only for talking to desktop builds older than the secure join.
+     */
+    val secureJoin: Boolean = true,
+    /**
+     * A relay route saved from an earlier verified welcome ([RelayRoute.serialize]),
+     * so the relay works on the first attempt after an app restart.
+     */
+    val initialRelay: RelayRoute? = null,
+    /** How long direct paths get before the relay joins the race. */
+    val relayDelayMs: Long = 2_500,
+    /** While on the relay, how often to check whether a direct path is back. */
+    val directProbeMs: Long = 30_000,
 )
 
 private class TransferInterrupted(message: String) : java.io.IOException(message)
@@ -192,7 +211,33 @@ class AirBridgeEngine(private val config: EngineConfig) {
 
     private val lock = java.lang.Object()
     private val identity = AirCrypto.generateIdentityKeyPair()
+    private val deviceIdentity: DeviceIdentity = config.deviceIdentity ?: SoftwareDeviceIdentity(null)
+    private val identitySig: String? = runCatching { deviceIdentity.signBinding(identity.publicKeyB64) }.getOrNull()
     private val listeners = CopyOnWriteArraySet<EngineListener>()
+
+    // Code-authenticated join state (PairingProof). Guarded by [lock].
+    private var pakeParty: Spake2? = null
+    private var pakeClient: WebSocketClient? = null
+    private var vouchKey: ByteArray? = null
+    @Volatile private var admission: String? = null
+    /** Set when the computer rejected our code; no reconnects until the code changes. */
+    @Volatile private var pairingRejected: String? = null
+    /** The computer rate-limited pairing attempts from this address; no dialling before this time. */
+    @Volatile private var holdOffUntil = 0L
+    /** Identity cache: "identityKey|sig|publicKey" -> verified. */
+    private val identityChecks = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /** How the computer admitted the current connection ("host", "pake", "legacy"; null = not connected). */
+    val currentAdmission: String? get() = admission
+
+    /** Relay route vouched for by the last code-authenticated welcome (with its TLS pin). */
+    @Volatile var relayRoute: RelayRoute? = config.initialRelay?.takeIf { it.tlsPin.isNotBlank() }
+        private set
+
+    /** True while the live connection runs through the relay. */
+    val connectedViaRelay: Boolean get() = (ws?.connectedViaRelay == true) && welcomedClient === ws
+    val myIdentityKey: String get() = deviceIdentity.publicKeyB64
+    val identityIsPersistent: Boolean get() = deviceIdentity.persistent
 
     private var deviceName: String = sanitizeName(config.deviceName)
     private var visibility: String = config.visibility
@@ -443,6 +488,22 @@ class AirBridgeEngine(private val config: EngineConfig) {
         return EndpointSelector.order(hosts, locals) to locals
     }
 
+    @Volatile private var relayProbe: java.util.concurrent.ScheduledFuture<*>? = null
+
+    /**
+     * Quick TCP check of the computer's direct addresses while on the relay.
+     * TCP alone is enough to justify a reconnect: the full race (TLS, pin,
+     * welcome) still decides, and the relay remains in it as the fallback.
+     */
+    private fun directPathAvailable(): Boolean {
+        val port = runCatching { java.net.URI(normalizeWsUrl(config.serverUrl)).port }.getOrNull()
+            ?.takeIf { it > 0 } ?: return false
+        val connector = config.tcpConnector ?: WebSocketClient.DEFAULT_TCP_CONNECTOR
+        return rankedHosts().first.take(4).any { host ->
+            runCatching { connector.connect(host, port, 1_500) {}.close(); true }.getOrDefault(false)
+        }
+    }
+
     private fun urlWithHost(url: String, host: String): String {
         val uri = java.net.URI(url)
         val h = if (host.contains(':') && !host.startsWith("[")) "[$host]" else host
@@ -483,6 +544,8 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 staggerMs = config.endpointStaggerMs,
                 tcpConnector = config.tcpConnector ?: WebSocketClient.DEFAULT_TCP_CONNECTOR,
                 inbound = reverseListener?.takeIf { reverseAllowed() },
+                relay = relayRoute?.takeIf { config.tlsTrustManager != null && !config.trustAllTls }
+                    ?.let { WebSocketClient.RelayDial(it, it.tlsPin, config.relayDelayMs) },
             )
             var pingTask: java.util.concurrent.ScheduledFuture<*>? = null
             var welcomeTask: java.util.concurrent.ScheduledFuture<*>? = null
@@ -502,7 +565,12 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 for (l in listeners) l.onConnectAttempt(hosts)
                 client.connectBlocking()
                 if (stopped.get()) break
-                client.connectedHost?.let { host -> for (l in listeners) l.onEndpointConnected(host, client.connectedViaReverse) }
+                if (client.connectedViaRelay) {
+                    val relayHost = relayRoute?.host ?: "relay"
+                    for (l in listeners) l.onRelayConnected(relayHost)
+                } else {
+                    client.connectedHost?.let { host -> for (l in listeners) l.onEndpointConnected(host, client.connectedViaReverse) }
+                }
                 sendHello(client)
                 attempt = 0
                 welcomeTask = runCatching {
@@ -513,6 +581,14 @@ class AirBridgeEngine(private val config: EngineConfig) {
                         }
                     }, config.welcomeTimeoutMs, TimeUnit.MILLISECONDS)
                 }.getOrNull()
+                val probeTask = if (client.connectedViaRelay) runCatching {
+                    timerExecutor.scheduleWithFixedDelay({
+                        if (ws === client && !stopped.get() && directPathAvailable()) {
+                            runCatching { client.close() } // reconnect; the direct path wins the race
+                        }
+                    }, config.directProbeMs, config.directProbeMs, TimeUnit.MILLISECONDS)
+                }.getOrNull() else null
+                relayProbe = probeTask
                 pingTask = runCatching {
                     timerExecutor.scheduleWithFixedDelay({
                         try {
@@ -542,6 +618,8 @@ class AirBridgeEngine(private val config: EngineConfig) {
             } finally {
                 pingTask?.cancel(false)
                 welcomeTask?.cancel(false)
+                relayProbe?.cancel(false)
+                relayProbe = null
                 runCatching { client.close() }
                 if (ws === client) ws = null
                 outbound.clear()
@@ -558,11 +636,29 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 }
             }
             if (stopped.get()) break
+            if (pairingRejected != null) {
+                // Retrying a rejected code would just be another wrong guess.
+                setConnectionState(ConnectionState.DISCONNECTED)
+                try {
+                    synchronized(lock) { while (pairingRejected != null && !stopped.get()) lock.wait(1_000) }
+                } catch (_: InterruptedException) { break }
+                if (stopped.get()) break
+                attempt = 0
+                continue
+            }
             setConnectionState(ConnectionState.RECONNECTING)
-            try { Thread.sleep(reconnectDelayMs(++attempt)) }
-            catch (_: InterruptedException) { break }
+            try {
+                val until = maxOf(System.currentTimeMillis() + reconnectDelayMs(++attempt), holdOffUntil)
+                while (!stopped.get() && System.currentTimeMillis() < until) {
+                    Thread.sleep(minOf(250L, maxOf(1L, until - System.currentTimeMillis())))
+                }
+            } catch (_: InterruptedException) { break }
         }
         setConnectionState(ConnectionState.DISCONNECTED)
+    }
+
+    private companion object {
+        const val RATE_LIMIT_HOLD_OFF_MS = 60_000L
     }
 
     private fun reconnectDelayMs(attempt: Int): Long =
@@ -614,12 +710,34 @@ class AirBridgeEngine(private val config: EngineConfig) {
     private fun sendHello(client: WebSocketClient) {
         val hello: JsonValue.Obj
         synchronized(lock) {
+            val device = currentDeviceProfile()
             hello = JsonValue.Obj()
                 .put("type", "hello")
                 .put("peerId", peerId)
-                .put("device", currentDeviceProfile().toJson())
+                .put("device", device.toJson())
                 .put("visibility", visibility)
-            if (pairCode.isNotEmpty()) hello.put("pairCode", pairCode)
+            vouchKey = null
+            admission = null
+            pakeParty = null
+            pakeClient = null
+            if (config.secureJoin && PairCode.isValid(pairCode)) {
+                // Prove the code without sending it (SPAKE2; see PairingProof).
+                val party = Spake2(
+                    Spake2.Role.A,
+                    PairingProof.passwordScalar(pairCode),
+                    PairingProof.joinerSpake2Identity(device.publicKey, device.identityKey),
+                    PairingProof.HUB_SPAKE2_IDENTITY,
+                    PairingProof.JOIN_SPAKE2_AAD,
+                )
+                pakeParty = party
+                pakeClient = client
+                hello.put("pake", JsonValue.Obj()
+                    .put("v", PairingProof.JOIN_PROTOCOL_VERSION)
+                    .put("nameplate", PairingProof.nameplateFor(pairCode))
+                    .put("share", Base64Url.encode(party.share())))
+            } else if (pairCode.isNotEmpty()) {
+                hello.put("pairCode", pairCode)
+            }
         }
         // Bypass the queue: hello must hit the wire before any readLoop output.
         client.sendText(hello.toJsonString())
@@ -632,6 +750,8 @@ class AirBridgeEngine(private val config: EngineConfig) {
         formFactor = config.formFactor,
         publicKey = identity.publicKeyB64,
         deviceId = deviceId,
+        identityKey = identitySig?.let { deviceIdentity.publicKeyB64 },
+        identitySig = identitySig,
     )
 
     private fun sanitizeName(raw: String): String {
@@ -829,17 +949,67 @@ class AirBridgeEngine(private val config: EngineConfig) {
             return
         }
         when (msg.optStr("type")) {
+            "pake-challenge" -> {
+                val client: WebSocketClient?
+                val party: Spake2?
+                synchronized(lock) {
+                    client = pakeClient
+                    party = pakeParty
+                    pakeParty = null
+                    pakeClient = null
+                }
+                if (party == null || client == null || client !== ws) { runCatching { ws?.close() }; return }
+                val result = runCatching {
+                    party.finish(Base64Url.decode(msg.optStr("share") ?: ""))
+                }.getOrNull()
+                val confirm = runCatching { Base64Url.decode(msg.optStr("confirm") ?: "") }.getOrNull()
+                if (result == null || confirm == null || !Spake2.constantTimeEquals(result.expectedPeerConfirm, confirm)) {
+                    rejectPairing(client, "This computer doesn't know that pairing code. Check the code on its screen, or scan its QR code again.")
+                    return
+                }
+                synchronized(lock) { vouchKey = PairingProof.vouchKeyFrom(result.ke) }
+                runCatching {
+                    client.sendText(JsonValue.Obj().put("type", "pake-confirm").put("confirm", Base64Url.encode(result.confirm)).toJsonString())
+                }
+            }
             "welcome" -> {
                 val id = msg.optStr("peerId") ?: return
                 val code = msg.optStr("pairCode") ?: ""
                 val lanUrls = msg.optArr("lanUrls")?.items
                     ?.mapNotNull { it.asStringOrNull() } ?: emptyList()
+                val tlsPin = msg.optStr("tlsPin")
+                val key = synchronized(lock) { vouchKey }
+                val client = ws
+                if (key != null) {
+                    if (!PairingProof.verifyHubProof(key, id, code, tlsPin, msg.optStr("hubProof"))) {
+                        rejectPairing(client, "Could not verify the computer: the connection may have been tampered with.")
+                        return
+                    }
+                    // The hub that knows the code vouched for its TLS anchor:
+                    // the connection we are on must terminate at that anchor.
+                    val seen = client?.tlsAnchorPin
+                    if (seen != null && tlsPin != null && seen != tlsPin) {
+                        rejectPairing(client, "The computer's TLS identity does not match the one it proved with the pairing code. Someone may be intercepting the connection.")
+                        return
+                    }
+                }
+                val admitted = msg.optStr("admission") ?: if (key != null) "pake" else "legacy"
+                admission = admitted
+                val relayO = msg.optObj("relay")
+                // Only a route the code-proving hub vouched for, on a TLS
+                // connection that ends at the anchor it proved, is kept.
+                val anchor = client?.tlsAnchorPin
+                val relay = if (admitted == "pake" && key != null && tlsPin != null && anchor == tlsPin) {
+                    RelayRoute.parse(relayO?.optStr("endpoint"), relayO?.optStr("token"))?.copy(tlsPin = tlsPin)
+                } else null
+                if (relay != null) relayRoute = relay
+                else if (admitted == "pake" && key != null && relayO == null) relayRoute = null // computer turned the relay off
                 synchronized(lock) {
                     peerId = id
                     pairCode = code
                 }
                 welcomedClient = ws
-                for (l in listeners) l.onWelcome(WelcomeInfo(id, code, lanUrls))
+                for (l in listeners) l.onWelcome(WelcomeInfo(id, code, lanUrls, admitted, relay))
                 for (l in listeners) l.onPairCodeChanged(code)
                 setConnectionState(ConnectionState.CONNECTED)
                 applyPeers(msg.optArr("peers"))
@@ -859,6 +1029,14 @@ class AirBridgeEngine(private val config: EngineConfig) {
             "error" -> {
                 val code = msg.optStr("code") ?: "ERROR"
                 val message = msg.optStr("message") ?: ""
+                if (code == "PAIR_CODE_MISMATCH") {
+                    rejectPairing(ws, "This computer doesn't know that pairing code. Check the code on its screen, or scan its QR code again.")
+                    return
+                }
+                if (code == "RATE_LIMITED") {
+                    // Every attempt in the window counts as another guess.
+                    holdOffUntil = System.currentTimeMillis() + RATE_LIMIT_HOLD_OFF_MS
+                }
                 emitError(code, message)
                 ConnectionHelp.forServerError(code, message)?.let { d -> for (l in listeners) l.onConnectionFailure(d) }
             }
@@ -872,6 +1050,9 @@ class AirBridgeEngine(private val config: EngineConfig) {
 
     private fun applyPeers(arr: JsonValue.JsonArr?) {
         val next = mutableListOf<Peer>()
+        val key = synchronized(lock) { vouchKey }
+        val admitted = admission
+        var forged = 0
         if (arr != null) {
             for (item in arr.items) {
                 val o = item as? JsonValue.Obj ?: continue
@@ -879,16 +1060,35 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 val deviceO = o.optObj("device") ?: continue
                 val device = DeviceProfile.fromJson(deviceO)
                 if (device.publicKey.isEmpty()) continue
+                val attestation = o.optStr("attestation")
+                val vouched = attestation == "pake" || attestation == "host"
+                val verified = when {
+                    key != null && admitted == "pake" -> {
+                        val vouch = o.optStr("vouch")
+                        if (vouch != null && !PairingProof.verifyPeerVouch(key, id, device.publicKey, device.identityKey, attestation ?: "legacy", vouch)) {
+                            // Altered in transit: never derive keys with it.
+                            forged++
+                            continue
+                        }
+                        vouch != null && vouched
+                    }
+                    admitted == "host" -> vouched
+                    else -> false
+                }
                 next.add(
                     Peer(
                         peerId = id,
                         device = device,
                         discoveryScope = o.optStr("discoveryScope") ?: "nearby",
                         connectedAt = o.optLong("connectedAt") ?: 0L,
+                        attestation = attestation,
+                        verified = verified,
+                        provenIdentityKey = provenIdentity(device),
                     ),
                 )
             }
         }
+        if (forged > 0) emitError("PEER_VERIFICATION_FAILED", "A device entry failed verification and was ignored. Someone may be tampering with this network.")
         val refreshed = mutableListOf<Peer>()
         synchronized(lock) {
             peers.clear()
@@ -930,10 +1130,13 @@ class AirBridgeEngine(private val config: EngineConfig) {
         val existingFp = sessionKeyFingerprints[peer.peerId]
         val existing = sessions[peer.peerId]
         if (existing != null && existingFp == peer.device.publicKey) return existing
+        val mine = currentDeviceProfile().identityKey
+        val theirs = peer.provenIdentityKey
         val session = AirCrypto.derivePeerSession(
             identity.privateKey,
             identity.publicKeyB64,
             peer.device.publicKey,
+            if (mine != null && theirs != null) mine to theirs else null,
         )
         sessions[peer.peerId] = session
         sessionKeyFingerprints[peer.peerId] = peer.device.publicKey
@@ -1129,7 +1332,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
             transfers[transferId] = ts
             acceptedTransferKeys[transferId] = peer.device.publicKey
             view = ts.toView()
-            trusted = previous != null || config.autoAcceptAll || trustedPeerKeys.contains(peer.device.publicKey)
+            trusted = previous != null || config.autoAcceptAll || isTrustedPeer(peer)
         }
         val offerView = view ?: return
         if (wasConnecting) emitTransfer(offerView) else emitOffer(offerView)
@@ -2412,18 +2615,76 @@ class AirBridgeEngine(private val config: EngineConfig) {
     fun joinPairCode(rawCode: String): Boolean {
         val normalized = PairCode.normalize(rawCode)
         if (!PairCode.isValid(normalized)) return false
-        synchronized(lock) { pairCode = normalized }
-        if (connectionState == ConnectionState.CONNECTED) sendServer(JsonValue.Obj().put("type", "join-pair").put("pairCode", normalized))
+        synchronized(lock) {
+            pairCode = normalized
+            pairingRejected = null
+            lock.notifyAll()
+        }
+        val admitted = admission
+        if (connectionState == ConnectionState.CONNECTED && (admitted == "pake" || admitted == "host" || !config.secureJoin)) {
+            // The computer already proved it knows a code: it may see the new one.
+            sendServer(JsonValue.Obj().put("type", "join-pair").put("pairCode", normalized))
+        } else {
+            // Never hand a code to an unauthenticated hub: reconnect and prove it.
+            runCatching { ws?.close() }
+        }
         return true
+    }
+
+    /** The computer rejected (or could not prove) the pairing code. */
+    private fun rejectPairing(client: WebSocketClient?, message: String) {
+        synchronized(lock) {
+            pairingRejected = message
+            vouchKey = null
+            pakeParty = null
+            pakeClient = null
+        }
+        admission = null
+        emitError("PAIR_CODE_MISMATCH", message)
+        for (l in listeners) l.onConnectionFailure(ConnectionDiagnosis(FailureKind.PAIR_CODE_INVALID, message, message))
+        runCatching { client?.close() }
+    }
+
+    /** Message explaining why the engine stopped reconnecting, or null. */
+    val pairingError: String? get() = pairingRejected
+
+    private fun provenIdentity(device: DeviceProfile): String? {
+        val ik = device.identityKey ?: return null
+        val sig = device.identitySig ?: return null
+        val cacheKey = "$ik|$sig|${device.publicKey}"
+        val ok = identityChecks.getOrPut(cacheKey) {
+            if (identityChecks.size > 256) identityChecks.clear()
+            PairingProof.verifyIdentityBinding(ik, sig, device.publicKey)
+        }
+        return if (ok) ik else null
     }
 
     fun rotatePairCode() {
         sendServer(JsonValue.Obj().put("type", "rotate-pair"))
     }
 
+    /**
+     * Pins a device. Either key of a connected peer is accepted; what gets
+     * stored is its proven identity key (survives restarts), or the session
+     * key for older peers without one.
+     */
     fun setTrusted(peerPublicKey: String, trusted: Boolean) {
-        if (trusted) trustedPeerKeys.add(peerPublicKey) else trustedPeerKeys.remove(peerPublicKey)
+        val peer = synchronized(lock) { peers.values.firstOrNull { it.device.publicKey == peerPublicKey || it.provenIdentityKey == peerPublicKey } }
+        val key = peer?.trustKey ?: peerPublicKey
+        if (trusted) {
+            trustedPeerKeys.add(key)
+        } else {
+            trustedPeerKeys.remove(key)
+            peer?.let { trustedPeerKeys.remove(it.device.publicKey) }
+        }
     }
 
     fun isTrusted(peerPublicKey: String): Boolean = trustedPeerKeys.contains(peerPublicKey)
+
+    /** Trust decision for a connected peer: an unproven identity claim is never trusted. */
+    fun isTrustedPeer(peer: Peer): Boolean = when {
+        peer.provenIdentityKey != null -> trustedPeerKeys.contains(peer.provenIdentityKey)
+        peer.device.identityKey != null -> false
+        else -> trustedPeerKeys.contains(peer.device.publicKey)
+    }
 }

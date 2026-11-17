@@ -110,7 +110,8 @@ object AirCrypto {
 
     /** HKDF-SHA256 (RFC 5869) extract+expand. */
     fun hkdfSha256(ikm: ByteArray, salt: ByteArray, info: ByteArray, length: Int): ByteArray {
-        val prk = hmacSha256(salt, ikm)
+        // RFC 5869: an absent salt is HashLen zero bytes (JCA rejects empty keys).
+        val prk = hmacSha256(if (salt.isEmpty()) ByteArray(32) else salt, ikm)
         val out = ByteArray(length)
         var tPrev = ByteArray(0)
         var offset = 0
@@ -126,7 +127,7 @@ object AirCrypto {
         return out
     }
 
-    private fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
+    fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
         val mac = javax.crypto.Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(key, "HmacSHA256"))
         return mac.doFinal(data)
@@ -146,6 +147,8 @@ object AirCrypto {
         myPrivate: PrivateKey,
         myPublicKeyB64: String,
         peerPublicKeyB64: String,
+        /** Both devices' proven identity keys → stable v2 verification code. */
+        identities: Pair<String, String>? = null,
     ): PeerCryptoSession {
         val peerPub = importRawPublicKeyB64(peerPublicKeyB64)
 
@@ -159,7 +162,12 @@ object AirCrypto {
         val rawKey = hkdfSha256(sharedSecret, saltDigest, HKDF_INFO.toByteArray(Charsets.UTF_8), 32)
         val aesKey = SecretKeySpec(rawKey, "AES")
 
-        val sasDigest = sha256((SAS_CONTEXT + sortedPubs).toByteArray(Charsets.UTF_8))
+        val sasInput = if (identities != null) {
+            "airbridge-sas-v2:" + listOf(identities.first, identities.second).sorted().joinToString(":")
+        } else {
+            SAS_CONTEXT + sortedPubs
+        }
+        val sasDigest = sha256(sasInput.toByteArray(Charsets.UTF_8))
         val sixDigits = ((u32Be(sasDigest, 0) % 1_000_000L).toString()).padStart(6, '0')
         val sasCode = sixDigits.substring(0, 3) + " · " + sixDigits.substring(3, 6)
 

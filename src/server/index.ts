@@ -51,6 +51,7 @@ import {
   readDefaultGateways,
   type ReverseTarget,
 } from './reverseConnect.js';
+import { RELAY_ENDPOINT_FILE, RelayAgent, isRelayedPeer, loadOrCreateRelayHostKey, markRelayedPeer } from './relay.js';
 
 export interface AirBridgeServerOptions {
   port?: number;
@@ -79,6 +80,8 @@ export interface AirBridgeServerOptions {
    * AirBridge at all without it. Set `AIRBRIDGE_HTTPS=0` to opt out.
    */
   https?: boolean;
+  /** Test hook: decides which sockets count as "this computer" (default: own interface addresses). */
+  isLocalMachineAddress?: (address: string | undefined) => boolean;
   /** Override for tests: opens a folder in the OS file manager. */
   openFolder?: (targetPath: string) => Promise<void>;
   /** Where the received-files folder choice is persisted. Default ~/.airbridge/settings.json; set to null to disable. */
@@ -124,16 +127,23 @@ export interface AirBridgeServerOptions {
    * null disables it.
    */
   readFirewall?: (() => Promise<HostFirewallStatus | null>) | null;
+  /**
+   * Relay fallback (see relay.ts): keep standby connections to an AirBridge
+   * relay so code-admitted phones can reach this computer when no direct
+   * path exists. TLS stays end to end. Defaults to AIRBRIDGE_RELAY
+   * (`host:port`) when set; `false` disables.
+   */
+  relay?: false | { endpoint: string; hostKeyFile?: string; standby?: number };
 }
 
 /** Loopback peer that this server did not dial itself. */
 function isLoopbackPeer(socket: net.Socket): boolean {
-  return !isReversePeer(socket) && isLoopbackAddress(socket.remoteAddress);
+  return !isReversePeer(socket) && !isRelayedPeer(socket) && isLoopbackAddress(socket.remoteAddress);
 }
 
 /** Peer on this machine (loopback or own interface) that this server did not dial itself. */
 function isLocalMachinePeer(socket: net.Socket): boolean {
-  return !isReversePeer(socket) && isLocalMachineAddress(socket.remoteAddress);
+  return !isReversePeer(socket) && !isRelayedPeer(socket) && isLocalMachineAddress(socket.remoteAddress);
 }
 
 export interface AirBridgeServerInstance {
@@ -317,6 +327,7 @@ export async function createAirBridgeServer(
         ? createSystemClipboardProvider()
         : null;
 
+  let relayAgent: RelayAgent | null = null;
   const hub = new SignalingHub({
     getLanUrls: advertisedUrls,
     getLanEndpoints: advertisedEndpoints,
@@ -327,6 +338,13 @@ export async function createAirBridgeServer(
     clipboardProvider,
     clipboardPollMs: options.hostClipboardPollMs,
     onHostPairCodeChange: (code) => backgroundPeer?.setPairCode(code),
+    isLocalMachine: options.isLocalMachineAddress,
+    getRelayOffer: () => relayAgent?.offer() ?? null,
+    onPakeFailure: (recent) => {
+      if (recent === 20) {
+        console.warn('[AirBridge] 20 wrong pairing codes in 5 minutes. If this was not you, rotate the pairing code.');
+      }
+    },
   });
 
   const backgroundClipboardEnabled =
@@ -544,6 +562,7 @@ export async function createAirBridgeServer(
       hostFirewall,
       mdnsActive: mdns ? mdns.active : null,
       reverseConnect: reverseConnector ? reverseConnector.describe() : 'disabled',
+      relay: relayAgent ? relayAgent.describe() : 'disabled',
       connectedDevices: hub.describeClients(),
       shellSubscribers: shellSubscriberCount(),
       update: options.updater ? options.updater.getStatus() : { supported: false },
@@ -1018,6 +1037,7 @@ export async function createAirBridgeServer(
             ALPNProtocols: ['http/1.1'],
           });
           if (isReversePeer(socket)) markReversePeer(tlsSocket);
+          if (isRelayedPeer(socket)) markRelayedPeer(tlsSocket);
           tlsSocket.on('error', () => tlsSocket.destroy());
           tlsSocket.on('secure', () => {
             httpServer.emit('connection', tlsSocket);
@@ -1153,6 +1173,29 @@ export async function createAirBridgeServer(
     : null;
   reverseConnector?.start();
 
+  const airbridgeDir = path.dirname(tls?.certDir ?? path.join(process.env.HOME ?? '', '.airbridge', 'tls'));
+  const savedRelay = mode === 'test' ? '' : await fs.promises.readFile(path.join(airbridgeDir, RELAY_ENDPOINT_FILE), 'utf8').catch(() => '');
+  const relayEndpoint = process.env.AIRBRIDGE_RELAY ?? savedRelay.trim();
+  const relayConfig = options.relay === false
+    ? null
+    : options.relay ?? (relayEndpoint && relayEndpoint !== 'off' ? { endpoint: relayEndpoint } : null);
+  if (relayConfig) {
+    try {
+      const keyFile = relayConfig.hostKeyFile ?? path.join(airbridgeDir, 'relay-host-key');
+      relayAgent = new RelayAgent({
+        endpoint: relayConfig.endpoint,
+        hostKey: await loadOrCreateRelayHostKey(keyFile),
+        standby: relayConfig.standby,
+        inject: (socket) => dispatchSocket(socket),
+        log: mode === 'test' ? undefined : (line) => console.log(`[AirBridge] ${line}`),
+      });
+      relayAgent.start();
+    } catch (err) {
+      console.warn('[AirBridge] Relay disabled:', err instanceof Error ? err.message : err);
+      relayAgent = null;
+    }
+  }
+
   if (backgroundClipboardEnabled) {
     try {
       backgroundPeer = startBackgroundClipboardPeer({
@@ -1196,6 +1239,7 @@ export async function createAirBridgeServer(
       if (networkTimer) clearInterval(networkTimer);
       if (firewallTimer) clearInterval(firewallTimer);
       reverseConnector?.stop();
+      relayAgent?.stop();
       mdns?.close();
       backgroundPeer?.stop();
       hub.setBackgroundClipboardActive(false);

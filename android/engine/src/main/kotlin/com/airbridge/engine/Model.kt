@@ -35,6 +35,9 @@ data class DeviceProfile(
     val formFactor: String,
     val publicKey: String,
     val deviceId: String? = null,
+    /** Long-term ECDSA identity key (base64url raw) and its signature over publicKey. */
+    val identityKey: String? = null,
+    val identitySig: String? = null,
 ) {
     fun toJson(): JsonValue.Obj {
         val o = JsonValue.Obj()
@@ -44,6 +47,7 @@ data class DeviceProfile(
             .put("formFactor", formFactor)
             .put("publicKey", publicKey)
         if (deviceId != null) o.put("deviceId", deviceId)
+        if (identityKey != null && identitySig != null) o.put("identityKey", identityKey).put("identitySig", identitySig)
         return o
     }
 
@@ -55,6 +59,8 @@ data class DeviceProfile(
             formFactor = o.optStr("formFactor") ?: "laptop",
             publicKey = o.optStr("publicKey") ?: "",
             deviceId = o.optStr("deviceId"),
+            identityKey = o.optStr("identityKey"),
+            identitySig = o.optStr("identitySig"),
         )
     }
 }
@@ -64,7 +70,16 @@ data class Peer(
     val device: DeviceProfile,
     val discoveryScope: String,
     val connectedAt: Long,
-)
+    /** How the hub admitted the peer: "host", "pake" or "legacy" (null = older hub). */
+    val attestation: String? = null,
+    /** True when the computer that knows the pairing code vouched for this peer's keys. */
+    val verified: Boolean = false,
+    /** Identity key whose signature over the session key checked out. */
+    val provenIdentityKey: String? = null,
+) {
+    /** What "Trust device" pins: the proven identity, else the session key (older peers). */
+    val trustKey: String get() = provenIdentityKey ?: device.publicKey
+}
 
 data class FileManifestItem(
     val index: Int,
@@ -175,7 +190,40 @@ data class WelcomeInfo(
     val peerId: String,
     val pairCode: String,
     val lanUrls: List<String>,
+    /** "host", "pake" (code proven without revealing it) or "legacy". */
+    val admission: String = "legacy",
+    /** Relay rendezvous (only for code-authenticated connections). */
+    val relay: RelayRoute? = null,
 )
+
+/**
+ * An AirBridge relay rendezvous: TCP host:port plus this computer's secret
+ * room token. [tlsPin] is the computer's TLS anchor that a code-authenticated
+ * welcome vouched for; the relay is only ever used with it.
+ */
+data class RelayRoute(val host: String, val port: Int, val token: String, val tlsPin: String = "") {
+    /** Single-line form for app preferences: `host|port|token|pin`. */
+    fun serialize(): String = listOf(host, port.toString(), token, tlsPin).joinToString("|")
+
+    companion object {
+        fun parse(endpoint: String?, token: String?): RelayRoute? {
+            if (endpoint == null || token == null || !Regex("^[0-9a-f]{64}$").matches(token)) return null
+            val idx = endpoint.lastIndexOf(':')
+            if (idx <= 0) return null
+            val host = endpoint.substring(0, idx).removePrefix("[").removeSuffix("]")
+            val port = endpoint.substring(idx + 1).toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
+            if (host.isBlank() || host.length > 253) return null
+            return RelayRoute(host, port, token)
+        }
+
+        fun deserialize(raw: String?): RelayRoute? {
+            val parts = raw?.split('|') ?: return null
+            if (parts.size != 4 || parts[3].isBlank()) return null
+            val base = parse(if (parts[0].contains(':')) "[${parts[0]}]:${parts[1]}" else "${parts[0]}:${parts[1]}", parts[2]) ?: return null
+            return base.copy(tlsPin = parts[3])
+        }
+    }
+}
 
 interface EngineListener {
     fun onConnectionState(state: ConnectionState) {}
@@ -199,6 +247,8 @@ interface EngineListener {
     fun onEndpointConnected(host: String) {}
     /** Like [onEndpointConnected]; [viaReverse] = the computer opened the connection to this phone. */
     fun onEndpointConnected(host: String, viaReverse: Boolean) { onEndpointConnected(host) }
+    /** No direct path: connected through the relay at [relayHost] (TLS still ends at the computer). */
+    fun onRelayConnected(relayHost: String) {}
     /** A connection attempt to [hosts] (ranked, first is preferred) has started. */
     fun onConnectAttempt(hosts: List<String>) {}
     /** The computer reported new reachable addresses (`network` message). */

@@ -28,6 +28,18 @@ import {
   utf8ToBytes,
 } from '../src/shared/protocol';
 import { isValidFileManifest } from '../src/client/engine/warpClient';
+import { Spake2, bigIntTo32 } from '../src/shared/spake2';
+import {
+  HUB_SPAKE2_IDENTITY,
+  JOIN_SPAKE2_AAD,
+  hubProof,
+  joinerSpake2Identity,
+  nameplateFor,
+  passwordScalar,
+  peerVouch,
+  vouchKeyFrom,
+} from '../src/shared/pairingProof';
+import { loadOrCreateDeviceIdentity } from '../src/client/engine/identity';
 
 const b64url = (b: Uint8Array): string =>
   Buffer.from(b).toString('base64url');
@@ -217,6 +229,75 @@ async function main(): Promise<void> {
   for (const m of out.manifests as Array<{ expected: boolean; actualTs: boolean }>) {
     if (m.expected !== m.actualTs) throw new Error('fixture generator disagrees with TS validator');
   }
+
+  // ---- SPAKE2 (RFC 9382 vector + an AirBridge join run) ----
+  const hex = (b: Uint8Array) => Buffer.from(b).toString('hex');
+  const spakeRun = (w: bigint, x: bigint, y: bigint, idA: Uint8Array, idB: Uint8Array, aad: Uint8Array) => {
+    const a = new Spake2('A', w, idA, idB, aad, x);
+    const b = new Spake2('B', w, idA, idB, aad, y);
+    const ra = a.finish(b.share());
+    const rb = b.finish(a.share());
+    if (hex(ra.ke) !== hex(rb.ke)) throw new Error('SPAKE2 sides disagree');
+    return {
+      wHex: hex(bigIntTo32(w)), xHex: hex(bigIntTo32(x)), yHex: hex(bigIntTo32(y)),
+      idAB64: b64url(idA), idBB64: b64url(idB), aadB64: b64url(aad),
+      pAHex: hex(a.share()), pBHex: hex(b.share()),
+      keHex: hex(ra.ke), confirmAHex: hex(ra.confirm), confirmBHex: hex(rb.confirm),
+    };
+  };
+  const rfcRun = spakeRun(
+    BigInt('0x2ee57912099d31560b3a44b1184b9b4866e904c49d12ac5042c97dca461b1a5f'),
+    BigInt('0x43dd0fd7215bdcb482879fca3220c6a968e66d70b1356cac18bb26c84a78d729'),
+    BigInt('0xdcb60106f276b02606d8ef0a328c02e4b629f84f89786af5befb0bc75b6e66be'),
+    utf8('server'), utf8('client'), new Uint8Array(0),
+  );
+  if (rfcRun.confirmAHex !== '58ad4aa88e0b60d5061eb6b5dd93e80d9c4f00d127c65b3b35b1b5281fee38f0') {
+    throw new Error('TS SPAKE2 no longer matches RFC 9382');
+  }
+  const deviceIdentity = await loadOrCreateDeviceIdentity(null);
+  const joinRun = spakeRun(
+    passwordScalar('K7Q2XP'),
+    0x1234567890abcdefn,
+    0xfedcba0987654321n,
+    joinerSpake2Identity(pubA, deviceIdentity.publicKeyB64),
+    HUB_SPAKE2_IDENTITY,
+    JOIN_SPAKE2_AAD,
+  );
+  out.spake2 = [{ name: 'rfc9382', ...rfcRun }, { name: 'airbridge-join', code: 'K7Q2XP', ...joinRun }];
+
+  // ---- pairing proof (nameplates, password scalars, vouches) ----
+  const ke = Uint8Array.from(Buffer.from(joinRun.keHex, 'hex'));
+  const vk = vouchKeyFrom(ke);
+  out.pairingProof = ['K7Q2XP', 'k7q-2xp', '222222', 'ZZZZZZ'].map((code) => ({
+    code,
+    nameplate: nameplateFor(code),
+    wHex: hex(bigIntTo32(passwordScalar(code))),
+  }));
+  out.vouches = [
+    { keHex: joinRun.keHex, vouchKeyB64: b64url(vk), peerId: '0123456789abcdef', publicKey: pubB, identityKey: deviceIdentity.publicKeyB64, attestation: 'pake' },
+    { keHex: joinRun.keHex, vouchKeyB64: b64url(vk), peerId: 'fedcba9876543210', publicKey: pubA, identityKey: null, attestation: 'host' },
+  ].map((v) => ({ ...v, vouch: peerVouch(vk, { peerId: v.peerId, publicKey: v.publicKey, identityKey: v.identityKey ?? undefined, attestation: v.attestation as 'pake' | 'host' }) }));
+  out.hubProofs = [
+    { peerId: '0123456789abcdef', pairCode: 'K7Q2XP', tlsPin: 'pinpinpinpinpinpinpinpinpinpinpinpinpinpinp' },
+    { peerId: '0123456789abcdef', pairCode: 'K7Q2XP', tlsPin: null },
+  ].map((h) => ({ ...h, keHex: joinRun.keHex, proof: hubProof(vk, h) }));
+
+  // ---- identity bindings (WebCrypto ECDSA, raw r||s) ----
+  const goodSig = await deviceIdentity.signBinding(pubA);
+  const badSig = goodSig.slice(0, 10) + (goodSig[10] === 'A' ? 'B' : 'A') + goodSig.slice(11);
+  out.identityBindings = [
+    { identityKey: deviceIdentity.publicKeyB64, sessionKey: pubA, sig: goodSig, valid: true },
+    { identityKey: deviceIdentity.publicKeyB64, sessionKey: pubB, sig: goodSig, valid: false },
+    { identityKey: deviceIdentity.publicKeyB64, sessionKey: pubA, sig: badSig, valid: false },
+  ];
+
+  // ---- v2 (identity-based) verification code ----
+  const otherIdentity = await loadOrCreateDeviceIdentity(null);
+  const sessionV2 = await derivePeerSession(A.privateKey, pubA, pubB, { mine: deviceIdentity.publicKeyB64, peer: otherIdentity.publicKeyB64 });
+  out.sessionsV2 = [{
+    pkcs8: pkcs8A, pubA, pubB, idMine: deviceIdentity.publicKeyB64, idPeer: otherIdentity.publicKeyB64,
+    sas: sessionV2.sasCode, fingerprint: sessionV2.fingerprintHex,
+  }];
 
   // ---- HKDF standalone ----
   const ikm = new Uint8Array(32).fill(0x5a);
