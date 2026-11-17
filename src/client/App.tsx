@@ -273,6 +273,16 @@ export function App() {
       onCallStateChanged: (call) => {
         if (call.state === "ringing" && call.direction === "incoming") playIncomingChime(soundMutedRef.current);
       },
+      onLowPhoneBattery: (status) => {
+        const title = `${status.peerName} battery is low`;
+        const body = `${status.level}% battery. Put the phone on charge soon.`;
+        showToast({ id: `phone-low-battery-${status.peerId}`, title, body });
+        void fetch("/api/local/notification", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title, body }),
+        }).catch(() => {});
+      },
       onIncomingTransfer: () => {
         playIncomingChime(soundMutedRef.current);
       },

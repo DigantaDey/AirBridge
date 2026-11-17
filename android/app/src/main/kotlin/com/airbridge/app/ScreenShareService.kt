@@ -65,6 +65,7 @@ class ScreenShareService : Service() {
     private var handler: Handler? = null
     @Volatile private var sessionId: String? = null
     private var maxEdge = Continuity.SCREEN_DEFAULT_MAX_WIDTH
+    private var maxFps = Continuity.SCREEN_DEFAULT_FPS
     private var width = 0
     private var height = 0
     private var densityDpi = 0
@@ -138,6 +139,7 @@ class ScreenShareService : Service() {
         sessionId = id
         activeSessionId = id
         maxEdge = request.maxWidth
+        maxFps = request.maxFps.coerceIn(1, Continuity.SCREEN_MAX_FPS)
         projection = mp
         val t = HandlerThread("airbridge-screen").also { it.start() }
         thread = t
@@ -225,7 +227,7 @@ class ScreenShareService : Service() {
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, (w * h * 4).coerceIn(750_000, 8_000_000))
-            setInteger(MediaFormat.KEY_FRAME_RATE, Continuity.SCREEN_DEFAULT_FPS)
+            setInteger(MediaFormat.KEY_FRAME_RATE, maxFps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
             // WebCodecs consumes Annex-B AVC without an external config blob.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)

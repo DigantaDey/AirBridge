@@ -7,11 +7,14 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -36,6 +39,8 @@ import com.airbridge.engine.ContinuityChannel
 import com.airbridge.engine.ContinuityException
 import com.airbridge.engine.ScreenShareRequest
 import java.util.concurrent.Executors
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /** Runtime permissions behind each phone continuity feature. */
 object ContinuityPermissions {
@@ -321,16 +326,65 @@ class CallMonitor(
  * incoming contact cards and screen-share consent.
  */
 class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
+    private data class BatteryReading(val level: Int, val charging: Boolean, val voltageMv: Int?)
+
     private val contacts = AndroidContactProvider(context)
     @Volatile private var channel: ContinuityChannel? = null
     private val calls = CallMonitor(context, contacts) { call -> channel?.publishCallState(call) }
     private var lastFeatures: List<String> = emptyList()
+    @Volatile private var lastBattery: BatteryReading? = null
+    private var batteryReceiverRegistered = false
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val reading = readBattery(intent) ?: return
+            val shouldPublish = synchronized(this@PhoneContinuity) {
+                val previous = lastBattery
+                val changed = previous == null || previous.level != reading.level || previous.charging != reading.charging ||
+                    (previous.voltageMv != null && reading.voltageMv != null && abs(previous.voltageMv - reading.voltageMv) >= 50) ||
+                    (previous.voltageMv == null) != (reading.voltageMv == null)
+                if (changed) lastBattery = reading
+                changed
+            }
+            if (shouldPublish) publishBattery(reading)
+        }
+    }
+
+    init {
+        val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        lastBattery = readBattery(context.registerReceiver(null, filter))
+        try {
+            if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(batteryReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            else @Suppress("DEPRECATION") context.registerReceiver(batteryReceiver, filter)
+            batteryReceiverRegistered = true
+        } catch (e: Exception) {
+            Log.w("AirBridgeBattery", "Could not observe battery status: ${e.message}")
+        }
+    }
 
     fun attach(channel: ContinuityChannel) {
         this.channel = channel
         channel.contactProvider = contacts
         channel.callController = calls
         refresh(announce = false)
+        lastBattery?.let(::publishBattery)
+    }
+
+    private fun readBattery(intent: Intent?): BatteryReading? {
+        intent ?: return null
+        val rawLevel = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        if (rawLevel < 0 || scale <= 0) return null
+        val level = (rawLevel * 100f / scale).roundToInt().coerceIn(0, 100)
+        val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
+        val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
+        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+            (status == BatteryManager.BATTERY_STATUS_UNKNOWN && plugged)
+        val voltage = intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1).takeIf { it in 2_500..6_000 }
+        return BatteryReading(level, charging, voltage)
+    }
+
+    private fun publishBattery(reading: BatteryReading) {
+        channel?.publishBatteryStatus(reading.level, reading.charging, reading.voltageMv)
     }
 
     /** Re-evaluate toggles/permissions (Settings change, app resume); re-announce if changed. */
@@ -363,6 +417,7 @@ class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
     /** A computer (re)connected: bring it up to date on a call in progress. */
     fun onPeersChanged() {
         calls.currentCall()?.let { channel?.publishCallState(it.copy(updatedAt = System.currentTimeMillis())) }
+        lastBattery?.let(::publishBattery)
     }
 
     fun onContactsReceived(item: ContactShareItem) = ContinuityNotifications.contactReceived(context, item)
@@ -376,6 +431,10 @@ class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
 
     fun detach() {
         calls.shutdown()
+        if (batteryReceiverRegistered) {
+            runCatching { context.unregisterReceiver(batteryReceiver) }
+            batteryReceiverRegistered = false
+        }
         channel = null
     }
 }

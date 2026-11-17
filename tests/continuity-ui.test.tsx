@@ -47,6 +47,7 @@ function snapshot(partial: Partial<ContinuitySnapshot> = {}): ContinuitySnapshot
     screenShares: [],
     screenRequests: [],
     sharedContacts: [],
+    batteryStatus: {},
     ...partial,
   };
 }
@@ -155,6 +156,20 @@ describe("featureGuidance", () => {
 });
 
 describe("ContinuityCenter", () => {
+  it("shows live phone battery status and a charging warning below 20 percent", async () => {
+    const { client } = fakeClient();
+    await render(<ContinuityCenter
+      client={client}
+      peers={[phone]}
+      continuity={snapshot({ batteryStatus: { [PHONE]: { peerId: PHONE, peerName: "Pixel 9", level: 14, charging: false, updatedAt: Date.now() } } })}
+      initialTab="screen"
+      onClose={() => {}}
+    />);
+    expect(container.textContent).toContain("14%");
+    expect(container.textContent).toContain("On battery");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("put Pixel 9 on charge soon");
+  });
+
   it("loads, searches, exports and calls contacts from the phone", async () => {
     const { client } = fakeClient();
     const createUrl = vi.fn(() => "blob:vcf");

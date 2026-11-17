@@ -373,6 +373,13 @@ html.dark .clipboard-error { color: #f87171; }
 .continuity-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--ab-text); margin-left: 6px; vertical-align: middle; }
 .continuity-device { display: flex; align-items: center; gap: 10px; margin: 12px 0 0; font-size: 12px; color: var(--ab-secondary); }
 .continuity-device select { flex: 1; min-width: 0; font: inherit; color: var(--ab-text); background: var(--ab-bg); border: 1px solid var(--ab-border-strong); border-radius: 6px; padding: 6px 8px; }
+.phone-battery { margin-top: 10px; border: 1px solid var(--ab-border); border-radius: 8px; padding: 8px 10px; background: var(--ab-subtle); }
+.phone-battery-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--ab-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.phone-battery-line strong { color: var(--ab-text); font-size: 13px; }
+.phone-battery-label { color: var(--ab-muted); }
+.phone-battery-voltage { color: var(--ab-muted); }
+.phone-battery.is-low { border-color: var(--ab-warning, #d18b00); }
+.phone-battery-warning { margin-top: 5px; color: var(--ab-warning, #a76500); font-size: 12px; }
 .continuity-panel { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
 .continuity-guidance { border: 1px dashed var(--ab-border-strong); padding: 12px 14px; margin: 0; font-size: 12px; color: var(--ab-secondary); }
 .continuity-note { color: var(--ab-muted); font-size: 11px; margin: 0; }

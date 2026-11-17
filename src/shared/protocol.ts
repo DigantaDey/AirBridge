@@ -197,6 +197,15 @@ export type ControlPayload =
       call: CallInfo;
     }
   | {
+      /** Live phone battery telemetry sent only to an authorized paired computer. */
+      kind: 'battery-status';
+      level: number;
+      charging: boolean;
+      /** Phone battery pack voltage, millivolts; this is not charger-adapter voltage. */
+      voltageMv?: number;
+      updatedAt: number;
+    }
+  | {
       kind: 'call-command';
       commandId: string;
       action: CallAction;

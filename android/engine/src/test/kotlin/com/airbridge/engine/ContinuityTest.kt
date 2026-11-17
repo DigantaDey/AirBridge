@@ -110,6 +110,15 @@ fun main() {
     channel.handleControl(stranger, obj("kind" to "continuity-hello", "v" to 1, "features" to JsonValue.JsonArr()))
     expect("hello.stranger-ignored", channel.peerFeatures(stranger).isEmpty() && host.sent.none { it.first == stranger })
 
+    host.sent.clear()
+    channel.publishBatteryStatus(17, charging = false, voltageMv = 4_010, updatedAt = 1234)
+    expect("battery.authorized-only", host.sent.map { it.first } == listOf(mac))
+    expect("battery.payload", host.last("battery-status")!!.second.let {
+        it.optLong("level") == 17L && it.optBool("charging") == false && it.optLong("voltageMv") == 4_010L && it.optLong("updatedAt") == 1_234L
+    })
+    channel.publishBatteryStatus(101, charging = false, voltageMv = 4_010)
+    expect("battery.invalid-level-dropped", host.sent.size == 1)
+
     // ---- contacts -----------------------------------------------------------
     channel.handleControl(mac, obj("kind" to "contacts-request", "requestId" to "0123456789abcdef", "query" to "al", "limit" to 10))
     val resp = host.last("contacts-response")!!.second

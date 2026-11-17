@@ -60,8 +60,10 @@ final class ServiceSupervisor {
         get { stateLock.lock(); defer { stateLock.unlock() }; return _ownPid }
         set { stateLock.lock(); _ownPid = newValue; stateLock.unlock() }
     }
-    /// First failed health check of the current outage (nil while healthy).
-    private var unresponsiveSince: Date?
+    /// First failed health check measured with a monotonic clock. `Date` advances
+    /// while a Mac sleeps; counting that time used to make the watchdog kill a
+    /// healthy service immediately after wake before its event loop resumed.
+    private var unresponsiveSince: DispatchTime?
     /// Crash-loop backoff: consecutive starts that exited early, and when the next start may happen.
     private var earlyExits = 0
     private var nextStartAllowed = Date.distantPast
@@ -173,9 +175,10 @@ final class ServiceSupervisor {
             return
         }
 
-        let now = Date()
-        if unresponsiveSince == nil { unresponsiveSince = now }
-        let silentFor = now.timeIntervalSince(unresponsiveSince!)
+        if unresponsiveSince == nil { unresponsiveSince = .now() }
+        let start = unresponsiveSince!.uptimeNanoseconds
+        let current = DispatchTime.now().uptimeNanoseconds
+        let silentFor = current >= start ? TimeInterval(current - start) / 1_000_000_000 : 0
         DispatchQueue.main.async { self.onServiceDown?() }
 
         // Our service is alive but not answering: busy, not dead. Restart only a long hang.
@@ -288,7 +291,7 @@ final class ServiceSupervisor {
         lastSeenPid = nil
         // The hang grace period counts from the start, so a slow first start
         // (TLS certificate generation) is never mistaken for a hang.
-        unresponsiveSince = now
+        unresponsiveSince = .now()
         log("started AirBridge \(installedVersion ?? "") pid \(proc.processIdentifier)")
         for _ in 0..<240 { // up to 60 s; the watchdog keeps waiting after that
             if quitting || !proc.isRunning { return }
@@ -1311,10 +1314,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     // --- Page → app messages ---
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == "airbridgeShell",
+              message.frameInfo.isMainFrame,
+              let host = webView.url?.host,
+              ["localhost", "127.0.0.1", "::1"].contains(host),
               let body = message.body as? [String: Any],
               let action = body["action"] as? String else { return }
         if action == "restart-server" {
             supervisor.restart()
+        } else if action == "copy-text",
+                  let text = body["text"] as? String,
+                  text.utf8.count <= 1_000_000 {
+            // WKWebView's navigator.clipboard / execCommand support varies by
+            // macOS release. Use AppKit's pasteboard from the trusted local UI.
+            DispatchQueue.main.async {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
         }
     }
 

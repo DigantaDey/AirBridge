@@ -741,7 +741,7 @@ class ContinuityChannel internal constructor(private val host: Host) {
                 if (ended) for (l in host.listeners()) l.onScreenShareEnded(id, "The computer stopped watching")
             }
             // Viewer-side and desktop-only kinds: the phone never asks, so ignore.
-            "contacts-response", "call-state", "call-command-result", "screen-share-state" -> {}
+            "contacts-response", "call-state", "call-command-result", "screen-share-state", "battery-status" -> {}
             else -> return false
         }
         return true
@@ -810,6 +810,19 @@ class ContinuityChannel internal constructor(private val host: Host) {
     fun publishCallState(call: CallInfo) {
         val clean = Continuity.sanitizeCall(call) ?: return
         val payload = JsonValue.Obj().put("kind", "call-state").put("call", clean.toJson())
+        for (id in host.peerIds()) if (host.isAuthorized(id)) send(id, payload)
+    }
+
+    /** Publish minimal live battery telemetry only to code-verified paired computers. */
+    fun publishBatteryStatus(level: Int, charging: Boolean, voltageMv: Int?, updatedAt: Long = System.currentTimeMillis()) {
+        if (level !in 0..100 || updatedAt <= 0) return
+        val cleanVoltage = voltageMv?.takeIf { it in 2_500..6_000 }
+        val payload = JsonValue.Obj()
+            .put("kind", "battery-status")
+            .put("level", level)
+            .put("charging", charging)
+            .putOpt("voltageMv", cleanVoltage?.toLong())
+            .put("updatedAt", updatedAt)
         for (id in host.peerIds()) if (host.isAuthorized(id)) send(id, payload)
     }
 

@@ -69,6 +69,16 @@ export interface CallView extends CallInfo {
   peerName: string;
 }
 
+export interface PhoneBatteryStatusView {
+  peerId: string;
+  peerName: string;
+  level: number;
+  charging: boolean;
+  /** Phone battery pack voltage in millivolts (not charger-adapter voltage). */
+  voltageMv?: number;
+  updatedAt: number;
+}
+
 export interface ScreenShareView {
   sessionId: string;
   peerId: string;
@@ -107,6 +117,7 @@ export interface ContinuitySnapshot {
   screenShares: ScreenShareView[];
   screenRequests: ScreenShareRequestView[];
   sharedContacts: ContactShareItem[];
+  batteryStatus: Record<string, PhoneBatteryStatusView>;
 }
 
 export const EMPTY_CONTINUITY: ContinuitySnapshot = {
@@ -115,6 +126,7 @@ export const EMPTY_CONTINUITY: ContinuitySnapshot = {
   screenShares: [],
   screenRequests: [],
   sharedContacts: [],
+  batteryStatus: {},
 };
 
 export interface ScreenFrame {
@@ -190,6 +202,8 @@ export interface ContinuityOptions {
   onCallStateChanged?: (call: CallView) => void;
   onIncomingContact?: (item: ContactShareItem) => void;
   onScreenShareRequest?: (request: ScreenShareRequestView) => void;
+  /** Called once when a phone first reports a low, unplugged battery; reset above 20% or when charging. */
+  onLowPhoneBattery?: (status: PhoneBatteryStatusView) => void;
 }
 
 export interface ContinuityHost {
@@ -260,9 +274,13 @@ export class ContinuityManager {
   private readonly viewers = new Map<string, ViewerSession>();
   private readonly requests = new Map<string, { view: ScreenShareRequestView; timer: ReturnType<typeof setTimeout> }>();
   private readonly sharedContacts: ContactShareItem[] = [];
+  private readonly batteryStatus = new Map<string, PhoneBatteryStatusView>();
+  private readonly lowBatteryNotified = new Set<string>();
   private readonly contactRequests = new Map<string, Pending<ContactsQueryResult>>();
   private readonly callCommands = new Map<string, Pending<CallCommandResult>>();
   private readonly frameListeners = new Map<string, Set<(frame: ScreenFrame) => void>>();
+  /** Serialize async decrypts: H.264 deltas must reach WebCodecs in wire order. */
+  private readonly screenFrameQueues = new Map<string, Promise<void>>();
   private readonly videoListeners = new Map<string, Set<(frame: ScreenVideoFrame) => void>>();
   private readonly audioListeners = new Map<string, Set<(frame: ScreenAudioFrame) => void>>();
   private readonly lingerTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -327,6 +345,8 @@ export class ContinuityManager {
 
   private dropPeer(peerId: string): void {
     this.peerFeatures.delete(peerId);
+    this.batteryStatus.delete(peerId);
+    this.lowBatteryNotified.delete(peerId);
     for (const [key, entry] of this.calls) {
       if (entry.view.peerId === peerId) {
         if (entry.timer) clearTimeout(entry.timer);
@@ -363,6 +383,7 @@ export class ContinuityManager {
       screenShares: [...this.viewers.values(), ...this.sources.values()].map((s) => ({ ...s.view })),
       screenRequests: [...this.requests.values()].map((r) => ({ ...r.view })),
       sharedContacts: this.sharedContacts.slice(),
+      batteryStatus: Object.fromEntries(this.batteryStatus),
     };
   }
 
@@ -377,6 +398,9 @@ export class ContinuityManager {
     for (const req of this.requests.values()) clearTimeout(req.timer);
     for (const call of this.calls.values()) if (call.timer) clearTimeout(call.timer);
     for (const timer of this.lingerTimers) clearTimeout(timer);
+    this.screenFrameQueues.clear();
+    this.batteryStatus.clear();
+    this.lowBatteryNotified.clear();
     for (const map of [this.contactRequests, this.callCommands] as Array<Map<string, Pending<never>>>) {
       for (const pending of map.values()) {
         clearTimeout(pending.timer);
@@ -435,6 +459,9 @@ export class ContinuityManager {
         return true;
       case 'call-state':
         this.receiveCallState(fromPeerId, payload.call);
+        return true;
+      case 'battery-status':
+        this.receiveBatteryStatus(fromPeerId, payload);
         return true;
       case 'call-command':
         await this.executeCallCommand(fromPeerId, payload);
@@ -607,6 +634,36 @@ export class ContinuityManager {
       this.calls.delete(oldest[0]);
     }
     this.options.onCallStateChanged?.(view);
+    this.host.emit();
+  }
+
+  private receiveBatteryStatus(
+    fromPeerId: string,
+    payload: Extract<ControlPayload, { kind: 'battery-status' }>,
+  ): void {
+    if (!this.host.isPaired(fromPeerId) || this.host.peer(fromPeerId)?.device.platform !== 'android') return;
+    if (!Number.isInteger(payload.level) || payload.level < 0 || payload.level > 100 ||
+        typeof payload.charging !== 'boolean' || !Number.isFinite(payload.updatedAt) || payload.updatedAt <= 0) return;
+    const previous = this.batteryStatus.get(fromPeerId);
+    if (previous && previous.updatedAt > payload.updatedAt) return;
+    const voltageMv = Number.isInteger(payload.voltageMv) && payload.voltageMv! >= 2_500 && payload.voltageMv! <= 6_000
+      ? payload.voltageMv
+      : undefined;
+    const status: PhoneBatteryStatusView = {
+      peerId: fromPeerId,
+      peerName: this.peerName(fromPeerId),
+      level: payload.level,
+      charging: payload.charging,
+      voltageMv,
+      updatedAt: payload.updatedAt,
+    };
+    this.batteryStatus.set(fromPeerId, status);
+    if (status.charging || status.level >= 20) {
+      this.lowBatteryNotified.delete(fromPeerId);
+    } else if (!this.lowBatteryNotified.has(fromPeerId)) {
+      this.lowBatteryNotified.add(fromPeerId);
+      this.options.onLowPhoneBattery?.(status);
+    }
     this.host.emit();
   }
 
@@ -787,12 +844,26 @@ export class ContinuityManager {
 
   async handleScreenFrame(fromPeerId: string, bytes: Uint8Array): Promise<void> {
     if (this.destroyed) return;
-    let frame;
+    let frame: ReturnType<typeof decodeScreenFrame>;
     try {
       frame = decodeScreenFrame(bytes);
     } catch {
       return;
     }
+    const key = frame.sessionId;
+    const prior = this.screenFrameQueues.get(key) ?? Promise.resolve();
+    const next = prior.catch(() => {}).then(() => this.processScreenFrame(fromPeerId, frame));
+    const settled = next.catch(() => {});
+    this.screenFrameQueues.set(key, settled);
+    try {
+      await settled;
+    } finally {
+      if (this.screenFrameQueues.get(key) === settled) this.screenFrameQueues.delete(key);
+    }
+  }
+
+  private async processScreenFrame(fromPeerId: string, frame: ReturnType<typeof decodeScreenFrame>): Promise<void> {
+    if (this.destroyed) return;
     const session = this.viewers.get(frame.sessionId);
     if (!session || session.view.peerId !== fromPeerId) return;
     if (!['requesting', 'pending', 'active'].includes(session.view.state)) return;

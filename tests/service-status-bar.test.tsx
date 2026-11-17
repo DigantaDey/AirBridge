@@ -3,7 +3,7 @@ import React from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ServiceStatusBar, collectDiagnostics } from "../src/client/components/ServiceStatusBar.js";
+import { ServiceStatusBar, collectDiagnostics, copyText } from "../src/client/components/ServiceStatusBar.js";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -61,6 +61,16 @@ describe("ServiceStatusBar", () => {
     expect(writeText).toHaveBeenCalledOnce();
     expect(writeText.mock.calls[0]![0]).toContain('"version": "0.0.6"');
     expect(el.textContent).toContain("Diagnostics copied");
+  });
+});
+
+describe("diagnostics clipboard fallback", () => {
+  it("uses the native macOS pasteboard when browser clipboard APIs reject the copy", async () => {
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: vi.fn(() => Promise.reject(new Error("permission denied"))) }, configurable: true });
+    const postMessage = vi.fn();
+    Object.defineProperty(window, "webkit", { value: { messageHandlers: { airbridgeShell: { postMessage } } }, configurable: true });
+    expect(await copyText("support diagnostics" )).toBe(true);
+    expect(postMessage).toHaveBeenCalledWith({ action: "copy-text", text: "support diagnostics" });
   });
 });
 

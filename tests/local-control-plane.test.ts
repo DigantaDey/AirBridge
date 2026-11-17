@@ -99,6 +99,23 @@ describe('diagnostics', () => {
     expect(text).not.toContain(server.hub.getDefaultPairCode());
   });
 
+  it('accepts a same-origin low-battery notification request and rejects cross-origin posts', async () => {
+    const url = `http://127.0.0.1:${server.port}/api/local/notification`;
+    const valid = await fetch(url, {
+      method: 'POST',
+      headers: { Origin: `http://127.0.0.1:${server.port}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Phone battery is low', body: '18% battery. Put the phone on charge soon.' }),
+    });
+    expect(valid.status).toBe(202);
+    expect(await valid.json()).toEqual({ accepted: true });
+    const rejected = await fetch(url, {
+      method: 'POST',
+      headers: { Origin: 'https://evil.example', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Injected', body: 'No' }),
+    });
+    expect(rejected.status).toBe(403);
+  });
+
   it('update status explains when self-update is not available', async () => {
     const res = await fetch(`http://127.0.0.1:${server.port}/api/update`);
     expect(await res.json()).toMatchObject({ supported: false, current: '3.2.1' });
