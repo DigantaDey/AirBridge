@@ -27,13 +27,20 @@ import com.airbridge.engine.Handoff
 import java.util.UUID
 
 /** What the hotspot handoff card shows. */
+data class ManualHotspotDetails(
+    val ssid: String,
+    /** Kept only in the in-memory UI state while this temporary hotspot is active. */
+    val password: String,
+    val security: Handoff.Security,
+)
+
 data class HandoffUiState(
     /** Handoff keys from a code-authenticated pairing are saved: the feature can be offered. */
     val available: Boolean = false,
     val phase: Phase = Phase.IDLE,
     val message: String? = null,
-    /** Hotspot name while it runs (never the password). */
-    val ssid: String? = null,
+    /** Connection details are exposed only after the user explicitly reveals them in the UI. */
+    val manualHotspot: ManualHotspotDetails? = null,
 ) {
     enum class Phase { IDLE, STARTING, OFFERING, WAITING, JOINED, FAILED }
 
@@ -91,7 +98,12 @@ class HotspotHandoff(
     /** Runtime permissions this feature needs on the running Android version. */
     fun requiredPermissions(): Array<String> = requiredPermissionsFor(Build.VERSION.SDK_INT)
 
-    fun missingPermissions(): List<String> = requiredPermissions().filter {
+    /** Permissions needed to create the hotspot; Bluetooth is an optional convenience. */
+    fun missingPermissions(): List<String> = requiredHotspotPermissionsFor(Build.VERSION.SDK_INT).filter {
+        context.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun missingBluetoothPermissions(): List<String> = requiredBluetoothPermissionsFor(Build.VERSION.SDK_INT).filter {
         context.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
     }
 
@@ -146,7 +158,7 @@ class HotspotHandoff(
             return
         }
         if (missingPermissions().isNotEmpty()) {
-            fail("Allow Nearby devices (Wi-Fi and Bluetooth) so AirBridge can start a hotspot for the computer.")
+            fail("Allow Nearby Wi-Fi devices so AirBridge can start a temporary hotspot. Bluetooth is optional; you can join the hotspot manually if automatic handoff is unavailable.")
             return
         }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU && !locationEnabled()) {
@@ -213,7 +225,13 @@ class HotspotHandoff(
             return
         }
         envelope = env
-        update(state.copy(phase = HandoffUiState.Phase.OFFERING, ssid = creds.ssid, message = "Offering “${creds.ssid}” to the computer…"))
+        update(
+            state.copy(
+                phase = HandoffUiState.Phase.OFFERING,
+                manualHotspot = ManualHotspotDetails(creds.ssid, creds.psk, creds.security),
+                message = "Offering this phone's temporary Wi-Fi hotspot to the paired computer…",
+            ),
+        )
         if (sendOverSession(env)) {
             // Starting a hotspot drops this phone's own Wi-Fi (and the session
             // with it) on phones without concurrent AP+STA. No reply soon means
@@ -228,26 +246,28 @@ class HotspotHandoff(
 
     private fun startBle(keys: Handoff.Info, env: ByteArray) {
         sessionFallback = null
-        val adapter = bluetooth?.adapter
-        if (adapter == null || !adapter.isEnabled) {
-            update(
-                state.copy(
-                    phase = HandoffUiState.Phase.WAITING,
-                    message = "Not connected to the computer and Bluetooth is off. Turn on Bluetooth, or join “${state.ssid}” on the computer by hand.",
-                ),
-            )
+        if (missingBluetoothPermissions().isNotEmpty()) {
+            update(state.copy(phase = HandoffUiState.Phase.WAITING, message = HotspotHandoffGuidance.bluetoothPermissionMissing()))
             return
         }
-        update(state.copy(phase = HandoffUiState.Phase.OFFERING, message = "Looking for the computer over Bluetooth…"))
+        val adapter = bluetooth?.adapter
+        if (adapter == null || !adapter.isEnabled) {
+            update(state.copy(phase = HandoffUiState.Phase.WAITING, message = HotspotHandoffGuidance.phoneBluetoothOff()))
+            return
+        }
+        if (adapter.bluetoothLeScanner == null) {
+            update(state.copy(phase = HandoffUiState.Phase.WAITING, message = HotspotHandoffGuidance.bluetoothUnavailable()))
+            return
+        }
+        update(state.copy(phase = HandoffUiState.Phase.OFFERING, message = "Finding the compatible Mac over AirBridge's private Bluetooth service…"))
         ble?.close()
         ble = BleOffer(keys, env).also { it.start() }
     }
 
     private fun applyStatus(s: Handoff.State, reason: String) {
-        val ssid = state.ssid ?: "the hotspot"
         when (s) {
             Handoff.State.PENDING -> update(state.copy(phase = HandoffUiState.Phase.WAITING, message = "Waiting for approval on the computer…"))
-            Handoff.State.JOINING -> update(state.copy(phase = HandoffUiState.Phase.WAITING, message = "The computer is joining “$ssid”…"))
+            Handoff.State.JOINING -> update(state.copy(phase = HandoffUiState.Phase.WAITING, message = "The computer is joining this phone's temporary Wi-Fi hotspot…"))
             Handoff.State.JOINED -> update(state.copy(phase = HandoffUiState.Phase.JOINED, message = "The computer is on this phone's hotspot. Transfers go direct."))
             Handoff.State.DECLINED -> finish("The computer declined the hotspot.")
             Handoff.State.EXPIRED -> finish("Nobody answered on the computer in time.")
@@ -357,7 +377,7 @@ class HotspotHandoff(
                 update(
                     state.copy(
                         phase = HandoffUiState.Phase.WAITING,
-                        message = "No paired AirBridge computer found over Bluetooth. Keep AirBridge running on the computer, or join “${state.ssid}” there by hand.",
+                        message = HotspotHandoffGuidance.computerNotFound(),
                     ),
                 )
             }
@@ -376,7 +396,7 @@ class HotspotHandoff(
                 main.post {
                     if (closed) return@post
                     scanning = false
-                    update(state.copy(phase = HandoffUiState.Phase.WAITING, message = "Bluetooth scan failed (code $errorCode). Join “${state.ssid}” on the computer by hand."))
+                    update(state.copy(phase = HandoffUiState.Phase.WAITING, message = HotspotHandoffGuidance.scanFailed(errorCode)))
                 }
             }
         }
@@ -447,12 +467,18 @@ class HotspotHandoff(
 
         private fun scan() {
             if (scanning || closed) return
-            val scanner = bluetooth?.adapter?.bluetoothLeScanner ?: return
+            val scanner = bluetooth?.adapter?.bluetoothLeScanner ?: run {
+                update(state.copy(phase = HandoffUiState.Phase.WAITING, message = HotspotHandoffGuidance.bluetoothUnavailable()))
+                return
+            }
             val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE)).build()
             val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
             runCatching { scanner.startScan(listOf(filter), settings, scanCallback) }
                 .onSuccess { scanning = true }
-                .onFailure { Log.w(TAG, "BLE scan failed to start", it) }
+                .onFailure {
+                    Log.w(TAG, "BLE scan failed to start", it)
+                    update(state.copy(phase = HandoffUiState.Phase.WAITING, message = HotspotHandoffGuidance.scanFailed()))
+                }
         }
 
         private fun stopScan() {
@@ -561,18 +587,25 @@ class HotspotHandoff(
         private val STATUS: UUID = UUID.fromString(Handoff.STATUS_UUID)
         private val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-        /** Pure so it can be unit tested per API level. */
-        fun requiredPermissionsFor(sdk: Int): Array<String> = buildList {
+        /** Permissions required to create a local-only hotspot, independent of Bluetooth. */
+        fun requiredHotspotPermissionsFor(sdk: Int): Array<String> = buildList {
             if (sdk >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.NEARBY_WIFI_DEVICES)
             else {
                 // Android 12-12L lets the user grant only approximate location; both must be asked.
                 add(Manifest.permission.ACCESS_FINE_LOCATION)
                 add(Manifest.permission.ACCESS_COARSE_LOCATION)
             }
-            if (sdk >= Build.VERSION_CODES.S) {
-                add(Manifest.permission.BLUETOOTH_SCAN)
-                add(Manifest.permission.BLUETOOTH_CONNECT)
-            }
         }.toTypedArray()
+
+        /** BLE is an optional fast handoff path; manual Wi-Fi setup remains available without it. */
+        fun requiredBluetoothPermissionsFor(sdk: Int): Array<String> = if (sdk >= Build.VERSION_CODES.S) {
+            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            emptyArray()
+        }
+
+        /** Permissions requested by the UI; denying Bluetooth must not block hotspot setup. */
+        fun requiredPermissionsFor(sdk: Int): Array<String> =
+            (requiredHotspotPermissionsFor(sdk).toList() + requiredBluetoothPermissionsFor(sdk)).distinct().toTypedArray()
     }
 }

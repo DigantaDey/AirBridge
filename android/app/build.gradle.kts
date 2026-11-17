@@ -128,4 +128,5 @@ dependencies {
 
     // QR encoding & camera pairing scanner (Camera2 + pure-Java ZXing, offline).
     implementation("com.google.zxing:core:3.5.3")
+    testImplementation("junit:junit:4.13.2")
 }
