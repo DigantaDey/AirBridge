@@ -15,7 +15,7 @@ and an Android App Bundle prepared for **Google Play App Signing**. See the
 | Windows ARM64 | `AirBridge-windows-arm64.exe` | Linux CI runner | none |
 | Linux x64 (glibc / static) | `AirBridge-linux-x64`, `…-musl` | Linux CI runner | none |
 | Linux ARM64 (glibc / static) | `AirBridge-linux-arm64`, `…-arm64-musl` | Linux CI runner | none |
-| Android 8.0+ (API 26) | `app-release.aab` | `:app:bundleRelease` | private Play upload key + Play App Signing |
+| Android 8.0+ (API 26) | `app-release.aab` — private Play-upload artifact only | `:app:bundleRelease` when the private key is configured | private Play upload key + Play App Signing |
 | any OS with Node | `npm run build:desktop` | local / CI | same rules apply |
 
 Every release also carries `SHA256SUMS.txt` and keyless **Sigstore
@@ -56,7 +56,7 @@ desktop self-updater enforces the checksums before installing anything; see
 
 ### Android — Google Play App Bundle
 * The Android release is an **AAB**, signed locally or in CI with a private upload key and uploaded to Google Play. Google Play App Signing manages the installation signing key and delivery splits.
-* `:app:bundleRelease` fails closed if `android/keystore.properties` or the four `AIRBRIDGE_KEYSTORE_*` variables are missing. The old committed sideload key was removed because it could not establish publisher authenticity.
+* `:app:bundleRelease` fails closed if `android/keystore.properties` or the four `AIRBRIDGE_KEYSTORE_*` variables are missing. The public release workflow deliberately defers the Play AAB rather than manufacturing an unsigned substitute when its private Actions secrets are absent. The old committed sideload key was removed because it could not establish publisher authenticity.
 * The Play submission requires a current privacy-policy URL, Data safety answers and foreground-service declarations. AirBridge’s detailed manual steps, permissions and review checklist live in [PLAY_STORE_RELEASE.md](PLAY_STORE_RELEASE.md).
 * Current Android scope deliberately excludes Accessibility and notification-listener services, and does not request `READ_CALL_LOG`. Clipboard sends from other apps use Android Share / Process Text, the Quick Settings tile or the in-app Paste action.
 
@@ -125,16 +125,20 @@ A release **must** exist: `install.sh` and `install.ps1` resolve
      `--only windows --skip-client` (bun cross-compiles from Linux);
    * **darwin** job: `--only darwin` then `codesign --force -s -`, then
      `scripts/package-mac-app.sh` for both architectures (prebuilt app zips);
-   * **android** job: Node 22 + `npm ci`, a private upload key stored in GitHub
-     Actions secrets, then `gradle :engine:check :app:bundleRelease`. The job
-     fails early if a signing secret is absent. `preBuild` embeds the UI in the
-     Android bundle; engine checks cover vectors, pairing, disk integrity and
-     transport regressions;
+   * **android** job: if all four private upload-key Actions secrets are
+     configured, it runs Node 22 + `npm ci` and `gradle :engine:check
+     :app:bundleRelease`, then retains the signed AAB privately for Play
+     Console upload. If the credentials are not configured, it emits a visible
+     deferred notice and makes no AAB; it never falls back to unsigned or
+     sideload signing. `preBuild` embeds the UI in the Android bundle; engine
+     checks cover vectors, pairing, disk integrity and transport regressions;
    * **publish** job: downloads the desktop artifacts, writes
      `SHA256SUMS.txt`, attests build provenance (Sigstore, keyless), and
-     publishes desktop binaries. The Play AAB remains a short-lived private
-     Actions artifact; download it only to upload it to Play Console, never as
-     a directly installable GitHub Release asset.
+     publishes desktop binaries. A public open-source desktop release can
+     proceed while Play credentials are intentionally deferred. When built, the
+     Play AAB remains a short-lived private Actions artifact; download it only
+     to upload it to Play Console, never as a directly installable GitHub
+     Release asset.
 3. Users run `install.sh` / `install.ps1` or grab files from the release page.
 
 ## Asset names (must stay in sync)

@@ -44,7 +44,7 @@ android {
         // A stable production floor prevents a local Play bundle from going
         // backwards from the old CI-generated sideload version codes.
         versionCode = configuredVersionCode ?: 2_300_000 + gitCommitCount
-        versionName = "2.4.5"
+        versionName = "2.4.6"
     }
 
     signingConfigs {
