@@ -14,7 +14,7 @@ const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function waitFor<T>(
   probe: () => T | Promise<T>,
   predicate: (value: T) => boolean,
-  timeoutMs = 8_000,
+  timeoutMs = 15_000, // only reached on failure; CI runners can be slow to set up the encrypted peer
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let last = await probe();
@@ -133,7 +133,7 @@ describe('background clipboard without open browser UIs', () => {
         Reflect.deleteProperty(globalThis, 'localStorage');
       }
     }
-  }, 20_000);
+  }, 40_000);
   it('restores the startup QR pairing group and disabled clipboard preferences after a daemon restart', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'airbridge-background-restart-'));
     const stateFile = path.join(dir, 'peer.json');

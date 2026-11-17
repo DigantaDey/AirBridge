@@ -230,3 +230,20 @@ describe('macOS installer', () => {
     expect(fs.existsSync(path.join(root, 'starts'))).toBe(false);
   });
 });
+
+describe('install.sh platform checks', () => {
+  const script = fs.readFileSync(path.join(__dirname, '..', 'install.sh'), 'utf8');
+
+  it('compares the lowercase platform name, so the static musl fallback is reachable on Linux', () => {
+    expect(script).toMatch(/platform="linux"/);
+    expect(script).toMatch(/if \[ "\$platform" = "linux" \]; then\n\s+if \[ -n "\$\{AIRBRIDGE_VERSION:-\}" \]; then\n\s+musl_url=/);
+    expect(script).not.toMatch(/"\$platform" = "Linux"/);
+  });
+
+  it('locally assembled app bundles declare Bluetooth use (macOS kills apps that touch CoreBluetooth without it)', () => {
+    expect(script).toContain('<key>NSBluetoothAlwaysUsageDescription</key>');
+    for (const f of ['scripts/package-mac-app.sh', 'scripts/test-mac-app.sh']) {
+      expect(fs.readFileSync(path.join(__dirname, '..', f), 'utf8')).toContain('<key>NSBluetoothAlwaysUsageDescription</key>');
+    }
+  });
+});

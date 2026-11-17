@@ -71,7 +71,7 @@ else
 fi
 # musl is a Linux-only ABI; macOS binaries from Bun are already self-contained.
 musl_url=""
-if [ "$platform" = "Linux" ]; then
+if [ "$platform" = "linux" ]; then
   if [ -n "${AIRBRIDGE_VERSION:-}" ]; then
     musl_url="$base/download/${AIRBRIDGE_VERSION}/${asset}-musl"
   else
