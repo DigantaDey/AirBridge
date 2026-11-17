@@ -225,6 +225,79 @@ Evidence (network-namespace simulation, real kernel, real server + engine):
 | `two-nics` | connected via hotspot NIC | connected in 0.4 s via hotspot NIC |
 | `firewall` with `AIRBRIDGE_SIM_REVERSE=0` | — | `TCP_TIMEOUT`, detail lists `computer→phone: no connection` |
 
+## Update (v0.0.4 field report): "Could not reach the transfer service" on the Mac
+
+**Symptoms.** The Mac window shows the red *Could not reach the transfer
+service* banner and "Reconnecting"; the phone times out connecting to
+`10.205.95.167:3000` (from `192.0.0.2`, its mobile-data address), and the
+phone's Wi-Fi/hotspot network (`10.61.68.0/24`) is not a network the Mac
+advertises.
+
+**Root cause.** Decoding the QR in the report gives
+`https://10.205.95.167:3000/?pair=TGFEXL`. There is no `ca=` pin, but every
+v0.0.3+ server with generated TLS always includes it. So the page and the QR
+came from an **older AirBridge server still running on port 3000**, not
+from v0.0.4. The macOS app accepted *any* answer on `localhost:3000/api/health`
+as "running", so the old server kept serving after the update. It then
+stopped answering the window's WebSocket, which is the banner. The window
+also kept showing the last QR while disconnected, so the phone scanned a
+stale address that wasn't on its network. Because of that the phone took
+mobile data and timed out.
+
+**Fixes.**
+
+- The service reports its build: `version` in `/api/health` (plus `pid` to
+  callers on the same machine) and `serverVersion` in `welcome`.
+- The macOS app (`scripts/mac_app.swift`) now supervises the service:
+  - it starts the installed binary (honouring `Resources/binary-path` and
+    `Resources/port`) and waits up to 60 s for it;
+  - it restarts the service if it exits or stops answering;
+  - it replaces an AirBridge server of a different or unknown version;
+  - it never touches non-AirBridge programs;
+  - it reloads the window on every (re)start;
+  - it stops its service on quit, including on SIGTERM;
+  - it logs to `~/.airbridge/server.log`;
+  - the menu and the page can ask it to restart (the `airbridgeShell`
+    message handler).
+- `install.sh` stops *any* AirBridge process listening on the port, at any
+  install path. It also unloads a `com.airbridge.daemon` LaunchAgent (which
+  might have KeepAlive on), and quits and reopens a running AirBridge.app.
+- In the window:
+  - the QR and the copy link are hidden while disconnected ("Waiting for the
+    AirBridge service…"), so a stale code can't be scanned;
+  - on `localhost` the banner says AirBridge isn't running on this computer,
+    with a **Restart AirBridge** button;
+  - a page from an older build reloads itself once when the service version
+    differs.
+- On the phone:
+  - mDNS (`_airbridge._tcp`) runs alongside a paired engine, so a computer
+    whose address changed (Android picks a new hotspot subnet on every
+    hotspot restart) is found and dialled again;
+  - mDNS answers are unauthenticated, so they are used **only when the
+    computer's TLS identity is pinned**. An impostor fails the pin, and the
+    pair code is still required;
+  - TCP_TIMEOUT guidance for an off-link address on a phone that has Wi-Fi or
+    a hotspot now explains that the address is probably out of date.
+- CI gets a `macos-app` job (`scripts/test-mac-app.sh`). It compiles the Swift
+  shell and runs it against the real darwin-arm64 binary, checking five
+  things:
+  - it starts the service;
+  - it restarts the service after `kill -9`;
+  - it replaces a version-less old server;
+  - it leaves a foreign program on the port alone;
+  - quitting stops the service.
+
+**Diagnostics on the Mac** if it still fails:
+
+```
+lsof -nP -iTCP:3000 -sTCP:LISTEN        # who owns the port
+curl -s http://localhost:3000/api/health  # "version" must match the installed build
+~/.local/bin/AirBridge --version
+launchctl list | grep airbridge
+tail -n 50 ~/.airbridge/server.log
+ifconfig | grep "inet "                  # is one address on the phone's network?
+```
+
 ## Tests
 
 | Requirement | Where |
@@ -237,6 +310,9 @@ Evidence (network-namespace simulation, real kernel, real server + engine):
 | Reverse connections: gateway/mDNS parsers (macOS, Linux, Windows), dialer safety + backoff, server pipeline with a dialled phone (pinned TLS client, /ws, welcome, never "this machine") | `tests/reverse-connect.test.ts` |
 | Reverse race on the phone: forward blackholed → inbound wins; forward wins → inbound cancelled; grace after fast failure; listener gating, reject, unanchored trust refuses | `HotspotPairingTestKt` |
 | E2E: forward path blackholed → real desktop dials the real `ReverseListener` → pinned TLS → welcome; wrong pin refused | `ReverseConnectE2EKt` (in `scripts/test-native-interop.ts`) |
+| Service version in health/welcome; stale-UI reload guard; restart bridge; QR hidden while disconnected; installer stops stale AirBridge servers only | `tests/service-version.test.ts`, `tests/build-info.test.ts`, `tests/pairing-dock-endpoints.test.tsx`, `tests/macos-installer.test.ts` |
+| macOS app supervisor (real Swift build + darwin binary): start, restart after kill, replace stale server, foreign port untouched, stop on quit | `scripts/test-mac-app.sh` (CI `macos-app`) |
+| Rediscovery: stale saved address → mDNS address dialled only with a pinned identity; stale-subnet guidance | `HotspotPairingTestKt` |
 | Real-kernel routing | `scripts/sim/run-scenario.sh` (needs root; not in CI) |
 
 ## Manual test plan (one Android phone + one MacBook)

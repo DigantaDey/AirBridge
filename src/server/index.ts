@@ -317,6 +317,7 @@ export async function createAirBridgeServer(
     getLanEndpoints: advertisedEndpoints,
     getTlsPin: tlsPin,
     getHostFirewall: () => hostFirewall,
+    serverVersion: options.version ?? process.env.AIRBRIDGE_VERSION ?? 'dev',
     getDaemonStatus: () => getDaemonStatus(daemonCfg),
     clipboardProvider,
     clipboardPollMs: options.hostClipboardPollMs,
@@ -474,6 +475,10 @@ export async function createAirBridgeServer(
     res.json({
       status: 'ok',
       service: 'AirBridge Warp Server',
+      // Lets the app shell / a stale page detect a different running build.
+      version: options.version ?? process.env.AIRBRIDGE_VERSION ?? 'dev',
+      // Only this machine may learn the PID (the macOS app replaces a stale server).
+      ...(isLocalMachinePeer(req.socket) ? { pid: process.pid } : {}),
       protocol: 'warp-v1',
       e2ee: 'ECDH-P256-AES-256-GCM',
       uptimeSec: Math.round(process.uptime()),

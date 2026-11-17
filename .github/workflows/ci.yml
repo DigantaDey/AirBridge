@@ -23,6 +23,23 @@ jobs:
       - name: Package linux-x64 (vite + embed + bun)
         run: node scripts/build-desktop.mjs --only linux-x64
 
+  macos-app:
+    name: macOS app (Swift shell supervises the service)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build darwin-arm64 binary
+        run: |
+          node scripts/build-desktop.mjs --only darwin-arm64
+          codesign --force -s - dist-bin/AirBridge-darwin-arm64
+      - name: Compile + exercise AirBridge.app supervisor
+        run: bash scripts/test-mac-app.sh dist-bin/AirBridge-darwin-arm64
+
   android:
     name: Android (engine vectors + app APK)
     runs-on: ubuntu-latest

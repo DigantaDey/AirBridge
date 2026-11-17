@@ -238,8 +238,14 @@ object ConnectionHelp {
                     append("Also check the computer is still connected to this network, then scan its current QR code.")
                     return@buildString
                 }
-                if (offLink != null) append(offLink).append(' ')
-                else if (viaCellular(attempts)) append("This phone is sending that traffic over mobile data, so the address is not on its Wi-Fi or hotspot. ")
+                if (offLink != null) {
+                    append(offLink).append(' ')
+                    // Android picks a new hotspot subnet every time the hotspot
+                    // is turned on, so an address from an earlier QR goes stale.
+                    if (locals.any { it.isLan }) {
+                        append("That address is probably out of date: Android gives the hotspot a new address range each time it is turned on, so the computer's address changes too. ")
+                    }
+                } else if (viaCellular(attempts)) append("This phone is sending that traffic over mobile data, so the address is not on its Wi-Fi or hotspot. ")
                 append("Connect the computer to this phone's hotspot (or both to the same Wi-Fi), then scan the computer's current QR code. ")
                 append("If they already share a network, allow AirBridge through the computer's firewall.")
             }

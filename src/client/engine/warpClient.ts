@@ -232,6 +232,8 @@ export interface WarpClientSnapshot {
   visibility: VisibilityMode;
   myDevice: DeviceProfile | null;
   lanUrls: string[];
+  /** Build version reported by the server in welcome (null for older servers). */
+  serverVersion?: string | null;
   /** lanUrls with interface details (same order); absent with older servers. */
   lanEndpoints?: LanEndpoint[];
   /** TLS anchor pin for the pairing QR `ca=` parameter. */
@@ -884,6 +886,7 @@ export class WarpClient {
   private pairCode = '';
   private visibility: VisibilityMode = 'nearby';
   private lanUrls: string[] = [];
+  private serverVersion: string | null = null;
   private lanEndpoints: LanEndpoint[] = [];
   private tlsPin: string | null = null;
   private hostFirewall: HostFirewallStatus | null = null;
@@ -1140,6 +1143,7 @@ export class WarpClient {
       visibility: this.visibility,
       myDevice: this.myDevice,
       lanUrls: this.lanUrls,
+      serverVersion: this.serverVersion,
       lanEndpoints: this.lanEndpoints,
       tlsPin: this.tlsPin,
       hostFirewall: this.hostFirewall,
@@ -2588,6 +2592,7 @@ export class WarpClient {
     switch (msg.type) {
       case 'welcome': {
         this.connectionState = 'connected';
+        this.serverVersion = msg.serverVersion ?? null;
         this.peerId = msg.peerId;
         this.persistPeerId(msg.peerId);
         this.pairCode = msg.pairCode;

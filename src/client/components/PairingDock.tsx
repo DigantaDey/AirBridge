@@ -52,6 +52,13 @@ interface PairingDockProps {
   onRotatePairCode: () => void;
   onCancelTransfer: (transferId: string) => void;
   onMarkCopied?: (text: string) => void;
+  /**
+   * False while this page is not connected to the AirBridge service. The QR
+   * is then withheld: its addresses/pin are from the last session and may be
+   * gone (a phone hotspot picks a new subnet every time it is turned on), so
+   * scanning it would send the phone to a dead address.
+   */
+  connected?: boolean;
 }
 
 export function PairingDock({
@@ -66,6 +73,7 @@ export function PairingDock({
   onRotatePairCode,
   onCancelTransfer,
   onMarkCopied,
+  connected = true,
 }: PairingDockProps) {
   const [qrSvg, setQrSvg] = useState<string>("");
   const [joinInput, setJoinInput] = useState("");
@@ -118,7 +126,10 @@ export function PairingDock({
   }, [pairCode, lanUrls, preferredUrl, tlsPin]);
 
   useEffect(() => {
-    if (!pairUrl) return;
+    if (!pairUrl || !connected) {
+      setQrSvg("");
+      return;
+    }
     let cancelled = false;
     QRCode.toString(pairUrl, {
       type: "svg",
@@ -136,7 +147,7 @@ export function PairingDock({
     return () => {
       cancelled = true;
     };
-  }, [pairUrl]);
+  }, [pairUrl, connected]);
 
   const copyPairCode = () => {
     if (!pairCode) return;
@@ -148,7 +159,7 @@ export function PairingDock({
   };
 
   const copyPairLink = () => {
-    if (!pairUrl) return;
+    if (!pairUrl || !connected) return;
     onMarkCopied?.(pairUrl);
     navigator.clipboard?.writeText(pairUrl).catch(() => {});
     setCopiedLink(true);
@@ -189,7 +200,14 @@ export function PairingDock({
         <div className="flex flex-col sm:flex-row lg:flex-row items-center gap-4">
           {/* High-Contrast Scannable QR */}
           <div className="w-32 h-32 rounded-2xl bg-white p-2 shadow-md shrink-0 flex items-center justify-center border border-slate-200">
-            {qrSvg ? (
+            {!connected ? (
+              <p
+                className="text-[10px] leading-snug text-center text-slate-600"
+                data-testid="pairing-qr-offline"
+              >
+                Waiting for the AirBridge service…
+              </p>
+            ) : qrSvg ? (
               <div
                 className="w-full h-full [&>svg]:w-full [&>svg]:h-full"
                 dangerouslySetInnerHTML={{ __html: qrSvg }}
@@ -223,8 +241,9 @@ export function PairingDock({
               <button
                 type="button"
                 onClick={copyPairLink}
+                disabled={!connected}
                 title="Copy direct pairing URL"
-                className="p-2 rounded-xl ab-elevated text-[var(--ab-muted)] hover:text-[var(--ab-text)] transition-colors cursor-pointer"
+                className="p-2 rounded-xl ab-elevated text-[var(--ab-muted)] hover:text-[var(--ab-text)] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {copiedLink ? (
                   <Check className="w-4 h-4 text-emerald-400" />

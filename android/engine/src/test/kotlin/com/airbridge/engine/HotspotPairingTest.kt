@@ -55,6 +55,7 @@ fun main() {
     tcpRace()
     welcomeTimeout()
     reversePath()
+    rediscoveredAddress()
     println("HotspotPairing: $passed passed, $failed failed")
     if (failed > 0) exitProcess(1)
 }
@@ -210,6 +211,11 @@ private fun classificationAndGuidance() {
     // Firewall on the computer: address IS on the phone's hotspot subnet but silent.
     val firewall = ConnectionHelp.guidance(FailureKind.TCP_TIMEOUT, listOf(HOTSPOT), hotspotPhone,
         listOf(EndpointAttempt(HOTSPOT, 3000, FailureKind.TCP_TIMEOUT, "Connect timed out", "10.42.61.1")))
+    // Saved/QR address from an earlier hotspot session: the phone has Wi-Fi/hotspot
+    // networks, just not that subnet → explain that the address went stale.
+    val staleSubnet = ConnectionHelp.guidance(FailureKind.TCP_TIMEOUT, listOf(CAMPUS), hotspotPhone, attempts)
+    check("stale hotspot subnet explained", "out of date" in staleSubnet && "new address range" in staleSubnet) { staleSubnet }
+    check("cellular-only phone not told about hotspot subnets", "out of date" !in cellularOnly) { cellularOnly }
     check("on-link timeout blames the firewall, not the network", "firewall" in firewall && "ap0" in firewall && "Connect the computer to this phone's hotspot" !in firewall) { firewall }
 
     val refused = ConnectionHelp.guidance(FailureKind.TCP_REFUSED, listOf(HOTSPOT), hotspotPhone, emptyList())
@@ -544,3 +550,53 @@ private fun reversePath() {
         }
     } finally { engine.stop() }
 }
+
+/**
+ * The computer's address changed after pairing (a phone hotspot picks a new
+ * subnet every time it is turned on): every saved/QR address is stale. mDNS
+ * on the phone's network finds the computer at its new address; the engine
+ * must dial it — but only when the computer's TLS identity is pinned, since
+ * mDNS answers are unauthenticated.
+ */
+private fun rediscoveredAddress() {
+    val newAddress = "10.42.99.17"
+    val phoneNow = listOf(LocalAddress("ap0", "10.42.99.1", 24), LocalAddress("v4-rmnet_data0", "192.0.0.2", 32))
+    for (pinned in listOf(true, false)) {
+        FakeWsServer().use { server ->
+            val reached = java.util.concurrent.LinkedBlockingQueue<String>()
+            val attempts = java.util.Collections.synchronizedList(mutableListOf<List<String>>())
+            val engine = AirBridgeEngine(
+                EngineConfig(
+                    serverUrl = "ws://$CAMPUS:3000/ws",
+                    deviceName = "rediscovery",
+                    endpointHosts = { listOf(CAMPUS) },
+                    discoveredHosts = { listOf(newAddress, "192.0.0.4", "not-an-ip.local") },
+                    localNetworks = { phoneNow },
+                    allowReverse = { pinned },
+                    connectTimeoutMs = 400,
+                    welcomeTimeoutMs = 600,
+                    tcpConnector = SimulatedNetwork(routes = mapOf(newAddress to server.port), blackholed = setOf(CAMPUS)),
+                ),
+            )
+            engine.addListener(object : EngineListener {
+                override fun onEndpointConnected(host: String) { reached.put(host) }
+                override fun onConnectAttempt(hosts: List<String>) { attempts += hosts }
+            })
+            engine.start()
+            try {
+                val host = reached.poll(if (pinned) 8 else 3, java.util.concurrent.TimeUnit.SECONDS)
+                if (pinned) {
+                    eq("pinned: reaches the computer at its mDNS-discovered address", host, newAddress)
+                    check("pinned: discovered address dialled first (on-link)", attempts.firstOrNull()?.firstOrNull() == newAddress) { attempts.toString() }
+                    check("non-LAN / non-IP discovery results ignored", attempts.flatten().none { it == "192.0.0.4" || it == "not-an-ip.local" }) { attempts.toString() }
+                } else {
+                    eq("unpinned: never dials unauthenticated mDNS addresses", host, null)
+                    check("unpinned: only the saved address is tried", attempts.flatten().all { it == CAMPUS }) { attempts.toString() }
+                }
+            } finally {
+                engine.stop()
+            }
+        }
+    }
+}
+

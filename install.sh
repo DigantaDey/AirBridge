@@ -347,15 +347,25 @@ else
 fi
 
 stop_running_daemon() {
-  [ -e "$bin" ] || [ "$LAUNCH" = "1" ] || return 0
   stopped=0
+  # A LaunchAgent with KeepAlive (e.g. the sample macos/com.airbridge.daemon.plist)
+  # would immediately respawn the old server; unload it first. Autostart below
+  # registers it again for the new binary when requested.
+  if [ "$os" = "Darwin" ] && command -v launchctl >/dev/null 2>&1 \
+     && launchctl list 2>/dev/null | grep -q 'com\.airbridge\.daemon'; then
+    launchctl bootout "gui/$(id -u)/com.airbridge.daemon" 2>/dev/null \
+      || launchctl unload "$HOME/Library/LaunchAgents/com.airbridge.daemon.plist" 2>/dev/null || true
+  fi
   if [ -e "$bin" ] && command -v pgrep >/dev/null 2>&1; then
     for pid in $(pgrep -f "$bin" 2>/dev/null || true); do
       [ "$pid" = "$$" ] && continue
       kill -TERM "$pid" 2>/dev/null && stopped=1 || true
     done
   fi
-  if [ "$LAUNCH" = "1" ] && [ "$stopped" = "0" ] && command -v lsof >/dev/null 2>&1; then
+  # Whatever AirBridge still holds the port (an older install at another path,
+  # a source checkout, …) would keep answering with its old version and old
+  # addresses after this update. Never touch non-AirBridge programs.
+  if command -v lsof >/dev/null 2>&1; then
     for pid in $(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true); do
       [ "$pid" = "$$" ] && continue
       cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
@@ -382,7 +392,26 @@ fi
 
 echo "▸ installed: $bin ($mode install)"
 if [ "$os" = "Darwin" ]; then
+  # A running AirBridge.app keeps its window (and the old UI) alive in the menu
+  # bar; the server it was showing was just stopped. Quit it, install the new
+  # launcher, and start it again so it runs the new version end to end.
+  app_exe="$HOME/Applications/AirBridge.app/Contents/MacOS/AirBridge"
+  app_was_running=0
+  if command -v pgrep >/dev/null 2>&1 && pgrep -f "$app_exe" >/dev/null 2>&1; then
+    app_was_running=1
+    echo "▸ quitting the running AirBridge app"
+    osascript -e 'tell application id "com.airbridge.launcher" to quit' >/dev/null 2>&1 || true
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      pgrep -f "$app_exe" >/dev/null 2>&1 || break
+      sleep 0.25
+    done
+    pkill -TERM -f "$app_exe" >/dev/null 2>&1 || true
+  fi
   install_macos_app
+  if [ "$app_was_running" = "1" ] && [ -d "$HOME/Applications/AirBridge.app" ]; then
+    echo "▸ starting AirBridge again"
+    open "$HOME/Applications/AirBridge.app" >/dev/null 2>&1 || true
+  fi
 fi
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
