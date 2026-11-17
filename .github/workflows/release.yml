@@ -54,7 +54,9 @@ jobs:
 
   desktop-darwin:
     name: macOS binaries (ad-hoc signed)
-    runs-on: macos-latest
+    # package-mac-app.sh passes an explicit Swift target, so the current Intel
+    # image can build and sign both distributable Mach-O architectures.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

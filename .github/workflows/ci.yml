@@ -25,7 +25,9 @@ jobs:
 
   macos-app:
     name: macOS app (Swift shell supervises the service)
-    runs-on: macos-latest
+    # The hosted Intel image avoids the congested arm64 pool while exercising
+    # the real Swift shell and an executable darwin-x64 service.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -33,14 +35,14 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Build darwin-arm64 binary
+      - name: Build darwin-x64 binary
         run: |
-          node scripts/build-desktop.mjs --only darwin-arm64
-          codesign --force -s - dist-bin/AirBridge-darwin-arm64
+          node scripts/build-desktop.mjs --only darwin-x64
+          codesign --force -s - dist-bin/AirBridge-darwin-x64
       - name: Package prebuilt AirBridge.app (same script as the release)
-        run: bash scripts/package-mac-app.sh arm64 dist-bin/AirBridge-darwin-arm64 dist-mac com.airbridge.launcher.ci
+        run: bash scripts/package-mac-app.sh x64 dist-bin/AirBridge-darwin-x64 dist-mac com.airbridge.launcher.ci
       - name: Compile + exercise AirBridge.app supervisor
-        run: bash scripts/test-mac-app.sh dist-bin/AirBridge-darwin-arm64 dist-mac/AirBridge-macOS-arm64.app
+        run: bash scripts/test-mac-app.sh dist-bin/AirBridge-darwin-x64 dist-mac/AirBridge-macOS-x64.app
 
   android:
     name: Android (engine vectors + app APK)
