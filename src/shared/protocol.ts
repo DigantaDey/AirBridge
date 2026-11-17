@@ -222,6 +222,8 @@ export type ControlPayload =
       state: ScreenShareState;
       width?: number;
       height?: number;
+      /** True only when the source started Android-permitted playback-audio capture. */
+      audio?: boolean;
       reason?: string;
     }
   | {

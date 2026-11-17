@@ -31,6 +31,15 @@ describe('F21: Phone continuity (Android)', () => {
     expect(continuity).toContain('endCall()');
     expect(hasPermission(manifest, 'CALL_PHONE')).toBe(true);
     expect(continuity).toContain('placeCall(');
+
+    // Playback Capture is optional, per-session, and uses the platform API;
+    // there is no package/DRM classification or alternate capture path.
+    expect(hasPermission(manifest, 'RECORD_AUDIO')).toBe(true);
+    const screen = await readRepoFile(`${APP}/ScreenShareService.kt`);
+    expect(screen).toContain('AudioPlaybackCaptureConfiguration.Builder(mp)');
+    expect(screen).toContain('isChecked = false');
+    expect(screen).toContain('setScreenAudioAvailable');
+    expect(screen).not.toMatch(/netflix|hotstar|disney\+|drm app list/i);
     // Call history is not needed for remote controls and is intentionally absent.
     expect(hasPermission(manifest, 'READ_CALL_LOG')).toBe(false);
     expect(continuity).not.toContain('callerIdGranted');
@@ -60,6 +69,7 @@ describe('F21: Phone continuity (Android)', () => {
   it('runs screen capture in a private mediaProjection foreground service', async () => {
     const manifest = await readAndroidManifest();
     expect(hasPermission(manifest, 'FOREGROUND_SERVICE_MEDIA_PROJECTION')).toBe(true);
+    expect(hasPermission(manifest, 'FOREGROUND_SERVICE_MICROPHONE')).toBe(true);
     const svc = getService(manifest, 'ScreenShareService');
     expect(svc?.exported).toBe(false);
     expect(hasForegroundServiceType(manifest, 'ScreenShareService', 'mediaProjection')).toBe(true);
@@ -81,10 +91,13 @@ describe('F21: Phone continuity (Android)', () => {
     expect(display).toBeGreaterThan(callback); // callback before the virtual display
     // One virtual display per token: later size changes resize it.
     expect(svc).toContain('vd.resize(');
-    // Frames flow only after the user accepted, through the engine's flow control.
+    // Encoded access units flow only after consent and are dropped under the
+    // engine's bounded flow-control window rather than queued as JPEG images.
     expect(svc.indexOf('acceptScreenShare(')).toBeGreaterThan(token);
-    expect(svc).toContain('canSendScreenFrame(');
-    expect(svc).toContain('sendScreenFrame(');
+    expect(svc).toContain('MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)');
+    expect(svc).toContain('sendScreenVideoFrame(');
+    expect(svc).toContain('BUFFER_FLAG_KEY_FRAME');
+    expect(svc).not.toContain('Bitmap.CompressFormat.JPEG');
     expect(svc).toContain('createScreenCaptureIntent()');
   });
 

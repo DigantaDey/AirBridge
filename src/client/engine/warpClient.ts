@@ -48,10 +48,12 @@ import {
   type ContactsQueryResult,
   type ContinuityOptions,
   type ContinuitySnapshot,
+  type ScreenAudioFrame,
   type ScreenFrame,
+  type ScreenVideoFrame,
   type ScreenFrameSource,
 } from './continuity.js';
-import { FRAME_SCREEN, type CallInfo, type ContactCard } from '../../shared/continuity.js';
+import { FRAME_SCREEN, FRAME_SCREEN_AUDIO, type CallInfo, type ContactCard } from '../../shared/continuity.js';
 import {
   type DeviceIdentity,
   type IdentityStore,
@@ -1380,6 +1382,16 @@ export class WarpClient {
   /** Decrypted frames for a viewer session (the latest frame is replayed on subscribe). */
   public subscribeScreenFrames(sessionId: string, listener: (frame: ScreenFrame) => void): () => void {
     return this.continuity.subscribeScreenFrames(sessionId, listener);
+  }
+
+  /** Decrypted AVC access units for a viewer session. */
+  public subscribeScreenVideo(sessionId: string, listener: (frame: ScreenVideoFrame) => void): () => void {
+    return this.continuity.subscribeScreenVideo(sessionId, listener);
+  }
+
+  /** Decrypted app-audio packets for a viewer session. Playback remains locally opt-in. */
+  public subscribeScreenAudio(sessionId: string, listener: (frame: ScreenAudioFrame) => void): () => void {
+    return this.continuity.subscribeScreenAudio(sessionId, listener);
   }
 
   /** Update what this device offers (e.g. screen capture became available) and re-announce. */
@@ -2791,6 +2803,8 @@ export class WarpClient {
             this.applyChunkAck(sourcePeerId, { transferId: sack.transferId, fileIndex: sack.fileIndex, ackedChunkIndex: sack.chunkIndex });
           } else if (payload[0] === FRAME_SCREEN) {
             void this.continuity.handleScreenFrame(sourcePeerId, payload);
+          } else if (payload[0] === FRAME_SCREEN_AUDIO) {
+            void this.continuity.handleScreenAudioFrame(sourcePeerId, payload);
           } else {
             this.handleIncomingEncryptedChunk(sourcePeerId, payload, 'ws-relay').catch(() => {});
           }
@@ -2805,6 +2819,8 @@ export class WarpClient {
             this.applyChunkAck(sourcePeerId, { transferId: sack.transferId, fileIndex: sack.fileIndex, ackedChunkIndex: sack.chunkIndex });
           } else if (payload[0] === FRAME_SCREEN) {
             void this.continuity.handleScreenFrame(sourcePeerId, payload);
+          } else if (payload[0] === FRAME_SCREEN_AUDIO) {
+            void this.continuity.handleScreenAudioFrame(sourcePeerId, payload);
           } else {
             this.handleIncomingEncryptedChunk(sourcePeerId, payload, 'ws-relay').catch(() => {});
           }

@@ -1701,6 +1701,14 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 }
                 enqueueEncryptedChunk(sourcePeerId, frame)
             }
+            Continuity.FRAME_SCREEN, Continuity.FRAME_SCREEN_AUDIO -> {
+                val routed = try {
+                    Frames.unwrapRoutedRelayFrame(bytes)
+                } catch (_: Exception) {
+                    return
+                }
+                continuity.handleMediaFrame(routed.sourcePeerId, routed.payload)
+            }
         }
     }
 

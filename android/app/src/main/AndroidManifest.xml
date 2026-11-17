@@ -52,6 +52,9 @@
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.CALL_PHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Requested only for a per-session, default-off Playback Capture choice. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
     <uses-feature
         android:name="android.hardware.telephony"
@@ -132,7 +135,7 @@
         <service
             android:name=".ScreenShareService"
             android:exported="false"
-            android:foregroundServiceType="mediaProjection" />
+            android:foregroundServiceType="mediaProjection|microphone" />
         <!--
           AirBridge deliberately does not declare an AccessibilityService or a
           NotificationListenerService. Clipboard sends from another app use

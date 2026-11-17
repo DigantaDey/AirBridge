@@ -13,7 +13,7 @@ The release build now has a deliberately smaller, explainable permission surface
 - **No notification-listener service.** The app does not read, mirror or transmit all device notifications.
 - **No `READ_CALL_LOG`.** Remote call controls do not need the restricted call-log permission.
 - **No Android backup.** Pairing state and TLS pins are not included in Android Auto Backup.
-- **Screen sharing is visual only.** It requires both an in-app confirmation and Android's MediaProjection prompt. It does not capture application audio, does not emulate Chromecast, and does not bypass DRM. Netflix, Hotstar and protected YouTube content may be blank by design.
+- **Screen casting is per-session and protected-content safe.** It requires both an in-app confirmation and Android's MediaProjection prompt. Low-latency AVC video is end-to-end encrypted. Playback/app audio is off by default and has a separate per-session opt-in; Android Playback Capture and the source app decide whether it is available. AirBridge does not classify apps, bypass protected surfaces, or extract protected audio. When the platform or source blocks capture, the cast is blank or silent and the user is told it cannot be shared.
 
 These choices are intentional product constraints, not hidden fallbacks.
 
@@ -73,7 +73,7 @@ Review the Data safety questionnaire against the submitted AAB and actual server
 | Files, photos, videos, audio and documents | User-selected transfer | Only to a paired device selected by the user |
 | Clipboard text/images | Explicit send; optional automatic send where Android permits it | Only to paired devices |
 | Contacts | Optional Contacts feature after user toggle + Android permission | Only to a paired device while enabled |
-| Screen content | Per-session user-approved MediaProjection | Only to the paired viewer; visual frames only |
+| Screen content and optional app playback audio | Per-session user-approved MediaProjection; audio needs its own default-off checkbox | Only to the paired viewer; encrypted AVC/PCM media; platform/source policies can exclude protected content |
 | Device/connection identifiers | Pairing, trust pinning and reconnect | Stored locally; peer needs it to connect |
 
 AirBridge has no account, advertising SDK, analytics SDK, notification listener or Accessibility Service. A configured self-hosted relay transports encrypted traffic but should still be described accurately if it is enabled for a release. Do not copy this table blindly if product behavior, relay configuration, telemetry, crash reporting or SDKs change.
@@ -86,7 +86,8 @@ The app declares these foreground-service types, so complete the corresponding P
 |---|---|
 | `connectedDevice` | Maintaining an active, user-paired computer connection for incoming transfers and clipboard delivery |
 | `dataSync` | A user-approved file transfer with visible transfer progress |
-| `mediaProjection` | A user-approved visual screen share, started only after Android's capture prompt |
+| `mediaProjection` | A user-approved encrypted H.264 screen cast, started only after Android's capture prompt |
+| `microphone` | Android Playback Capture only when the user selected optional app audio for that active cast; it is never used for background microphone recording |
 
 The always-on connection service does **not** claim the media-projection type. Stop a recording after each transfer/share in the review video so reviewers can see the stop controls and notifications.
 
@@ -99,7 +100,7 @@ Explain each optional permission in both the Play declaration and store listing/
 - **Notifications:** transfer progress and incoming-transfer action notifications.
 - **Contacts:** optional phone-on-computer contact search.
 - **Phone state / answer calls / call phone:** optional paired-computer call controls. Call audio stays on the phone and AirBridge does not request call logs.
-- **Media projection:** per-session, user-approved visual screen share.
+- **Media projection:** per-session, user-approved encrypted screen cast. `RECORD_AUDIO` is requested only when the user selects the optional, default-off permitted app-audio checkbox for that session.
 
 Never state that clipboard sync is guaranteed in the background. Android itself can suppress hidden clipboard reads.
 
@@ -111,7 +112,7 @@ Before production, provide a professional, internally consistent listing:
 - 512 × 512 Play icon, feature graphic, phone and tablet screenshots from the release build;
 - a short review video covering pair QR → verify code → select file → receive/accept → stop screen share;
 - the privacy-policy URL above;
-- clear wording that screen sharing is visual only and does not cast or bypass DRM;
+- clear wording that casting uses user-approved screen capture; app audio is default-off and only platform-permitted playback is shared; protected content is not supported or bypassed;
 - clear setup instructions that the desktop companion is required.
 
 Do not use “prototype”, “unlimited background clipboard”, “cast Netflix”, “ChromeCast replacement”, or unqualified “no cloud” claims in the listing. The relay mode and Android privacy limits make those claims misleading.
@@ -137,7 +138,7 @@ Then validate the actual signed AAB in an Internal test on at least one current 
 - deny Camera and Notifications, then verify manual pairing and foreground transfer behavior remain understandable;
 - enable Contacts, Calls and Screen sharing one at a time; revoke each permission and verify the feature disappears;
 - start then stop a screen share; verify the persistent notification and the two consent steps;
-- verify a protected-media app is not described as castable and cannot yield audio;
+- verify platform/source-blocked protected content is not described as castable, cannot yield audio, and is communicated as unavailable without an alternate capture attempt;
 - test connection loss, low battery, app backgrounding, Forget device, certificate/pin mismatch, and app update;
 - inspect the merged release manifest and Play pre-launch report for unexpected permissions, exported components and crashes.
 

@@ -121,7 +121,7 @@ describe('phone continuity over the paired encrypted session', () => {
       expect.arrayContaining(['contacts.provide', 'contacts.receive', 'calls.control', 'screen.source', 'screen.view']),
     );
     await waitFor(() => (phone.getSnapshot().continuity?.peerFeatures[macId] ?? []).length > 0, 'mac features at phone');
-    expect(phone.getSnapshot().continuity!.peerFeatures[macId]).toEqual(['contacts.receive', 'screen.view']);
+    expect(phone.getSnapshot().continuity!.peerFeatures[macId]).toEqual(['contacts.receive', 'screen.view', 'screen.audio.play']);
 
     // ---- contacts ----
     const all = await mac.requestContacts(phoneId);

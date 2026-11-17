@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  SCREEN_AUDIO_AAD_LENGTH,
+  SCREEN_AUDIO_FRAME_HEADER_LENGTH,
   SCREEN_FRAME_AAD_LENGTH,
   SCREEN_FRAME_HEADER_LENGTH,
   buildVCard,
@@ -7,10 +9,15 @@ import {
   callPartyLabel,
   clampScreenParams,
   contactMatches,
+  decodeScreenAudioFrame,
   decodeScreenFrame,
+  decodeScreenH264Packet,
   dialableNumber,
+  encodeScreenAudioAad,
+  encodeScreenAudioFrame,
   encodeScreenFrame,
   encodeScreenFrameAad,
+  encodeScreenH264Packet,
   nextScreenQuality,
   parseVCards,
   sanitizeCall,
@@ -227,6 +234,30 @@ describe('screen frames', () => {
     wire[0] = 0x01;
     expect(() => decodeScreenFrame(wire)).toThrow();
     expect(() => encodeScreenFrame(aad, new Uint8Array(8), new Uint8Array(16))).toThrow();
+  });
+
+  it('bounds and authenticates timestamped PCM playback audio independently of video', async () => {
+    const audio = new Uint8Array(960 * 2 * 2).map((_v, i) => i & 0xff);
+    const audioHeader = { sessionId: header.sessionId, seq: 7, sampleRate: 48_000, channels: 2, frames: 960, ptsMs: 123_456 };
+    const aad = encodeScreenAudioAad(audioHeader);
+    expect(aad.byteLength).toBe(SCREEN_AUDIO_AAD_LENGTH);
+    const key = await crypto.subtle.importKey('raw', new Uint8Array(32).fill(9), 'AES-GCM', false, ['encrypt', 'decrypt']);
+    const { iv, ciphertext } = await encryptMediaFrame(key, aad, audio);
+    const wire = encodeScreenAudioFrame(aad, iv, ciphertext);
+    expect(wire.byteLength).toBe(SCREEN_AUDIO_FRAME_HEADER_LENGTH + audio.byteLength + 16);
+    const decoded = decodeScreenAudioFrame(wire);
+    expect(decoded).toMatchObject(audioHeader);
+    expect(await decryptMediaFrame(key, decoded.aad, decoded.iv, decoded.ciphertext)).toEqual(audio);
+    const forged = wire.slice(); forged[26] ^= 1; // authenticated PTS
+    await expect(decryptMediaFrame(key, decodeScreenAudioFrame(forged).aad, decoded.iv, decoded.ciphertext)).rejects.toThrow();
+    expect(() => encodeScreenAudioAad({ ...audioHeader, frames: 4097 })).toThrow();
+  });
+
+  it('carries bounded timestamped AVC access units without a side channel', () => {
+    const packet = encodeScreenH264Packet({ keyFrame: true, ptsMs: 42, data: new Uint8Array([0, 0, 0, 1, 0x67]) });
+    expect(decodeScreenH264Packet(packet)).toEqual({ keyFrame: true, ptsMs: 42, data: new Uint8Array([0, 0, 0, 1, 0x67]) });
+    packet[0] = 0x80;
+    expect(() => decodeScreenH264Packet(packet)).toThrow();
   });
 
   it('clamps capture parameters and adapts quality to congestion', () => {

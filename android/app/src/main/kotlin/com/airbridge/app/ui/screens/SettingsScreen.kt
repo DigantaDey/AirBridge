@@ -167,7 +167,7 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    text = "Screen sharing is visual only. It does not carry app audio, and DRM-protected video can appear blank by design.",
+                    text = "Screen sharing requires approval every time. App audio is off by default and, if enabled for a session, only Android-permitted playback audio is sent. Protected or opted-out content is not shared.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -361,7 +361,7 @@ private fun PhoneContinuityCard() {
         HorizontalDivider()
         SwitchRow(
             title = "Screen sharing",
-            subtitle = "Let the paired computer request a visual screen share. You approve every session; no app audio is streamed.",
+            subtitle = "Let the paired computer request a screen share. You approve every session; app audio is optional and off by default.",
             checked = prefs.screenSharing,
             onCheckedChange = { on -> prefs.screenSharing = on; changed() },
         )
