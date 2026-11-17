@@ -6,6 +6,7 @@ import { act } from "react";
 import { webcrypto } from "node:crypto";
 import { bytesToBase64Url, type ControlPayload } from "../src/shared/protocol.js";
 import { decryptControlPayload, derivePeerSession, encryptControlPayload } from "../src/client/engine/crypto.js";
+import { UI_VERSION } from "../src/client/engine/buildInfo.js";
 
 // Tell React its act() helpers are available in this jsdom test file.
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean })
@@ -580,7 +581,7 @@ describe("AirBridge app UI", () => {
     const { container } = await renderApp();
     const header = container.querySelector(".utility-header")!;
     // Version like any desktop app (UI bundle version, falling back to the service's).
-    expect(header.querySelector(".version-badge")?.textContent).toBe("v2.4.7");
+    expect(header.querySelector(".version-badge")?.textContent).toBe(`v${UI_VERSION}`);
     for (const label of ["Contacts", "Calls", "Screen"]) {
       expect(Array.from(header.querySelectorAll("button")).some((b) => b.textContent?.includes(label))).toBe(true);
     }

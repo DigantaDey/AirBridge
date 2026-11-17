@@ -32,12 +32,19 @@ describe('F21: Phone continuity (Android)', () => {
     expect(hasPermission(manifest, 'CALL_PHONE')).toBe(true);
     expect(continuity).toContain('placeCall(');
 
+    // Show a time-to-full estimate only when the Android platform can provide one.
+    expect(continuity).toContain('computeChargeTimeRemaining()');
+    expect(continuity).toContain('BatteryChargeEstimate.sanitize');
+    expect(continuity).not.toContain('BatteryManager.EXTRA_VOLTAGE');
+
     // Playback Capture is optional, per-session, and uses the platform API;
     // there is no package/DRM classification or alternate capture path.
     expect(hasPermission(manifest, 'RECORD_AUDIO')).toBe(true);
     const screen = await readRepoFile(`${APP}/ScreenShareService.kt`);
     expect(screen).toContain('AudioPlaybackCaptureConfiguration.Builder(mp)');
+    expect(screen).toContain('Also share permitted app audio (videos, music, games)');
     expect(screen).toContain('isChecked = false');
+    expect(screen).toContain('not microphone recording');
     expect(screen).toContain('setScreenAudioAvailable');
     expect(screen).not.toMatch(/netflix|hotstar|disney\+|drm app list/i);
     // Call history is not needed for remote controls and is intentionally absent.
@@ -51,6 +58,21 @@ describe('F21: Phone continuity (Android)', () => {
 
     // Telephony is optional so tablets can still install (contacts + screen work there).
     expect(manifest.rawXml).toMatch(/android:name="android\.hardware\.telephony"\s+android:required="false"/);
+  });
+
+  it('keeps call controls responsive during contact queries and enriches caller names asynchronously', async () => {
+    const engine = await readRepoFile('android/engine/src/main/kotlin/com/airbridge/engine/Engine.kt');
+    const channel = await readRepoFile('android/engine/src/main/kotlin/com/airbridge/engine/Continuity.kt');
+    const calls = await readRepoFile(`${APP}/PhoneContinuity.kt`);
+    expect(engine).toContain('contactQueryExecutor');
+    expect(engine).toContain('override fun executeContactQuery(task: () -> Unit)');
+    expect(channel).toContain('host.executeContactQuery {');
+    expect(calls).toContain('identityWorker');
+    expect(calls).toContain('resolveCallerName(it.callId, it.number!!)');
+    const callEvents = calls.slice(calls.indexOf('private fun handle(state: Int, rawNumber: String?)'), calls.indexOf('private fun resolveCallerName('));
+    expect(callEvents.indexOf('publish?.let(onChange)')).toBeGreaterThanOrEqual(0);
+    expect(callEvents.indexOf('publish?.let(onChange)')).toBeLessThan(callEvents.indexOf('resolveCallerName(it.callId'));
+    expect(callEvents).not.toContain('contacts.lookupName(number)');
   });
 
   it('starts sensitive remote capabilities disabled and revokes a live screen share when disabled', async () => {

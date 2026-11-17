@@ -65,6 +65,7 @@ class ScreenShareService : Service() {
     private var handler: Handler? = null
     @Volatile private var sessionId: String? = null
     private var maxEdge = Continuity.SCREEN_DEFAULT_MAX_WIDTH
+    private var maxFps = Continuity.SCREEN_DEFAULT_FPS
     private var width = 0
     private var height = 0
     private var densityDpi = 0
@@ -138,6 +139,7 @@ class ScreenShareService : Service() {
         sessionId = id
         activeSessionId = id
         maxEdge = request.maxWidth
+        maxFps = request.maxFps.coerceIn(1, Continuity.SCREEN_MAX_FPS)
         projection = mp
         val t = HandlerThread("airbridge-screen").also { it.start() }
         thread = t
@@ -198,7 +200,9 @@ class ScreenShareService : Service() {
         densityDpi = dpi
         videoEncoder = next
         encoderSurface = nextSurface
-        lastVideoBitrate = 0
+        lastVideoBitrate = sessionId?.let { id ->
+            NativeEngineHost.instance?.continuityChannel()?.screenQuality(id)
+        }?.let { Continuity.screenVideoBitrate(w, h, maxFps, it) } ?: Continuity.screenVideoBitrate(w, h, maxFps, 70)
         val vd = display
         if (vd == null) {
             display = runCatching {
@@ -224,8 +228,9 @@ class ScreenShareService : Service() {
     private fun createVideoEncoder(w: Int, h: Int): MediaCodec {
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, (w * h * 4).coerceIn(750_000, 8_000_000))
-            setInteger(MediaFormat.KEY_FRAME_RATE, Continuity.SCREEN_DEFAULT_FPS)
+            val quality = sessionId?.let { id -> NativeEngineHost.instance?.continuityChannel()?.screenQuality(id) } ?: 70
+            setInteger(MediaFormat.KEY_BIT_RATE, Continuity.screenVideoBitrate(w, h, maxFps, quality))
+            setInteger(MediaFormat.KEY_FRAME_RATE, maxFps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
             // WebCodecs consumes Annex-B AVC without an external config blob.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
@@ -255,8 +260,8 @@ class ScreenShareService : Service() {
                 // Encoder bitrate tracks the existing relay RTT controller. Access
                 // units that cannot get flow-control credit are dropped, never queued.
                 val quality = channel.screenQuality(id)
-                val targetBitrate = (width * height * (2 + quality * 4)).toInt().coerceIn(500_000, 8_000_000)
-                if (kotlin.math.abs(targetBitrate - lastVideoBitrate) > 150_000 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                val targetBitrate = Continuity.screenVideoBitrate(width, height, maxFps, quality)
+                if (kotlin.math.abs(targetBitrate - lastVideoBitrate) > 100_000 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
                     runCatching { codec.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, targetBitrate) }) }
                     lastVideoBitrate = targetBitrate
                 }
@@ -493,7 +498,7 @@ class ScreenShareConsentActivity : Activity() {
         }
         if (savedInstanceState?.getBoolean(STATE_ASKED) == true) return
         val box = CheckBox(this).apply {
-            text = "Also share permitted app audio"
+            text = "Also share permitted app audio (videos, music, games)"
             isChecked = false // fresh, explicit, default-off consent every session
             isEnabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
             if (!isEnabled) text = "App audio requires Android 10 or later"
@@ -505,7 +510,8 @@ class ScreenShareConsentActivity : Activity() {
             addView(TextView(this@ScreenShareConsentActivity).apply {
                 text = "${request.peerName} will see everything on this phone's screen, including notifications, until you stop sharing. " +
                     "App audio is off unless you select it below. Android and the source app decide whether playback capture is allowed; " +
-                    "protected or opted-out content is not shared and may be blank or silent. The stream is end-to-end encrypted and never leaves your devices."
+                    "protected or opted-out content may be blank or silent. The optional audio permission is for app playback capture, not microphone recording. " +
+                    "The stream is end-to-end encrypted and never leaves your devices."
             })
             addView(box)
         }
@@ -547,7 +553,7 @@ class ScreenShareConsentActivity : Activity() {
         if (grantResults.firstOrNull() != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             // Video consent remains valid; accurately report audio as unavailable rather than failing open.
             requestedAudio = false
-            Toast.makeText(this, "App audio will not be shared without microphone permission", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Android's audio-capture permission was not granted; app audio will stay off", Toast.LENGTH_LONG).show()
         }
         launchProjectionCapture()
     }

@@ -7,11 +7,14 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -36,6 +39,8 @@ import com.airbridge.engine.ContinuityChannel
 import com.airbridge.engine.ContinuityException
 import com.airbridge.engine.ScreenShareRequest
 import java.util.concurrent.Executors
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /** Runtime permissions behind each phone continuity feature. */
 object ContinuityPermissions {
@@ -178,6 +183,9 @@ class CallMonitor(
     private val telecom = context.getSystemService(TelecomManager::class.java)
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "airbridge-calls").apply { isDaemon = true } }
+    // ContactsProvider can be slow on large address books. Never delay the
+    // initial ring event, state transitions, or remote answer/hangup on a lookup.
+    private val identityWorker = Executors.newSingleThreadExecutor { r -> Thread(r, "airbridge-caller-lookup").apply { isDaemon = true } }
     private val lock = Any()
     private var listener: PhoneStateListener? = null
     private var lastState = TelephonyManager.CALL_STATE_IDLE
@@ -215,6 +223,7 @@ class CallMonitor(
     fun shutdown() {
         stop()
         worker.shutdown()
+        identityWorker.shutdownNow()
     }
 
     private fun endedCopy(c: CallInfo) = c.copy(state = "ended", actions = emptyList(), updatedAt = System.currentTimeMillis())
@@ -228,15 +237,14 @@ class CallMonitor(
             val cur = current
             when (state) {
                 TelephonyManager.CALL_STATE_RINGING -> when {
-                    // A device may expose a number for an active call on older
-                    // Android releases. We do not request call-log access for it.
+                    // Some Android releases deliver the number after the first
+                    // ringing callback. Publish it immediately; resolve its name asynchronously.
                     prev == state && cur != null && cur.number == null && number != null ->
-                        cur.copy(number = number, name = contacts.lookupName(number), updatedAt = now)
+                        cur.copy(number = number, updatedAt = now)
                     prev == state -> null
                     else -> CallInfo(
                         callId = AirCrypto.randomHex16(), state = "ringing", direction = "incoming",
-                        number = number, name = number?.let { contacts.lookupName(it) },
-                        updatedAt = now, actions = listOf("answer", "reject"),
+                        number = number, updatedAt = now, actions = listOf("answer", "reject"),
                     )
                 }
                 TelephonyManager.CALL_STATE_OFFHOOK -> when {
@@ -260,7 +268,30 @@ class CallMonitor(
                 if (next != null) current = if (next.state == "ended") null else next
             }
         }
+        // Deliver the ring/state transition before consulting ContactsProvider.
         publish?.let(onChange)
+        publish?.takeIf { it.name == null && it.number != null }?.let { resolveCallerName(it.callId, it.number!!) }
+    }
+
+    private fun resolveCallerName(callId: String, number: String) {
+        runCatching {
+            identityWorker.execute {
+                val name = contacts.lookupName(number)?.takeIf { it.isNotBlank() } ?: return@execute
+                val updated = synchronized(lock) {
+                    val active = current?.takeIf { it.callId == callId && it.number == number && it.name == null }
+                    if (active != null) {
+                        active.copy(name = name, updatedAt = System.currentTimeMillis()).also { current = it }
+                    } else {
+                        val pending = pendingDial?.first?.takeIf { it.callId == callId && it.number == number && it.name == null }
+                            ?: return@synchronized null
+                        val next = pending.copy(name = name, updatedAt = System.currentTimeMillis())
+                        pendingDial = next to (pendingDial?.second ?: System.currentTimeMillis())
+                        next
+                    }
+                }
+                updated?.let(onChange)
+            }
+        }
     }
 
     private fun hangupActions() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) listOf("hangup") else emptyList()
@@ -292,14 +323,15 @@ class CallMonitor(
                 "dial" -> {
                     val number = command.number ?: return CallCommandResult(false, "Invalid phone number.")
                     if (currentCall() != null) return CallCommandResult(false, "Finish the current call on the phone first.")
+                    val now = System.currentTimeMillis()
                     val call = CallInfo(
                         callId = AirCrypto.randomHex16(), state = "dialing", direction = "outgoing",
-                        number = number, name = contacts.lookupName(number),
-                        updatedAt = System.currentTimeMillis(), actions = hangupActions(),
+                        number = number, updatedAt = now, actions = hangupActions(),
                     )
-                    synchronized(lock) { pendingDial = call to System.currentTimeMillis() }
+                    synchronized(lock) { pendingDial = call to now }
                     tm.placeCall(Uri.fromParts("tel", number, null), Bundle())
                     onChange(call)
+                    resolveCallerName(call.callId, number)
                     CallCommandResult(true, callId = call.callId)
                 }
                 else -> CallCommandResult(false, "Unknown call action.")
@@ -321,16 +353,73 @@ class CallMonitor(
  * incoming contact cards and screen-share consent.
  */
 class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
+    private data class BatteryReading(val level: Int, val charging: Boolean, val chargeTimeRemainingMs: Long?)
+
     private val contacts = AndroidContactProvider(context)
     @Volatile private var channel: ContinuityChannel? = null
     private val calls = CallMonitor(context, contacts) { call -> channel?.publishCallState(call) }
     private var lastFeatures: List<String> = emptyList()
+    @Volatile private var lastBattery: BatteryReading? = null
+    private var batteryReceiverRegistered = false
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val reading = readBattery(intent) ?: return
+            val shouldPublish = synchronized(this@PhoneContinuity) {
+                val previous = lastBattery
+                val priorEta = previous?.chargeTimeRemainingMs
+                val nextEta = reading.chargeTimeRemainingMs
+                val etaChanged = when {
+                    priorEta == null -> nextEta != null
+                    nextEta == null -> true
+                    else -> abs(priorEta - nextEta) >= 60_000L
+                }
+                val changed = previous == null || previous.level != reading.level || previous.charging != reading.charging || etaChanged
+                if (changed) lastBattery = reading
+                changed
+            }
+            if (shouldPublish) publishBattery(reading)
+        }
+    }
+
+    init {
+        val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        lastBattery = readBattery(context.registerReceiver(null, filter))
+        try {
+            if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(batteryReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            else @Suppress("DEPRECATION") context.registerReceiver(batteryReceiver, filter)
+            batteryReceiverRegistered = true
+        } catch (e: Exception) {
+            Log.w("AirBridgeBattery", "Could not observe battery status: ${e.message}")
+        }
+    }
 
     fun attach(channel: ContinuityChannel) {
         this.channel = channel
         channel.contactProvider = contacts
         channel.callController = calls
         refresh(announce = false)
+        lastBattery?.let(::publishBattery)
+    }
+
+    private fun readBattery(intent: Intent?): BatteryReading? {
+        intent ?: return null
+        val rawLevel = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        if (rawLevel < 0 || scale <= 0) return null
+        val level = (rawLevel * 100f / scale).roundToInt().coerceIn(0, 100)
+        val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
+        val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
+        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+            (status == BatteryManager.BATTERY_STATUS_UNKNOWN && plugged)
+        val estimatedMs = if (charging && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            runCatching { context.getSystemService(BatteryManager::class.java)?.computeChargeTimeRemaining() }.getOrNull()
+        } else null
+        val chargeTimeRemainingMs = BatteryChargeEstimate.sanitize(estimatedMs, charging)
+        return BatteryReading(level, charging, chargeTimeRemainingMs)
+    }
+
+    private fun publishBattery(reading: BatteryReading) {
+        channel?.publishBatteryStatus(reading.level, reading.charging, reading.chargeTimeRemainingMs)
     }
 
     /** Re-evaluate toggles/permissions (Settings change, app resume); re-announce if changed. */
@@ -363,6 +452,7 @@ class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
     /** A computer (re)connected: bring it up to date on a call in progress. */
     fun onPeersChanged() {
         calls.currentCall()?.let { channel?.publishCallState(it.copy(updatedAt = System.currentTimeMillis())) }
+        lastBattery?.let(::publishBattery)
     }
 
     fun onContactsReceived(item: ContactShareItem) = ContinuityNotifications.contactReceived(context, item)
@@ -376,6 +466,10 @@ class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
 
     fun detach() {
         calls.shutdown()
+        if (batteryReceiverRegistered) {
+            runCatching { context.unregisterReceiver(batteryReceiver) }
+            batteryReceiverRegistered = false
+        }
         channel = null
     }
 }

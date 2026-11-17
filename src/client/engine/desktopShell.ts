@@ -36,3 +36,16 @@ export function requestLocalServiceRestart(): boolean {
     return false;
   }
 }
+
+/** Copy through AppKit when WKWebView's browser clipboard APIs are unavailable. */
+export function copyTextToDesktopShell(text: string): boolean {
+  if (!isThisComputerPage() || text.length > 1_000_000) return false;
+  const bridge = shellBridge();
+  if (!bridge) return false;
+  try {
+    bridge.postMessage({ action: 'copy-text', text });
+    return true;
+  } catch {
+    return false;
+  }
+}

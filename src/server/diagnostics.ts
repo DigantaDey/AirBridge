@@ -9,6 +9,7 @@
  */
 import os from 'node:os';
 import util from 'node:util';
+import { performance } from 'node:perf_hooks';
 
 export interface LogLine {
   t: string;
@@ -69,16 +70,20 @@ let monitorStarted = false;
 export function startEventLoopMonitor(thresholdMs = 2_000): EventLoopStats {
   if (monitorStarted) return loopStats;
   monitorStarted = true;
-  let last = Date.now();
+  // Measure elapsed time with a monotonic clock so NTP/manual wall-clock
+  // changes are not misreported as event-loop hangs. Keep wall time only for
+  // the human-readable diagnostic timestamp.
+  let last = performance.now();
   const timer = setInterval(() => {
-    const now = Date.now();
-    const lag = now - last - 1_000;
-    last = now;
+    const monotonicNow = performance.now();
+    const wallNow = Date.now();
+    const lag = monotonicNow - last - 1_000;
+    last = monotonicNow;
     if (lag > thresholdMs) {
       loopStats.stalls++;
       loopStats.maxStallMs = Math.max(loopStats.maxStallMs, lag);
-      loopStats.lastStallAt = new Date(now).toISOString();
-      console.error(`[airbridge] ${new Date(now).toISOString()} event loop was blocked for ${(lag / 1000).toFixed(1)}s`);
+      loopStats.lastStallAt = new Date(wallNow).toISOString();
+      console.error(`[airbridge] ${new Date(wallNow).toISOString()} event loop was blocked for ${(lag / 1000).toFixed(1)}s`);
     }
   }, 1_000);
   timer.unref();

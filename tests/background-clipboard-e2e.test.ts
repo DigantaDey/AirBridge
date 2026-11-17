@@ -29,11 +29,12 @@ describe('background clipboard without open browser UIs', () => {
   it('beams an OS clipboard change to a paired phone through the daemon peer', async () => {
     const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
     let hostClipboard = 'seed clipboard';
+    let clipboardReads = 0;
     const writes: string[] = [];
     let suspendedUi: WebSocket | undefined;
     const provider: HostClipboardProvider = {
       isSupported: () => true,
-      readText: async () => hostClipboard,
+      readText: async () => { clipboardReads += 1; return hostClipboard; },
       writeText: async (text: string) => {
         hostClipboard = text;
         writes.push(text);
@@ -106,17 +107,38 @@ describe('background clipboard without open browser UIs', () => {
       // host clipboard poll that happens before that point is retained by the
       // sender, but waiting here makes this test exercise delivery rather than
       // the pairing race itself.
-      await waitFor(
-        () => phone.getSnapshot().peers,
-        (peers) => peers.some((peer) => peer.device.model === 'AirBridge service'),
+      const daemonClient = (server.backgroundClipboard as unknown as { client: WarpClient }).client;
+      const daemonPhonePeerId = await waitFor(
+        () => {
+          const snapshot = daemonClient.getSnapshot();
+          const phonePeer = snapshot.peers.find((peer) => peer.device.deviceId === '1111111111111111');
+          return snapshot.connectionState === 'connected' && phonePeer
+            ? phonePeer.peerId
+            : undefined;
+        },
+        (peerId) => typeof peerId === 'string',
       );
+      expect(daemonClient.getSnapshot().autoClipboardSync).toBe(true);
+      expect(daemonPhonePeerId).toBeDefined();
+      const daemonAtPhoneId = await waitFor(
+        () => {
+          const snapshot = phone.getSnapshot();
+          const daemonPeer = snapshot.peers.find((peer) => peer.device.model === 'AirBridge service');
+          return daemonPeer?.peerId;
+        },
+        (peerId) => typeof peerId === 'string',
+      );
+      expect(phone.getSnapshot().clipboardReceiveEnabled).toBe(true);
+      expect(daemonAtPhoneId).toBeDefined();
+      // Ensure the monitor has completed its initial seed poll before changing
+      // the clipboard; otherwise a change during the first read is intentionally
+      // treated as startup state instead of a new copy event.
+      await waitFor(() => clipboardReads, (reads) => reads >= 2);
       expect(Object.getOwnPropertyDescriptor(globalThis, 'localStorage')).toEqual(originalStorage);
       hostClipboard = 'copied while no UI is open';
       await waitFor(() => received, (text) => text === hostClipboard);
       expect(received).toBe('copied while no UI is open');
-      const daemon = (await waitFor(() => phone.getSnapshot().peers, (peers) => peers.some((peer) => peer.device.model === 'AirBridge service')))
-        .find((peer) => peer.device.model === 'AirBridge service')!;
-      await phone.sendClipboard(daemon.peerId, '  incoming whitespace\n');
+      await phone.sendClipboard(daemonAtPhoneId!, '  incoming whitespace\n');
       await waitFor(() => hostClipboard, (value) => value === '  incoming whitespace\n');
       expect(writes).toEqual(['  incoming whitespace\n']); // no duplicate server/daemon OS write
       const prefsResponse = await fetch(`http://127.0.0.1:${server.port}/api/daemon/background-pair-code`, {
@@ -124,7 +146,7 @@ describe('background clipboard without open browser UIs', () => {
         body: JSON.stringify({ pairCode, autoClipboard: false, receiveClipboard: false }),
       });
       expect(prefsResponse.status).toBe(200);
-      await phone.sendClipboard(daemon.peerId, 'blocked receive');
+      await phone.sendClipboard(daemonAtPhoneId!, 'blocked receive');
       hostClipboard = 'disabled automatic capture';
       await wait(300);
       expect(writes).toEqual(['  incoming whitespace\n']);

@@ -44,7 +44,7 @@ android {
         // A stable production floor prevents a local Play bundle from going
         // backwards from the old CI-generated sideload version codes.
         versionCode = configuredVersionCode ?: 2_300_000 + gitCommitCount
-        versionName = "2.4.7"
+        versionName = "2.4.8"
     }
 
     signingConfigs {
@@ -128,4 +128,5 @@ dependencies {
 
     // QR encoding & camera pairing scanner (Camera2 + pure-Java ZXing, offline).
     implementation("com.google.zxing:core:3.5.3")
+    testImplementation("junit:junit:4.13.2")
 }

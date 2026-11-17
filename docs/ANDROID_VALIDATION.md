@@ -1,6 +1,6 @@
 # Android validation and remaining device checks
 
-## Architecture being validated (2.4.7)
+## Architecture being validated (2.4.8)
 
 `ConnectionService` owns a single `NativeEngineHost` / Kotlin `AirBridgeEngine`.
 The bundled WebView UI attaches a metadata subscriber; suspending, destroying

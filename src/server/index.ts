@@ -604,6 +604,19 @@ export async function createAirBridgeServer(
     addShellSubscriber(res, caps, { type: 'hello', version: serviceVersion, pid: process.pid });
   });
 
+  app.post('/api/local/notification', express.json({ limit: '2kb' }), (req, res) => {
+    if (!localOnly(req, res)) return;
+    if (!isSameOriginRequest(req)) { res.status(403).json({ error: 'Cross-origin request refused' }); return; }
+    const body = (req.body ?? {}) as { title?: unknown; body?: unknown };
+    if (typeof body.title !== 'string' || typeof body.body !== 'string' ||
+        body.title.length < 1 || body.title.length > 120 || body.body.length > 300) {
+      res.status(400).json({ error: 'Invalid notification text.' });
+      return;
+    }
+    postMacOsNotification(body.title, body.body, 'AirBridge');
+    res.status(202).json({ accepted: true });
+  });
+
   app.get('/api/diagnostics', (req, res) => {
     if (!localOnly(req, res)) return;
     res.setHeader('Cache-Control', 'no-store');

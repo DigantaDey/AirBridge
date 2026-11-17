@@ -197,6 +197,15 @@ export type ControlPayload =
       call: CallInfo;
     }
   | {
+      /** Live phone battery telemetry sent only to an authorized paired computer. */
+      kind: 'battery-status';
+      level: number;
+      charging: boolean;
+      /** Android estimate in milliseconds; omitted if charging time cannot be estimated. */
+      chargeTimeRemainingMs?: number;
+      updatedAt: number;
+    }
+  | {
       kind: 'call-command';
       commandId: string;
       action: CallAction;

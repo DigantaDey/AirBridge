@@ -80,16 +80,18 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.14.3
-      # :engine:check (vectors) + assembleDebug only — root `check` would also
-      # run :app:lint, which is not part of this gate.
-      - name: Engine vectors + typecheck + debug APK
+      # Engine vectors + app unit regressions + debug APK — root `check` would
+      # also run :app:lint, which is not part of this gate.
+      - name: Engine vectors + app unit tests + debug APK
         shell: bash
         run: |
           set -o pipefail
-          gradle -p android :engine:check :app:assembleDebug --no-daemon 2>&1 | tee gradle-build.log || {
-            # Keep the actual Kotlin/compiler diagnostics visible in the GitHub
-            # annotation. The Gradle summary alone is not actionable.
-            echo "::error title=Android Gradle build failed::$(tail -n 160 gradle-build.log | tr '\n' '|' | cut -c1-12000)"
+          gradle -p android :engine:check :app:testDebugUnitTest :app:assembleDebug --no-daemon 2>&1 | tee gradle-build.log || {
+            # GitHub caps each annotation's message. Extract compiler/root-cause
+            # lines first so diagnostics survive instead of truncating at the task summary.
+            diagnostics="$(grep -E '(^e: |error:|What went wrong|Execution failed|Caused by:|Compilation error| FAILED)' gradle-build.log | tail -n 40)"
+            if [ -z "$diagnostics" ]; then diagnostics="$(tail -c 3500 gradle-build.log)"; fi
+            echo "::error title=Android Gradle build failed::$(printf '%s\n' "$diagnostics" | tr '\n' '|' | cut -c1-3800)"
             exit 1
           }
       - name: Native headless interop (HTTP + TLS + QR hotspot pairing + SPAKE2 join + relay, 128 MiB heap)

@@ -145,10 +145,15 @@ describe('phone continuity over the paired encrypted session', () => {
 
     // ---- calls ----
     const callId = '0123456789abcdef';
-    phone.publishCallState({ callId, state: 'ringing', direction: 'incoming', number: '+1 202 555 0143', name: 'Grace Hopper', updatedAt: 1, actions: ['answer', 'reject'] });
+    phone.publishCallState({ callId, state: 'ringing', direction: 'incoming', number: '+1 202 555 0143', updatedAt: 1, actions: ['answer', 'reject'] });
     await waitFor(() => mac.getSnapshot().continuity!.calls.some((c) => c.callId === callId), 'ringing at mac');
-    expect(mac.getSnapshot().continuity!.calls[0]).toMatchObject({ state: 'ringing', name: 'Grace Hopper', peerId: phoneId, peerName: 'Pixel 9' });
+    expect(mac.getSnapshot().continuity!.calls[0]).toMatchObject({ state: 'ringing', number: '+1 202 555 0143', peerId: phoneId, peerName: 'Pixel 9' });
     expect(macCalls.at(-1)?.state).toBe('ringing');
+
+    // Android sends the ring promptly with the number, then enriches it after
+    // a background ContactsProvider lookup without changing the call identity.
+    phone.publishCallState({ callId, state: 'ringing', direction: 'incoming', number: '+1 202 555 0143', name: 'Grace Hopper', updatedAt: 1.5, actions: ['answer', 'reject'] });
+    await waitFor(() => mac.getSnapshot().continuity!.calls[0]?.name === 'Grace Hopper', 'late caller name at mac');
 
     await expect(mac.answerCall(phoneId, callId)).resolves.toEqual({ ok: true });
     expect(commands.at(-1)).toEqual({ peerId: macId, action: 'answer', callId });

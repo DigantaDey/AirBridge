@@ -5,6 +5,7 @@
  * and "Copy diagnostics" for support requests. Hidden on phones and remote pages.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { copyTextToDesktopShell } from '../engine/desktopShell.js';
 import { HandoffPrompt } from './HandoffPrompt.js';
 
 export interface UpdateStatusView {
@@ -40,7 +41,8 @@ export async function copyText(text: string): Promise<boolean> {
       await navigator.clipboard.writeText(text);
       return true;
     }
-  } catch { /* fall through */ }
+  } catch { /* fall through to the native macOS clipboard, then browser fallback */ }
+  if (copyTextToDesktopShell(text)) return true;
   try {
     const area = document.createElement('textarea');
     area.value = text;
