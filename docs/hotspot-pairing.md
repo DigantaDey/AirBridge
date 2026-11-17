@@ -279,8 +279,8 @@ mobile data and timed out.
   - TCP_TIMEOUT guidance for an off-link address on a phone that has Wi-Fi or
     a hotspot now explains that the address is probably out of date.
 - CI gets a `macos-app` job (`scripts/test-mac-app.sh`). It compiles the Swift
-  shell and runs it against the real darwin-x64 binary on a hosted Intel Mac,
-  checking five things:
+  shell and runs it against the real darwin-arm64 binary, checking five
+  things:
   - it starts the service;
   - it restarts the service after `kill -9`;
   - it replaces a version-less old server;

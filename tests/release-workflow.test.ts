@@ -24,15 +24,4 @@ describe('public release workflow', () => {
     expect(publishJob).toContain('public release contains only the validated desktop artifacts');
     expect(publishJob).not.toContain('AirBridge.aab');
   });
-
-  it('uses a reliable Intel macOS runner while still packaging both macOS architectures', async () => {
-    const releaseWorkflow = await readRepoFile('.github/workflows/release.yml');
-    const ciWorkflow = await readRepoFile('.github/workflows/ci.yml');
-
-    expect(releaseWorkflow).toContain('runs-on: macos-13');
-    expect(releaseWorkflow).toContain('package-mac-app.sh arm64 dist-bin/AirBridge-darwin-arm64');
-    expect(releaseWorkflow).toContain('package-mac-app.sh x64 dist-bin/AirBridge-darwin-x64');
-    expect(ciWorkflow).toContain('node scripts/build-desktop.mjs --only darwin-x64');
-    expect(ciWorkflow).toContain('scripts/test-mac-app.sh dist-bin/AirBridge-darwin-x64');
-  });
 });

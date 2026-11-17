@@ -54,9 +54,7 @@ jobs:
 
   desktop-darwin:
     name: macOS binaries (ad-hoc signed)
-    # Build both Mach-O architectures on the readily available Intel image.
-    # package-mac-app.sh passes an explicit Swift target for each bundle.
-    runs-on: macos-13
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
