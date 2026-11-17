@@ -61,6 +61,8 @@ Desktop binaries update themselves. Updates are off for development builds and f
    - **App bundle updates:** the app also relaunches from the new bundle.
 6. **Rollback.** If the new build starts 3 times without staying up for a minute, the previous build is restored automatically and the failed one is kept as `*.failed`.
 
+Background checks follow the release's **staged rollout** (10% → 50% → 100% over 3 days by default). Manual checks always bypass it. See [Staged rollouts](pairing-and-connectivity.md#staged-rollouts) for operator controls, and [Crash reports](pairing-and-connectivity.md#crash-reports) for what happens when the service crashes.
+
 ### Turning updates off
 
 Set `AIRBRIDGE_AUTO_UPDATE=0`. Your package manager or the installer then stays in charge.
@@ -80,6 +82,7 @@ The service never compiles or launches helpers to show a notification:
 
 1. The app subscribes to a loopback Server-Sent Events stream, `GET /api/local/events`. Only this computer can connect, and the request needs the `X-AirBridge-Shell` header, which web pages cannot send cross-origin.
 2. The app posts notifications through **UNUserNotificationCenter**. Clicking a notification opens AirBridge.
+   - Hotspot handoff requests arrive as actionable notifications (**Join / Always join paired phones / Not now**). Dismissing leaves the request answerable in the window until it expires. See [Hotspot handoff](pairing-and-connectivity.md#hotspot-handoff).
 3. If notification permission is denied, or the app isn't running, the app doesn't subscribe for notifications and the service falls back to `osascript`.
 
 (History: v0.0.5 compiled a Swift helper synchronously inside the service. That froze the service long enough for the watchdog to restart it in a loop.)
