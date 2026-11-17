@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { isStaleUi, reloadForServerVersion } from '../src/client/engine/buildInfo.js';
+import pkg from '../package.json';
+import { UI_VERSION, isStaleUi, reloadForServerVersion } from '../src/client/engine/buildInfo.js';
 import { canRestartLocalService, isThisComputerPage, requestLocalServiceRestart } from '../src/client/engine/desktopShell.js';
 
 describe('stale UI detection', () => {
@@ -14,7 +15,12 @@ describe('stale UI detection', () => {
     expect(isStaleUi('0.0.4', 'dev')).toBe(false);
     expect(isStaleUi(undefined, '0.0.4')).toBe(false);
     expect(isStaleUi(null, '0.0.4')).toBe(false);
-    expect(isStaleUi('0.0.4', undefined)).toBe(false);
+    expect(isStaleUi('0.0.4', null)).toBe(false);
+  });
+
+  it('the bundle carries the package version (compared with the service version)', () => {
+    expect(UI_VERSION).toBe(pkg.version);
+    expect(isStaleUi(pkg.version)).toBe(false);
   });
 
   it('reloads at most once per server version (no reload loop)', () => {

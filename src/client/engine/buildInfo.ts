@@ -12,7 +12,7 @@ export const UI_VERSION: string | undefined =
  * app window left open across an update, or a server restarted from a newer
  * install. Dev servers ("dev") and unknown versions never force a reload.
  */
-export function isStaleUi(serverVersion: string | undefined | null, uiVersion: string | undefined = UI_VERSION): boolean {
+export function isStaleUi(serverVersion: string | undefined | null, uiVersion: string | null | undefined = UI_VERSION): boolean {
   if (!serverVersion || !uiVersion) return false;
   if (serverVersion === 'dev' || uiVersion === 'dev') return false;
   return serverVersion !== uiVersion;
