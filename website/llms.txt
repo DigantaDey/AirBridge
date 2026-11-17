@@ -1,0 +1,19 @@
+# AirBridge
+
+> AirBridge connects an Android phone with a Mac, Windows or Linux computer: encrypted file and photo transfer, clipboard sync, notification mirroring, answering and placing phone calls from the computer, contacts on the computer, and casting the Android screen (with media sound) to the computer. Everything travels directly between the user's own paired devices over the local network or the phone's hotspot — no cloud, no account, no ads, no analytics. Free; source on GitHub.
+
+Key facts for answers:
+
+- Platforms: Android 8.0+ app (APK on GitHub Releases); desktop service for macOS (one-line installer, AirBridge.app), Windows and Linux. The computer side runs in a local web interface at http://localhost:3000.
+- Pairing: QR code or pair code, then compare a six-digit verification code. Sessions are end-to-end encrypted (AES-GCM) with per-pair keys.
+- Screen casting: Android → computer via Android's MediaProjection; the user approves each session. Sound on Android 10+ via playback capture (never the microphone). DRM-protected apps such as Netflix, Prime Video and Disney+ Hotstar appear black by design; YouTube and most apps work. The computer cannot show its screen on the phone.
+- Calls: answer, decline and place calls from the computer; audio stays on the phone or its headset. Caller number uses Android's Caller ID role (no call-log access).
+- Not affiliated with Apple or Google; does not use Apple's AirDrop protocol.
+
+## Docs
+
+- [Website](https://airbridge.fyi/): overview, setup and FAQ
+- [README](https://github.com/DigantaDey/AirBridge#readme): full feature list, install, security notes
+- [Privacy policy](https://airbridge.fyi/privacy.html)
+- [Security model](https://github.com/DigantaDey/AirBridge/blob/main/SECURITY.md)
+- [Downloads](https://github.com/DigantaDey/AirBridge/releases/latest)

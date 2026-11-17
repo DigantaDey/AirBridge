@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.mutableIntStateOf
+import com.airbridge.app.CallerIdService
 import com.airbridge.app.ContinuityPermissions
 import com.airbridge.app.NativeEngineHost
 import com.airbridge.app.Prefs
@@ -77,6 +78,24 @@ fun SettingsScreen(
 ) {
     var renameDialogOpen by rememberSaveable { mutableStateOf(false) }
     var forgetDialogOpen by rememberSaveable { mutableStateOf(false) }
+    // Prominent disclosure + affirmative consent before any sensitive Android
+    // access is requested (Google Play User Data policy).
+    var disclosure by rememberSaveable { mutableStateOf<String?>(null) }
+    disclosure?.let { kind ->
+        SensitiveAccessDisclosure(
+            kind = kind,
+            onAgree = {
+                disclosure = null
+                if (kind == DISCLOSURE_ACCESSIBILITY) {
+                    onSetAccessibilityOptIn(true)
+                    onOpenAccessibilitySettings()
+                } else {
+                    onOpenNotificationListenerSettings()
+                }
+            },
+            onDismiss = { disclosure = null },
+        )
+    }
 
     Column(
         modifier = modifier
@@ -191,7 +210,7 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.weight(1f),
                         )
-                        OutlinedButton(onClick = onOpenNotificationListenerSettings) {
+                        OutlinedButton(onClick = { disclosure = DISCLOSURE_NOTIFICATIONS }) {
                             Text("Open Settings")
                         }
                     }
@@ -201,7 +220,7 @@ fun SettingsScreen(
                     title = "Background clipboard bridge opt-in",
                     subtitle = "Use optional Accessibility service for copies from other apps",
                     checked = uiState.accessibilityOptIn,
-                    onCheckedChange = onSetAccessibilityOptIn,
+                    onCheckedChange = { on -> if (on) disclosure = DISCLOSURE_ACCESSIBILITY else onSetAccessibilityOptIn(false) },
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -233,7 +252,9 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    TextButton(onClick = onOpenAccessibilitySettings) {
+                    TextButton(onClick = {
+                        if (uiState.accessibilityEnabled) onOpenAccessibilitySettings() else disclosure = DISCLOSURE_ACCESSIBILITY
+                    }) {
                         Text("Open Settings")
                     }
                 }
@@ -456,6 +477,47 @@ private fun SwitchRow(
     }
 }
 
+private const val DISCLOSURE_ACCESSIBILITY = "accessibility"
+private const val DISCLOSURE_NOTIFICATIONS = "notifications"
+
+/**
+ * In-app prominent disclosure shown before Android's Accessibility or
+ * Notification-access settings: what is read, why, where it goes, and how to
+ * stop. Nothing is enabled unless the user taps "Agree".
+ */
+@Composable
+private fun SensitiveAccessDisclosure(kind: String, onAgree: () -> Unit, onDismiss: () -> Unit) {
+    val accessibility = kind == DISCLOSURE_ACCESSIBILITY
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (accessibility) "Use Accessibility for the clipboard bridge?" else "Allow notification access?") },
+        text = {
+            Text(
+                if (accessibility) {
+                    "AirBridge uses Android's Accessibility service only for its optional clipboard bridge. When it is on, " +
+                        "AirBridge is told when you copy or select text in other apps, reads that copied text, and sends it " +
+                        "to your own paired computer, end-to-end encrypted.\n\n" +
+                        "It does not read what you type, passwords, or the rest of the screen, and it does not perform " +
+                        "actions for you. Nothing goes to AirBridge servers or third parties, and nothing is used for ads.\n\n" +
+                        "Next, Android Settings opens: turn on \"AirBridge clipboard bridge\". You can turn it off there or " +
+                        "here at any time."
+                } else {
+                    "To show your phone's notifications on your computer, AirBridge needs Notification access. AirBridge " +
+                        "then reads the app name, title and text of new notifications and sends them to your own paired " +
+                        "computer, end-to-end encrypted.\n\n" +
+                        "Ongoing, background-service and private (hidden) notifications are skipped. Nothing goes to " +
+                        "AirBridge servers or third parties, and nothing is used for ads.\n\n" +
+                        "Next, Android Settings opens: allow AirBridge. Turn it off there or with \"Notification sharing\" " +
+                        "here at any time."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        },
+        confirmButton = { TextButton(onClick = onAgree) { Text("Agree") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Not now") } },
+    )
+}
+
 /**
  * Contacts, calls and screen sharing for the paired computer. Each toggle asks
  * for its Android permission when turned on; the computer only sees a feature
@@ -472,6 +534,7 @@ private fun PhoneContinuityCard() {
     }
     val contactsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { changed() }
     val callsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { changed() }
+    val callerIdLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { changed() }
     // Re-read on every recomposition triggered by [tick] (permission results, toggles).
     @Suppress("UNUSED_VARIABLE") val observe = tick
     val contactsGranted = ContinuityPermissions.contactsGranted(context)
@@ -501,25 +564,49 @@ private fun PhoneContinuityCard() {
                 !telephony -> "This device has no phone service"
                 !prefs.callsFromComputer -> "Answer, decline and place calls from the computer"
                 !callsGranted -> "Needs phone permission — tap the switch to allow"
-                !callerId -> "On. Allow call logs to show who is calling on the computer"
                 else -> "On. Call audio stays on the phone or its headset"
             },
             checked = telephony && prefs.callsFromComputer && callsGranted,
             onCheckedChange = { on ->
                 prefs.callsFromComputer = on
-                if (on && telephony && (!callsGranted || !callerId)) callsLauncher.launch(ContinuityPermissions.CALLS)
+                if (on && telephony && !callsGranted) callsLauncher.launch(ContinuityPermissions.CALLS)
                 changed()
             },
         )
+        if (telephony && prefs.callsFromComputer && callsGranted && !callerId && CallerIdService.supported(context)) {
+            // Optional: the number of an incoming call, via Android's Caller ID role.
+            Column(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+                Text(
+                    text = "Show who is calling on the computer by choosing AirBridge as the Caller ID app. AirBridge only reads the incoming number — it never blocks, silences or logs calls.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = { CallerIdService.requestIntent(context)?.let { callerIdLauncher.launch(it) } }) {
+                    Text("Turn on caller ID")
+                }
+            }
+        }
         HorizontalDivider()
         SwitchRow(
             title = "Screen sharing",
-            subtitle = "Let the computer ask to view this screen. You approve every session",
+            subtitle = "Let the computer ask to view this screen, or cast it from the home tab. You approve every session",
             checked = prefs.screenSharing,
             onCheckedChange = { on ->
                 prefs.screenSharing = on
                 changed()
             },
         )
+        if (prefs.screenSharing && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            HorizontalDivider()
+            SwitchRow(
+                title = "Include sound",
+                subtitle = "Play media audio on the computer while sharing. Android asks for audio-recording access once; AirBridge captures app playback only, never the microphone or calls",
+                checked = prefs.screenSound,
+                onCheckedChange = { on ->
+                    prefs.screenSound = on
+                    changed()
+                },
+            )
+        }
     }
 }

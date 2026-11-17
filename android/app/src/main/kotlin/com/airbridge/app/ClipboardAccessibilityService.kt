@@ -52,9 +52,8 @@ class ClipboardAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         Log.i(TAG, "clipboard accessibility service connected")
         val prefs = Prefs(this)
-        if (!prefs.hasAccessibilityClipboardOptInChoice) {
-            prefs.accessibilityClipboardOptIn = true
-        }
+        // No implicit opt-in: the clipboard bridge only runs after the user
+        // agreed to AirBridge's in-app disclosure (Settings → clipboard bridge).
         if (prefs.connectionContinuity) {
             runCatching {
                 val intent = Intent(this, ConnectionService::class.java)
@@ -110,9 +109,6 @@ class ClipboardAccessibilityService : AccessibilityService() {
 
     private fun captureClipboard(allowOverlay: Boolean, forceOverlay: Boolean) {
         val prefs = Prefs(this)
-        if (!prefs.hasAccessibilityClipboardOptInChoice) {
-            prefs.accessibilityClipboardOptIn = true
-        }
         if (!prefs.accessibilityClipboardOptIn || !prefs.connectionContinuity) return
         val direct = ClipboardText.read(this)
         if (direct != null) {

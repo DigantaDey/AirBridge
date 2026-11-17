@@ -156,6 +156,11 @@ fun main() {
     expect("calls.dial-sanitized", commands.lastOrNull()?.number == "+12025550143")
     channel.handleControl(mac, obj("kind" to "call-command", "commandId" to "3333333333333333", "action" to "dial", "number" to "rm -rf"))
     expect("calls.dial-invalid", host.last("call-command-result")!!.second.let { it.optBool("ok") == false && it.optStr("error") == "Invalid phone number." })
+    // A computer must never be able to set call forwarding or run USSD/MMI codes.
+    val beforeMmi = commands.size
+    channel.handleControl(mac, obj("kind" to "call-command", "commandId" to "3333333333333334", "action" to "dial", "number" to "**21*+15550100#"))
+    expect("calls.dial-mmi-refused", commands.size == beforeMmi && host.last("call-command-result")!!.second.optStr("error") == "Invalid phone number.")
+    expect("calls.service-code", Continuity.isServiceCode("*#06#") && !Continuity.isServiceCode("+1 555") && Continuity.dialableNumber("*123#") == null)
     channel.handleControl(mac, obj("kind" to "call-command", "commandId" to "4444444444444444", "action" to "explode"))
     expect("calls.unknown-action", host.last("call-command-result")!!.second.optStr("error") == "Unknown call action.")
     val before = commands.size
@@ -226,6 +231,50 @@ fun main() {
     channel.onPeersChanged(host.peers.values.toList())
     expect("disconnect.cleanup", !channel.isScreenShareActive(sid4) && ended.last() == (sid4 to "The computer disconnected") && channel.peerFeatures(mac).isEmpty())
     expect("unknown-kind-not-handled", !channel.handleControl(mac, obj("kind" to "transfer-offer")))
+
+    // ---- cast to computer: invite + sound -------------------------------------
+    host.peers[mac] = peer(mac)
+    channel.onPeersChanged(host.peers.values.toList())
+    expect("audio.feature-needs-capture", !channel.features().contains("screen.audio"))
+    channel.screenAudioAvailable = true
+    expect("audio.feature", channel.features().takeLast(2) == listOf("screen.source", "screen.audio"))
+    expect("invite.stranger-refused", runCatching { channel.inviteScreenShare(stranger, true) }.isFailure)
+    val inviteId = channel.inviteScreenShare(mac, true)
+    val inv = host.last("screen-share-invite")!!
+    expect("invite.sent", inv.first == mac && inv.second.optStr("inviteId") == inviteId && inv.second.optBool("audio") == true)
+    // A request quoting someone else's / unknown invite is a normal (consent) request.
+    channel.handleControl(mac, obj("kind" to "screen-share-request", "sessionId" to "c1b2c3d4e5f60701", "inviteId" to "0000000000000000", "audio" to true))
+    expect("invite.unknown-not-invited", requests.last().let { it.sessionId == "c1b2c3d4e5f60701" && !it.invited && it.audio })
+    channel.declineScreenShare("c1b2c3d4e5f60701")
+    val csid = "c1b2c3d4e5f60702"
+    channel.handleControl(mac, obj("kind" to "screen-share-request", "sessionId" to csid, "inviteId" to inviteId, "audio" to true))
+    expect("invite.answered", requests.last().let { it.sessionId == csid && it.invited && it.audio })
+    channel.handleControl(mac, obj("kind" to "screen-share-request", "sessionId" to "c1b2c3d4e5f60703", "inviteId" to inviteId))
+    expect("invite.single-use", !requests.last().invited)
+    channel.declineScreenShare("c1b2c3d4e5f60703")
+    expect("audio.not-before-accept", !channel.sendScreenAudio(csid, ByteArray(8), 48000, 2))
+    channel.acceptScreenShare(csid)
+    expect("audio.active-state", host.last("screen-share-state")!!.second.let { it.optStr("state") == "active" && it.optBool("audio") == true })
+    val pcm = ByteArray(1920) { (it % 7).toByte() }
+    val framesBeforeAudio = host.frames.size
+    expect("audio.send", channel.sendScreenAudio(csid, pcm, 48000, 2) && channel.sendScreenAudio(csid, pcm, 48000, 2))
+    val a1 = Continuity.decodeScreenAudioFrame(host.frames[framesBeforeAudio].second)
+    val a2 = Continuity.decodeScreenAudioFrame(host.frames[framesBeforeAudio + 1].second)
+    expect("audio.header", a1.sessionId == csid && a1.seq == 1L && a2.seq == 2L && a1.channels == 2 && a1.sampleRate == 48000 && a1.codec == 1)
+    expect("audio.opens", AirCrypto.decryptMediaFrame(host.key, a1.aad, a1.iv, a1.ciphertext).contentEquals(pcm))
+    expect("audio.odd-size-refused", !channel.sendScreenAudio(csid, ByteArray(3), 48000, 2))
+    expect("audio.oversize-refused", !channel.sendScreenAudio(csid, ByteArray(Continuity.SCREEN_AUDIO_MAX_FRAME_BYTES + 4), 48000, 2))
+    channel.screenNotice(csid, "Protected content shows black")
+    expect("notice.sent", host.last("screen-share-state")!!.second.let { it.optStr("state") == "active" && it.optStr("reason") == "Protected content shows black" })
+    channel.stopScreenShare(csid)
+    expect("audio.after-stop", !channel.sendScreenAudio(csid, pcm, 48000, 2))
+    // Without capture (RECORD_AUDIO denied) the share runs silent and says so.
+    val ssid = "c1b2c3d4e5f60704"
+    channel.handleControl(mac, obj("kind" to "screen-share-request", "sessionId" to ssid, "audio" to true))
+    channel.acceptScreenShare(ssid, withAudio = false)
+    expect("audio.silent-state", host.last("screen-share-state")!!.second.optBool("audio") == false && !channel.isScreenAudioActive(ssid) && !channel.sendScreenAudio(ssid, pcm, 48000, 2))
+    channel.stopScreenShare(ssid)
+    expect("invite.handled-silently", channel.handleControl(mac, obj("kind" to "screen-share-invite", "inviteId" to "0123456789abcdef")))
 
     if (continuityFailed > 0) {
         println("CONTINUITY: $continuityFailed FAILED, $continuityPassed passed")

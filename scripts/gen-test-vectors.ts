@@ -48,6 +48,8 @@ import {
   dialableNumber,
   encodeScreenFrame,
   encodeScreenFrameAad,
+  encodeScreenAudioAad,
+  encodeScreenAudioFrame,
   nextScreenQuality,
   parseVCards,
   sanitizeCall,
@@ -368,7 +370,7 @@ async function main(): Promise<void> {
   out.continuity = [{
     vcards: cards.map((c) => ({ cards: c, vcard: buildVCards(c) })),
     parses: parseCases.map((text) => ({ text, cards: parseVCards(text) })),
-    phones: ['+1 (555) 010-0199', '*#06#', '12+34', '555; DROP TABLE', '---', 'tel:123', ' 0044 20 7946 0958 ext. 12 ', 'p123w45'].map((input) => ({
+    phones: ['+1 (555) 010-0199', '*#06#', '12+34', '555; DROP TABLE', '---', 'tel:123', ' 0044 20 7946 0958 ext. 12 ', 'p123w45', '**21*+15550100#', '##002#', '*123#', '555-0100,,123;9'].map((input) => ({
       input, sanitized: sanitizePhoneNumber(input) ?? null, dialable: dialableNumber(input) ?? null,
     })),
     calls: [
@@ -383,6 +385,15 @@ async function main(): Promise<void> {
       const iv = new Uint8Array(12).fill(0xa0 + i);
       const { ciphertext } = await encryptMediaFrame(mediaKey, aad, c.plain, iv);
       return { keyHex: hex(keyBytes), sessionId: c.sessionId, seq: c.seq, codec: c.codec, width: c.width, height: c.height, ivHex: hex(iv), plainHex: hex(c.plain), aadHex: hex(aad), frameHex: hex(encodeScreenFrame(aad, iv, ciphertext)) };
+    })),
+    audio: await Promise.all([
+      { sessionId: 'a1b2c3d4e5f60718', seq: 1, codec: 1, channels: 2, sampleRate: 48000, plain: new Uint8Array([0, 0, 1, 0, 255, 255, 0, 128]) },
+      { sessionId: 'ffffffffffffffff', seq: 0xfffffffe, codec: 1, channels: 1, sampleRate: 8000, plain: new Uint8Array(64).fill(7) },
+    ].map(async (c, i) => {
+      const aad = encodeScreenAudioAad(c);
+      const iv = new Uint8Array(12).fill(0xb0 + i);
+      const { ciphertext } = await encryptMediaFrame(mediaKey, aad, c.plain, iv);
+      return { keyHex: hex(keyBytes), sessionId: c.sessionId, seq: c.seq, codec: c.codec, channels: c.channels, sampleRate: c.sampleRate, ivHex: hex(iv), plainHex: hex(c.plain), aadHex: hex(aad), frameHex: hex(encodeScreenAudioFrame(aad, iv, ciphertext)) };
     })),
   }];
 

@@ -44,6 +44,7 @@ import {
 } from "./engine/nativeShell.js";
 import { createAirBridgeClient, hasNativeEngine, type AirBridgeClient } from "./engine/nativeClient.js";
 import { isStaleUi, reloadForServerVersion, UI_VERSION } from "./engine/buildInfo.js";
+import { canPlayScreenAudio } from "./engine/screenAudio.js";
 import { ContinuityAlerts, ContinuityCenter, activeCallCount, downloadVCard, type ContinuityTab } from "./components/ContinuityCenter.js";
 import { canCaptureScreen, startDisplayCapture } from "./engine/screenCapture.js";
 import { canRestartLocalService, isThisComputerPage, requestLocalServiceRestart } from "./engine/desktopShell.js";
@@ -160,6 +161,7 @@ export function App() {
   const [toast, setToast] = useState<ToastNotice | null>(null);
   // Contacts / Calls / Screen (top bar). The Android app has its own native UI for these.
   const [continuityTab, setContinuityTab] = useState<ContinuityTab | null>(null);
+  const [continuityFocus, setContinuityFocus] = useState<string | undefined>(undefined);
   const continuityEnabled = !hasNativeEngine();
 
   useEffect(() => {
@@ -264,6 +266,12 @@ export function App() {
       // This computer can share its screen when the browser supports it; each
       // request still needs the user's approval and the browser's own picker.
       screenSourceAvailable: canCaptureScreen,
+      screenAudioPlayable: canPlayScreenAudio,
+      // The phone chose "Cast to computer": show its screen right away.
+      onScreenShareInvite: (view) => {
+        setContinuityFocus(view.peerId);
+        setContinuityTab("screen");
+      },
       onIncomingContact: (item) => {
         const names = item.contacts.map((c) => c.name);
         showToast({
@@ -1070,7 +1078,7 @@ export function App() {
       <TransferModal offer={activeIncomingOffer} senderPublicKey={incomingSenderPubKey} onAccept={(transferId, trustSender) => { if (trustSender && incomingSenderPubKey) clientRef.current?.toggleTrustedPeer(incomingSenderPubKey, true); clientRef.current?.acceptIncomingTransfer(transferId).catch((error: unknown) => showToast({ id: "accept-error", title: "Could not accept transfer", body: error instanceof Error ? error.message : "Try accepting the offer again." })); }} onDecline={(transferId) => { clientRef.current?.declineIncomingTransfer(transferId).catch(() => {}); }} />
       {clipboardOpen && <ClipboardCenter peers={snap.peers} items={snap.clipboardItems} autoSync={snap.autoClipboardSync} hostClipboardActive={Boolean(snap.localDaemon.clipboardBridge)} receiveEnabled={snap.clipboardReceiveEnabled} initialPeerId={clipboardPeerId} prefill={clipboardPrefill} onToggleAutoSync={(enabled) => clientRef.current?.setAutoClipboardSync(enabled)} onToggleReceive={(enabled) => clientRef.current?.setClipboardReceiveEnabled(enabled)} onMarkCopied={markLocalCopyHandled} onSend={handleSendClipboard} onSendImage={handleSendClipboardImage} onClose={() => setClipboardOpen(false)} />}
       {continuityEnabled && continuityTab && clientRef.current && (
-        <ContinuityCenter client={clientRef.current} peers={snap.peers} continuity={snap.continuity} initialTab={continuityTab} onClose={() => setContinuityTab(null)} />
+        <ContinuityCenter client={clientRef.current} peers={snap.peers} continuity={snap.continuity} initialTab={continuityTab} focusPeerId={continuityFocus} onClose={() => { setContinuityTab(null); setContinuityFocus(undefined); }} />
       )}
       {continuityEnabled && clientRef.current && (
         <ContinuityAlerts client={clientRef.current} continuity={snap.continuity} onOpenCalls={() => setContinuityTab("calls")} startCapture={startDisplayCapture} />

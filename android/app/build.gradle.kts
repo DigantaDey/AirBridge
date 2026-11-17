@@ -6,12 +6,12 @@ plugins {
 
 android {
     namespace = "com.airbridge.app"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.airbridge.app"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
 
         val ciRunNumber = System.getenv("AIRBRIDGE_VERSION_CODE")?.toIntOrNull()
         val gitCommitCount = runCatching {

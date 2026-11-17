@@ -4,7 +4,8 @@
  * Everything here travels inside the existing end-to-end encrypted session:
  * signalling as AES-GCM `transfer-control` payloads, screen frames as routed
  * binary frames (type 0x04) sealed with the same session key and an AAD that
- * binds the frame header. The hub only ever sees ciphertext.
+ * binds the frame header, and screen audio as type 0x05 frames sealed the same
+ * way. The hub only ever sees ciphertext.
  *
  * This module is pure (no DOM, no Node APIs) so the browser client, the
  * desktop runtime, the tests and the Kotlin vector generator share it.
@@ -23,7 +24,8 @@ export type ContinuityFeature =
   | 'contacts.receive' // accepts contact-share cards
   | 'calls.control' // reports call-state and executes call-command
   | 'screen.source' // can share its screen (MediaProjection / getDisplayMedia)
-  | 'screen.view'; // can view a shared screen
+  | 'screen.view' // can view a shared screen
+  | 'screen.audio'; // source: can send the sound of what's on screen with it
 
 export const CONTINUITY_FEATURES: readonly ContinuityFeature[] = [
   'contacts.provide',
@@ -31,6 +33,7 @@ export const CONTINUITY_FEATURES: readonly ContinuityFeature[] = [
   'calls.control',
   'screen.source',
   'screen.view',
+  'screen.audio',
 ];
 
 export const CONTINUITY_PROTOCOL_VERSION = 1;
@@ -95,11 +98,24 @@ export function sanitizePhoneNumber(value: unknown): string | undefined {
   return /[0-9]/.test(text) ? text : undefined;
 }
 
-/** Digits and dial symbols only — what is actually passed to the dialer. */
+/**
+ * True for carrier service / MMI codes (anything with * or #). The computer
+ * must never be able to dial these: `**21*<number>#` silently forwards every
+ * call (including 2FA calls), and other codes change SIM or device settings.
+ * They can still be dialled on the phone itself.
+ */
+export function isServiceCode(value: unknown): boolean {
+  return typeof value === 'string' && /[*#]/.test(value);
+}
+
+/**
+ * Digits, a leading +, and pause/wait (, ;) only — what is actually passed to
+ * the phone's dialer. Service codes are refused (see isServiceCode).
+ */
 export function dialableNumber(value: unknown): string | undefined {
   const text = sanitizePhoneNumber(value);
-  if (!text) return undefined;
-  const dial = text.replace(/[^+0-9*#,;]/g, '').replace(/(?!^)\+/g, '');
+  if (!text || isServiceCode(text)) return undefined;
+  const dial = text.replace(/[^+0-9,;]/g, '').replace(/(?!^)\+/g, '');
   return /[0-9]/.test(dial) && dial.length <= 40 ? dial : undefined;
 }
 
@@ -462,6 +478,14 @@ export function callPartyLabel(call: Pick<CallInfo, 'name' | 'number'>): string 
 
 export type ScreenShareState = 'requesting' | 'pending' | 'active' | 'stopped' | 'declined' | 'unsupported' | 'error';
 
+/**
+ * Casting started on the phone: it sends `screen-share-invite`, the computer
+ * answers with a `screen-share-request` carrying the same inviteId, and the
+ * phone (which created the invite) goes straight to Android's capture prompt.
+ * Invites are single-use and expire.
+ */
+export const SCREEN_INVITE_TTL_MS = 60_000;
+
 export const SCREEN_CODEC_JPEG = 1;
 export const SCREEN_DEFAULT_MAX_WIDTH = 1280;
 export const SCREEN_MAX_WIDTH_LIMIT = 2560;
@@ -538,6 +562,83 @@ export function decodeScreenFrame(bytes: Uint8Array): DecodedScreenFrame {
     aad: bytes.subarray(0, SCREEN_FRAME_AAD_LENGTH),
     iv: bytes.slice(SCREEN_FRAME_AAD_LENGTH, SCREEN_FRAME_HEADER_LENGTH),
     ciphertext: bytes.subarray(SCREEN_FRAME_HEADER_LENGTH),
+  };
+}
+
+// ---- Screen audio (frame 0x05) ------------------------------------------------
+
+export const FRAME_SCREEN_AUDIO = 0x05;
+/** Interleaved signed 16-bit little-endian PCM. */
+export const AUDIO_CODEC_PCM_S16LE = 1;
+export const SCREEN_AUDIO_SAMPLE_RATE = 48_000;
+export const SCREEN_AUDIO_MAX_FRAME_BYTES = 64 * 1024;
+/** type(1) ‖ sessionId(16) ‖ seq(u32) ‖ codec(u8) ‖ channels(u8) ‖ sampleRate(u32) */
+export const SCREEN_AUDIO_AAD_LENGTH = 1 + 16 + 4 + 1 + 1 + 4; // 27
+export const SCREEN_AUDIO_HEADER_LENGTH = SCREEN_AUDIO_AAD_LENGTH + 12; // + IV = 39
+
+export interface ScreenAudioHeader {
+  sessionId: string;
+  seq: number;
+  codec: number;
+  channels: number;
+  sampleRate: number;
+}
+
+export interface DecodedScreenAudioFrame extends ScreenAudioHeader {
+  aad: Uint8Array;
+  iv: Uint8Array;
+  ciphertext: Uint8Array;
+}
+
+function validAudioFormat(channels: number, sampleRate: number): boolean {
+  return (channels === 1 || channels === 2) && Number.isInteger(sampleRate) && sampleRate >= 8000 && sampleRate <= 48_000;
+}
+
+export function encodeScreenAudioAad(header: ScreenAudioHeader): Uint8Array {
+  if (!isContinuityId(header.sessionId)) throw new Error('Invalid screen session id');
+  if (!Number.isInteger(header.seq) || header.seq < 0 || header.seq > 0xffffffff) throw new Error('Invalid audio sequence');
+  if (!validAudioFormat(header.channels, header.sampleRate)) throw new Error('Invalid audio format');
+  const out = new Uint8Array(SCREEN_AUDIO_AAD_LENGTH);
+  const view = new DataView(out.buffer);
+  out[0] = FRAME_SCREEN_AUDIO;
+  for (let i = 0; i < 16; i++) out[1 + i] = header.sessionId.charCodeAt(i);
+  view.setUint32(17, header.seq >>> 0, false);
+  out[21] = header.codec & 0xff;
+  out[22] = header.channels;
+  view.setUint32(23, header.sampleRate, false);
+  return out;
+}
+
+export function encodeScreenAudioFrame(aad: Uint8Array, iv: Uint8Array, ciphertext: Uint8Array): Uint8Array {
+  if (aad.byteLength !== SCREEN_AUDIO_AAD_LENGTH || aad[0] !== FRAME_SCREEN_AUDIO) throw new Error('Invalid audio frame header');
+  if (iv.byteLength !== 12) throw new Error('Invalid IV length');
+  const out = new Uint8Array(SCREEN_AUDIO_HEADER_LENGTH + ciphertext.byteLength);
+  out.set(aad, 0);
+  out.set(iv, SCREEN_AUDIO_AAD_LENGTH);
+  out.set(ciphertext, SCREEN_AUDIO_HEADER_LENGTH);
+  return out;
+}
+
+export function decodeScreenAudioFrame(bytes: Uint8Array): DecodedScreenAudioFrame {
+  if (bytes.byteLength < SCREEN_AUDIO_HEADER_LENGTH + 16) throw new Error('Audio frame too short');
+  if (bytes[0] !== FRAME_SCREEN_AUDIO) throw new Error('Not an audio frame');
+  if (bytes.byteLength > SCREEN_AUDIO_HEADER_LENGTH + SCREEN_AUDIO_MAX_FRAME_BYTES + 16) throw new Error('Audio frame too large');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let sessionId = '';
+  for (let i = 0; i < 16; i++) sessionId += String.fromCharCode(bytes[1 + i]);
+  if (!isContinuityId(sessionId)) throw new Error('Invalid screen session id');
+  const channels = bytes[22];
+  const sampleRate = view.getUint32(23, false);
+  if (!validAudioFormat(channels, sampleRate)) throw new Error('Invalid audio format');
+  return {
+    sessionId,
+    seq: view.getUint32(17, false),
+    codec: bytes[21],
+    channels,
+    sampleRate,
+    aad: bytes.subarray(0, SCREEN_AUDIO_AAD_LENGTH),
+    iv: bytes.slice(SCREEN_AUDIO_AAD_LENGTH, SCREEN_AUDIO_HEADER_LENGTH),
+    ciphertext: bytes.subarray(SCREEN_AUDIO_HEADER_LENGTH),
   };
 }
 

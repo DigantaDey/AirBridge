@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import com.airbridge.app.HandoffUiState
 import com.airbridge.app.NativeFiles
 import com.airbridge.app.PeerUiState
+import com.airbridge.app.ui.components.CastScreenCard
 import com.airbridge.app.ui.components.HotspotHandoffCard
 import com.airbridge.app.ui.components.TransferCard
 import com.airbridge.app.ui.connectionLabel
@@ -127,6 +128,11 @@ fun TransfersScreen(
                         state = uiState.engine.handoff,
                         onStart = onStartHotspotHandoff,
                         onStop = onStopHotspotHandoff,
+                    )
+                    CastScreenCard(
+                        peers = uiState.engine.peers,
+                        castPeerIds = uiState.engine.castPeerIds,
+                        selectedPeerId = uiState.selectedPeerId,
                     )
                     PeersSelectorCard(
                         peers = uiState.engine.peers,
@@ -202,6 +208,16 @@ fun TransfersScreen(
                         selectedPeer = selectedPeer,
                         onSelectPeer = onSelectPeer,
                         onSetTrusted = onSetTrusted,
+                        modifier = mediumCardModifier,
+                    )
+                }
+                // The card hides itself when there is nothing to cast to; it
+                // observes the active session flow, so no static check here.
+                item(key = "cast") {
+                    CastScreenCard(
+                        peers = uiState.engine.peers,
+                        castPeerIds = uiState.engine.castPeerIds,
+                        selectedPeerId = uiState.selectedPeerId,
                         modifier = mediumCardModifier,
                     )
                 }

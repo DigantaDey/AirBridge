@@ -26,6 +26,12 @@ import {
   buildVCards,
   clampScreenParams,
   decodeScreenFrame,
+  decodeScreenAudioFrame,
+  encodeScreenAudioAad,
+  encodeScreenAudioFrame,
+  SCREEN_AUDIO_MAX_FRAME_BYTES,
+  AUDIO_CODEC_PCM_S16LE,
+  SCREEN_INVITE_TTL_MS,
   dialableNumber,
   encodeScreenFrame,
   encodeScreenFrameAad,
@@ -82,6 +88,10 @@ export interface ScreenShareView {
   kbps: number;
   quality?: number;
   reason?: string;
+  /** Sound requested (viewer) / included (source); true once audio is flowing. */
+  audio?: boolean;
+  /** Casting started on the source device (screen-share-invite). */
+  invited?: boolean;
   startedAt: number;
   updatedAt: number;
 }
@@ -93,6 +103,19 @@ export interface ScreenShareRequestView {
   maxWidth: number;
   maxFps: number;
   requestedAt: number;
+  audio?: boolean;
+  /** Answers an invite this device sent: the user already chose to cast. */
+  invited?: boolean;
+}
+
+/** Decrypted screen audio: interleaved signed 16-bit PCM. */
+export interface ScreenAudioChunk {
+  sessionId: string;
+  peerId: string;
+  seq: number;
+  sampleRate: number;
+  channels: number;
+  pcm: Int16Array;
 }
 
 export interface ContinuitySnapshot {
@@ -160,6 +183,12 @@ export interface ContinuityOptions {
   onCallStateChanged?: (call: CallView) => void;
   onIncomingContact?: (item: ContactShareItem) => void;
   onScreenShareRequest?: (request: ScreenShareRequestView) => void;
+  /** This source can send screen audio with sendScreenAudio (simulators, tests). */
+  screenAudioSource?: boolean | (() => boolean);
+  /** This viewer can play screen audio (Web Audio available). */
+  screenAudioPlayable?: boolean | (() => boolean);
+  /** A paired device started casting to us; a viewer session was opened. */
+  onScreenShareInvite?: (view: ScreenShareView) => void;
 }
 
 export interface ContinuityHost {
@@ -183,6 +212,7 @@ const STOPPED_SHARE_LINGER_MS = 8_000;
 const MAX_CALLS = 8;
 const MAX_SHARED_CONTACTS = 30;
 const ACK_STALL_MS = 3_000;
+const INVITE_MIN_INTERVAL_MS = 2_000;
 const STATS_EMIT_MS = 500;
 
 interface Pending<T> {
@@ -194,6 +224,7 @@ interface Pending<T> {
 
 interface SourceSession {
   view: ScreenShareView;
+  audioSeq: number;
   source: ScreenFrameSource;
   nextSeq: number;
   ackedSeq: number;
@@ -207,6 +238,7 @@ interface SourceSession {
 interface ViewerSession {
   view: ScreenShareView;
   lastSeq: number;
+  lastAudioSeq: number;
   lastFrame?: ScreenFrame;
   windowStart: number;
   windowFrames: number;
@@ -231,6 +263,10 @@ export class ContinuityManager {
   private readonly contactRequests = new Map<string, Pending<ContactsQueryResult>>();
   private readonly callCommands = new Map<string, Pending<CallCommandResult>>();
   private readonly frameListeners = new Map<string, Set<(frame: ScreenFrame) => void>>();
+  private readonly audioListeners = new Map<string, Set<(chunk: ScreenAudioChunk) => void>>();
+  /** Invites this device sent (source side), single use. */
+  private readonly invites = new Map<string, { peerId: string; audio: boolean; expiresAt: number }>();
+  private readonly lastInviteAt = new Map<string, number>();
   private readonly lingerTimers = new Set<ReturnType<typeof setTimeout>>();
   private knownPeers = new Map<string, string>();
   private statsTimer: ReturnType<typeof setTimeout> | null = null;
@@ -247,7 +283,11 @@ export class ContinuityManager {
     if (this.options.contactProvider) out.push('contacts.provide');
     if (this.options.callController) out.push('calls.control');
     const screen = this.options.screenSourceAvailable;
-    if (typeof screen === 'function' ? screen() : screen) out.push('screen.source');
+    if (typeof screen === 'function' ? screen() : screen) {
+      out.push('screen.source');
+      const audio = this.options.screenAudioSource;
+      if (typeof audio === 'function' ? audio() : audio) out.push('screen.audio');
+    }
     return out;
   }
 
@@ -416,6 +456,9 @@ export class ContinuityManager {
       }
       case 'screen-share-request':
         this.receiveScreenRequest(fromPeerId, payload);
+        return true;
+      case 'screen-share-invite':
+        this.receiveScreenInvite(fromPeerId, payload);
         return true;
       case 'screen-share-state':
         this.receiveScreenState(fromPeerId, payload);
@@ -635,21 +678,30 @@ export class ContinuityManager {
   // Screen sharing — viewer side
   // -------------------------------------------------------------------------
 
-  requestScreenShare(peerId: string, options: { maxWidth?: number; maxFps?: number } = {}): string {
+  private audioPlayable(): boolean {
+    const v = this.options.screenAudioPlayable;
+    return typeof v === 'function' ? v() : v === true;
+  }
+
+  requestScreenShare(peerId: string, options: { maxWidth?: number; maxFps?: number; audio?: boolean; inviteId?: string } = {}): string {
     if (!this.host.peer(peerId)) throw new Error('That device is not connected.');
     if (!this.host.isPaired(peerId)) throw new Error('Pair with this device first.');
     for (const s of this.viewers.values()) {
       if (s.view.peerId === peerId && ['requesting', 'pending', 'active'].includes(s.view.state)) return s.view.sessionId;
     }
     const { maxWidth, maxFps } = clampScreenParams(options.maxWidth, options.maxFps);
+    const audio = options.audio === true && this.audioPlayable();
+    const inviteId = isContinuityId(options.inviteId) ? options.inviteId : undefined;
     const now = Date.now();
     const sessionId = randomId();
     const session: ViewerSession = {
       view: {
         sessionId, peerId, peerName: this.peerName(peerId), role: 'viewer', state: 'requesting',
         width: 0, height: 0, maxWidth, maxFps, frames: 0, fps: 0, kbps: 0, startedAt: now, updatedAt: now,
+        ...(audio ? { audio: true } : {}),
+        ...(inviteId ? { invited: true } : {}),
       },
-      lastSeq: 0, windowStart: now, windowFrames: 0, windowBytes: 0,
+      lastSeq: 0, lastAudioSeq: 0, windowStart: now, windowFrames: 0, windowBytes: 0,
     };
     session.timer = setTimeout(() => {
       if (session.view.state === 'requesting' || session.view.state === 'pending') {
@@ -657,11 +709,99 @@ export class ContinuityManager {
       }
     }, SCREEN_CONSENT_TIMEOUT_MS + 10_000);
     this.viewers.set(sessionId, session);
-    this.host.sendControl(peerId, { kind: 'screen-share-request', sessionId, maxWidth, maxFps }).catch(() => {
+    this.host.sendControl(peerId, {
+      kind: 'screen-share-request', sessionId, maxWidth, maxFps,
+      ...(audio ? { audio: true } : {}),
+      ...(inviteId ? { inviteId } : {}),
+    }).catch(() => {
       this.finishViewer(session, 'error', 'Could not reach the device.');
     });
     this.host.emit();
     return sessionId;
+  }
+
+  /**
+   * A paired device wants to cast to us. Accepting only opens a viewer: the
+   * source still asks its own user (Android's capture prompt). Strangers on the
+   * network and invite floods are ignored.
+   */
+  private receiveScreenInvite(fromPeerId: string, payload: Extract<ControlPayload, { kind: 'screen-share-invite' }>): void {
+    if (!isContinuityId(payload.inviteId) || !this.host.isPaired(fromPeerId)) return;
+    const now = Date.now();
+    if (now - (this.lastInviteAt.get(fromPeerId) ?? 0) < INVITE_MIN_INTERVAL_MS) return;
+    this.lastInviteAt.set(fromPeerId, now);
+    for (const s of this.viewers.values()) {
+      if (s.view.peerId === fromPeerId && ['requesting', 'pending', 'active'].includes(s.view.state)) return;
+    }
+    let sessionId: string;
+    try {
+      sessionId = this.requestScreenShare(fromPeerId, { inviteId: payload.inviteId, audio: payload.audio === true });
+    } catch {
+      return;
+    }
+    const session = this.viewers.get(sessionId);
+    if (session) this.options.onScreenShareInvite?.({ ...session.view });
+  }
+
+  /** Source side: offer to cast this screen to a paired viewer. */
+  inviteScreenShare(peerId: string, options: { audio?: boolean } = {}): string {
+    if (!this.host.peer(peerId)) throw new Error('That device is not connected.');
+    if (!this.host.isAuthorized(peerId)) throw new Error('Pair with this device first.');
+    if (!this.features().includes('screen.source')) throw new Error('Screen sharing is not available on this device.');
+    const now = Date.now();
+    for (const [id, inv] of this.invites) if (inv.expiresAt <= now) this.invites.delete(id);
+    const inviteId = randomId();
+    const audio = options.audio === true && this.features().includes('screen.audio');
+    this.invites.set(inviteId, { peerId, audio, expiresAt: now + SCREEN_INVITE_TTL_MS });
+    this.send(peerId, { kind: 'screen-share-invite', inviteId, ...(audio ? { audio: true } : {}) });
+    return inviteId;
+  }
+
+  subscribeScreenAudio(sessionId: string, listener: (chunk: ScreenAudioChunk) => void): () => void {
+    let set = this.audioListeners.get(sessionId);
+    if (!set) {
+      set = new Set();
+      this.audioListeners.set(sessionId, set);
+    }
+    set.add(listener);
+    return () => {
+      set!.delete(listener);
+      if (set!.size === 0) this.audioListeners.delete(sessionId);
+    };
+  }
+
+  async handleScreenAudioFrame(fromPeerId: string, bytes: Uint8Array): Promise<void> {
+    if (this.destroyed) return;
+    let frame;
+    try {
+      frame = decodeScreenAudioFrame(bytes);
+    } catch {
+      return;
+    }
+    const session = this.viewers.get(frame.sessionId);
+    if (!session || session.view.peerId !== fromPeerId || session.view.state !== 'active') return;
+    if (frame.codec !== AUDIO_CODEC_PCM_S16LE || frame.seq <= session.lastAudioSeq) return;
+    const key = await this.host.sessionKey(fromPeerId);
+    if (!key) return;
+    let data: Uint8Array;
+    try {
+      data = await decryptMediaFrame(key, frame.aad, frame.iv, frame.ciphertext);
+    } catch {
+      return;
+    }
+    if (frame.seq <= session.lastAudioSeq || !this.viewers.has(frame.sessionId) || data.byteLength % (2 * frame.channels) !== 0) return;
+    session.lastAudioSeq = frame.seq;
+    const pcm = new Int16Array(data.byteLength / 2);
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    for (let i = 0; i < pcm.length; i++) pcm[i] = view.getInt16(i * 2, true);
+    if (!session.view.audio) {
+      session.view.audio = true;
+      this.host.emit();
+    }
+    const chunk: ScreenAudioChunk = { sessionId: frame.sessionId, peerId: fromPeerId, seq: frame.seq, sampleRate: frame.sampleRate, channels: frame.channels, pcm };
+    for (const listener of this.audioListeners.get(frame.sessionId) ?? []) {
+      try { listener(chunk); } catch { /* a broken player must not stop the stream */ }
+    }
   }
 
   subscribeScreenFrames(sessionId: string, listener: (frame: ScreenFrame) => void): () => void {
@@ -751,6 +891,9 @@ export class ContinuityManager {
         break;
       case 'active':
         session.view.state = 'active';
+        if (payload.audio === false) session.view.audio = false;
+        // While active, a reason is a live notice (e.g. protected content shows black); "" clears it.
+        if (reason !== undefined) session.view.reason = reason || undefined;
         if (typeof payload.width === 'number' && payload.width > 0) session.view.width = payload.width;
         if (typeof payload.height === 'number' && payload.height > 0) session.view.height = payload.height;
         if (session.timer) clearTimeout(session.timer);
@@ -778,6 +921,7 @@ export class ContinuityManager {
       if (this.viewers.get(session.view.sessionId) === session) {
         this.viewers.delete(session.view.sessionId);
         this.frameListeners.delete(session.view.sessionId);
+        this.audioListeners.delete(session.view.sessionId);
         this.host.emit();
       }
     }, STOPPED_SHARE_LINGER_MS);
@@ -810,8 +954,15 @@ export class ContinuityManager {
     if (!this.host.isAuthorized(fromPeerId)) return reply('declined', 'This device is not verified. Pair again with the code or QR.');
     if (!this.features().includes('screen.source')) return reply('unsupported', 'Screen sharing is not available on this device.');
     const { maxWidth, maxFps } = clampScreenParams(payload.maxWidth, payload.maxFps);
+    // An answer to our own fresh invite: the user here already chose to cast.
+    const invite = isContinuityId(payload.inviteId) ? this.invites.get(payload.inviteId) : undefined;
+    const invited = !!invite && invite.peerId === fromPeerId && invite.expiresAt > Date.now();
+    if (invited) this.invites.delete(payload.inviteId!);
+    const audio = payload.audio === true && this.features().includes('screen.audio');
     const view: ScreenShareRequestView = {
       sessionId: payload.sessionId, peerId: fromPeerId, peerName: this.peerName(fromPeerId), maxWidth, maxFps, requestedAt: Date.now(),
+      ...(audio ? { audio: true } : {}),
+      ...(invited ? { invited: true } : {}),
     };
     const timer = setTimeout(() => {
       if (this.requests.delete(payload.sessionId)) {
@@ -849,14 +1000,31 @@ export class ContinuityManager {
         sessionId, peerId: req.view.peerId, peerName: req.view.peerName, role: 'source', state: 'active',
         width: 0, height: 0, maxWidth: req.view.maxWidth, maxFps: req.view.maxFps,
         frames: 0, fps: 0, kbps: 0, quality: 0.7, startedAt: now, updatedAt: now,
+        ...(req.view.audio ? { audio: true } : {}),
       },
-      source, nextSeq: 1, ackedSeq: 0, lastAckAt: now, sentAt: new Map(), quality: 0.7, running: true,
+      audioSeq: 0, source, nextSeq: 1, ackedSeq: 0, lastAckAt: now, sentAt: new Map(), quality: 0.7, running: true,
     };
     this.sources.set(sessionId, session);
     source.onEnded?.(() => this.finishSource(session, 'stopped', 'Sharing ended', true));
-    this.send(session.view.peerId, { kind: 'screen-share-state', sessionId, state: 'active' });
+    this.send(session.view.peerId, { kind: 'screen-share-state', sessionId, state: 'active', audio: req.view.audio === true });
     this.host.emit();
     void this.pump(session);
+  }
+
+  /** Seals one chunk of interleaved s16 PCM for an active session that includes sound. */
+  async sendScreenAudio(sessionId: string, pcm: Int16Array, sampleRate: number, channels: number): Promise<boolean> {
+    const session = this.sources.get(sessionId);
+    if (!session || !session.running || !session.view.audio || pcm.length === 0) return false;
+    const bytes = new Uint8Array(pcm.length * 2);
+    const dv = new DataView(bytes.buffer);
+    for (let i = 0; i < pcm.length; i++) dv.setInt16(i * 2, pcm[i], true);
+    if (bytes.byteLength > SCREEN_AUDIO_MAX_FRAME_BYTES) return false;
+    const key = await this.host.sessionKey(session.view.peerId);
+    if (!key || !session.running) return false;
+    const seq = ++session.audioSeq;
+    const aad = encodeScreenAudioAad({ sessionId, seq, codec: AUDIO_CODEC_PCM_S16LE, channels, sampleRate });
+    const { iv, ciphertext } = await encryptMediaFrame(key, aad, bytes);
+    return this.host.sendFrame(session.view.peerId, encodeScreenAudioFrame(aad, iv, ciphertext));
   }
 
   private receiveScreenAck(fromPeerId: string, sessionId: string, seq: number): void {

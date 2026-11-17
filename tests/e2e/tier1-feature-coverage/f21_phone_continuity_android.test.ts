@@ -31,9 +31,18 @@ describe('F21: Phone continuity (Android)', () => {
     expect(continuity).toContain('endCall()');
     expect(hasPermission(manifest, 'CALL_PHONE')).toBe(true);
     expect(continuity).toContain('placeCall(');
-    // Caller number on API 29+ (optional: calls still work without it).
-    expect(hasPermission(manifest, 'READ_CALL_LOG')).toBe(true);
+    // Caller number via the user-granted Caller ID role, never the Play-restricted
+    // call-log permission (optional: calls still work without it).
+    expect(hasPermission(manifest, 'READ_CALL_LOG')).toBe(false);
+    expect(hasPermission(manifest, 'PROCESS_OUTGOING_CALLS')).toBe(false);
     expect(continuity).toContain('callerIdGranted');
+    const screening = getService(manifest, 'CallerIdService');
+    expect(screening?.permission).toBe('android.permission.BIND_SCREENING_SERVICE');
+    const callerId = await readRepoFile(`${APP}/CallerIdService.kt`);
+    expect(callerId).toContain('RoleManager.ROLE_CALL_SCREENING');
+    // Always allows the call: no block / reject / silence.
+    expect(callerId).toContain('respondToCall(details, CallResponse.Builder().build())');
+    expect(callerId).not.toMatch(/setDisallowCall\(true\)|setRejectCall\(true\)|setSilenceCall\(true\)/);
 
     // Contact cards from the computer go through the system editor.
     expect(hasPermission(manifest, 'WRITE_CONTACTS')).toBe(false);
@@ -73,6 +82,38 @@ describe('F21: Phone continuity (Android)', () => {
     expect(svc).toContain('canSendScreenFrame(');
     expect(svc).toContain('sendScreenFrame(');
     expect(svc).toContain('createScreenCaptureIntent()');
+  });
+
+  it('casts with sound from the phone without bypassing consent or copy protection', async () => {
+    const manifest = await readAndroidManifest();
+    const svc = await readRepoFile(`${APP}/ScreenShareService.kt`);
+    // Playback capture only (media/game), tied to the projection; never the mic.
+    expect(svc).toContain('AudioPlaybackCaptureConfiguration.Builder(mp)');
+    expect(svc).not.toContain('MediaRecorder.AudioSource.MIC');
+    expect(svc).not.toMatch(/setAudioSource\(/);
+    expect(hasPermission(manifest, 'RECORD_AUDIO')).toBe(true);
+    expect(hasForegroundServiceType(manifest, 'ScreenShareService', 'microphone')).toBe(false);
+    // Sound is decided before accepting, so the computer learns audio=false when silent.
+    expect(svc.indexOf('createAudioRecord(mp)')).toBeLessThan(svc.indexOf('acceptScreenShare(id, withAudio'));
+    // Protected content is explained, not worked around.
+    expect(svc).toContain('screenNotice(');
+    expect(svc).not.toMatch(/FLAG_SECURE\s*=|clearFlags\(.*FLAG_SECURE/);
+    // An invite skips only AirBridge's own dialog: Android's capture prompt always runs.
+    const consent = svc.slice(svc.indexOf('class ScreenShareConsentActivity'));
+    expect(consent).toContain('if (request.invited)');
+    expect(consent).toContain('createScreenCaptureIntent()');
+    const card = await readRepoFile(`${APP}/ui/components/CastScreenCard.kt`);
+    expect(card).toContain('castScreen(');
+    const host = await readRepoFile(`${APP}/NativeEngineHost.kt`);
+    expect(host).toContain('inviteScreenShare(peerId, audio)');
+  });
+
+  it('keeps identity keys out of backups and device transfers', async () => {
+    const manifest = await readAndroidManifest();
+    expect(manifest.rawXml).toContain('android:allowBackup="false"');
+    expect(manifest.rawXml).toContain('android:dataExtractionRules="@xml/data_extraction_rules"');
+    const rules = await readRepoFile('android/app/src/main/res/xml/data_extraction_rules.xml');
+    expect(rules).toMatch(/<cloud-backup>[\s\S]*domain="sharedpref"[\s\S]*<device-transfer>[\s\S]*domain="sharedpref"/);
   });
 
   it('accepts shared vCards from contacts apps and wires the engine callbacks', async () => {

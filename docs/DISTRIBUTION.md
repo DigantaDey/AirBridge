@@ -61,10 +61,11 @@ desktop self-updater enforces the checksums before installing anything; see
   over the previous version because CI signs with the **same committed
   sideload key** (`android/ci.keystore`, override via
   `AIRBRIDGE_KEYSTORE_*` env vars for your own key).
-* Play Store distribution is a separate packaging/policy task: produce an AAB,
-  use a private production signing key, and review foreground-service,
-  Accessibility, camera and clipboard disclosures. This repository does not
-  claim Play policy approval.
+* Play Store: build an AAB signed with a **private upload key** (Play App
+  Signing), never `ci.keystore`. Target API, permission declarations, Data
+  safety answers, disclosures and the privacy policy are prepared in
+  [PLAY_STORE.md](PLAY_STORE.md) and [PRIVACY.md](PRIVACY.md). This
+  repository does not claim Play policy approval.
 * **The committed sideload key is public**, so its signature does not prove an
   APK came from the maintainer. Download only from the project's release page
   and compare the release checksum. Use your own private key for controlled

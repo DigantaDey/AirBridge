@@ -215,6 +215,16 @@ export type ControlPayload =
       sessionId: string;
       maxWidth?: number;
       maxFps?: number;
+      /** Viewer wants (and can play) the sound of what's on screen. */
+      audio?: boolean;
+      /** Answers a screen-share-invite (casting started on the source). */
+      inviteId?: string;
+    }
+  | {
+      /** Source → viewer: "I'd like to show you my screen" (single use). */
+      kind: 'screen-share-invite';
+      inviteId: string;
+      audio?: boolean;
     }
   | {
       kind: 'screen-share-state';
@@ -223,6 +233,8 @@ export type ControlPayload =
       width?: number;
       height?: number;
       reason?: string;
+      /** Set with `active`: whether sound is included. */
+      audio?: boolean;
     }
   | {
       kind: 'screen-share-ack';
@@ -492,7 +504,7 @@ export const FRAME_ENCRYPTED_CHUNK = 0x01;
 export const FRAME_ROUTED_RELAY = 0x02;
 export const FRAME_BINARY_SACK = 0x03;
 /** Encrypted screen-share frame (see continuity.ts). */
-export { FRAME_SCREEN } from './continuity.js';
+export { FRAME_SCREEN, FRAME_SCREEN_AUDIO } from './continuity.js';
 
 export const ID_ASCII_LENGTH = 16; // 16 hex chars = 64 bits entropy
 export const GCM_IV_LENGTH = 12;

@@ -389,6 +389,9 @@ html.dark .clipboard-error { color: #f87171; }
 .dial-pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; max-width: 280px; width: 100%; margin: 0 auto; }
 .dial-key { border: 1px solid var(--ab-border); border-radius: 8px; background: var(--ab-bg); color: var(--ab-text); padding: 10px 0; font-size: 16px; font-variant-numeric: tabular-nums; }
 .dial-key:hover { background: var(--ab-subtle); }
+.dial-key-delete { display: inline-flex; align-items: center; justify-content: center; color: var(--ab-muted); }
+.dial-key:disabled { opacity: 0.45; cursor: default; }
+.dial-key:disabled:hover { background: var(--ab-bg); }
 .dialer-actions { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .contacts-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .contacts-search { flex: 1; min-width: 180px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--ab-border-strong); border-radius: 6px; padding: 0 9px; color: var(--ab-muted); }
@@ -407,6 +410,8 @@ html.dark .clipboard-error { color: #f87171; }
 .contact-form-actions { display: flex; justify-content: flex-end; gap: 8px; grid-column: 1 / -1; }
 .screen-start { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
 .screen-start .beam-button { display: inline-flex; align-items: center; gap: 6px; }
+.screen-sound-toggle { align-self: stretch; margin-top: 0; padding: 10px 0; }
+.screen-notice { padding: 8px 10px; border: 1px solid var(--ab-border); border-radius: 8px; background: var(--ab-subtle); color: var(--ab-text); }
 .screen-viewer { display: flex; flex-direction: column; gap: 8px; }
 .screen-stage { position: relative; display: grid; place-items: center; min-height: 240px; max-height: 64vh; background: #000; border: 1px solid var(--ab-border-strong); overflow: hidden; }
 .screen-stage:fullscreen { max-height: none; border: 0; }

@@ -1,5 +1,6 @@
 package com.airbridge.app
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.Notification
@@ -9,12 +10,17 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioPlaybackCaptureConfiguration
+import android.media.AudioRecord
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -27,6 +33,9 @@ import android.util.Log
 import android.view.WindowManager
 import android.widget.Toast
 import com.airbridge.engine.Continuity
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.io.ByteArrayOutputStream
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -39,7 +48,14 @@ import kotlin.math.roundToInt
  * the session key (AES-256-GCM, header bound as AAD) and applies credit-based
  * flow control: at most two unacknowledged frames, latest frame wins, JPEG
  * quality adapts to the measured round trip. Nothing is captured until the user
- * allowed it twice: in AirBridge and in Android's own capture prompt.
+ * allowed it: in AirBridge (or by tapping "Cast to computer") and in Android's
+ * own capture prompt.
+ *
+ * Sound (Android 10+): AudioPlaybackCapture of media/game audio — never the
+ * microphone and never calls — as 48 kHz stereo PCM sealed per chunk. Apps can
+ * opt out of capture, and DRM video (Netflix, Prime Video, Hotstar…) is drawn
+ * black by Android; neither is worked around. A long all-black picture sends
+ * the computer a short explanation instead.
  */
 class ScreenShareService : Service() {
     private var projection: MediaProjection? = null
@@ -55,6 +71,11 @@ class ScreenShareService : Service() {
     private var latest: Bitmap? = null
     private var dirty = false
     private var stopping = false
+    private var audioRecord: AudioRecord? = null
+    private var audioThread: Thread? = null
+    @Volatile private var audioRunning = false
+    private var blackChecks = 0
+    private var blackNoticeShown = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -110,8 +131,12 @@ class ScreenShareService : Service() {
             stopEverything()
             return
         }
-        val request = channel.acceptScreenShare(id)
+        // Sound needs Android 10+, RECORD_AUDIO and a projection; otherwise the
+        // share runs silent and tells the computer so (state active, audio=false).
+        val record = if (channel.screenRequest(id)?.audio == true) createAudioRecord(mp) else null
+        val request = channel.acceptScreenShare(id, withAudio = record != null)
         if (request == null) { // timed out or cancelled while the user decided
+            runCatching { record?.release() }
             mp.stop()
             stopEverything()
             return
@@ -133,7 +158,106 @@ class ScreenShareService : Service() {
             }
         }, handler)
         handler?.post { configure(null, null) }
+        handler?.postDelayed(blackCheck, BLACK_CHECK_MS)
+        if (record != null) startAudio(id, record)
         ContinuityNotifications.cancel(this, ContinuityNotifications.screenRequestId(id))
+    }
+
+    /** Playback capture of media and game audio (not the microphone, not calls). */
+    private fun createAudioRecord(mp: MediaProjection): AudioRecord? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return null
+        return runCatching {
+            val config = AudioPlaybackCaptureConfiguration.Builder(mp)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                .build()
+            val format = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(AUDIO_RATE)
+                .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
+                .build()
+            val minBuffer = AudioRecord.getMinBufferSize(AUDIO_RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
+            val rec = AudioRecord.Builder()
+                .setAudioFormat(format)
+                .setBufferSizeInBytes(max(minBuffer, AUDIO_CHUNK_BYTES * 4))
+                .setAudioPlaybackCaptureConfig(config)
+                .build()
+            if (rec.state != AudioRecord.STATE_INITIALIZED) {
+                rec.release()
+                null
+            } else rec
+        }.onFailure { Log.w(TAG, "Playback capture unavailable: ${it.message}") }.getOrNull()
+    }
+
+    private fun startAudio(id: String, rec: AudioRecord) {
+        audioRecord = rec
+        audioRunning = true
+        audioThread = Thread({
+            val buf = ByteArray(AUDIO_CHUNK_BYTES)
+            try {
+                rec.startRecording()
+                while (audioRunning) {
+                    val n = rec.read(buf, 0, buf.size)
+                    if (n < 0) break
+                    val len = n - n % 4 // whole stereo s16 frames
+                    if (len == 0) continue
+                    val channel = NativeEngineHost.instance?.continuityChannel() ?: break
+                    // Dropped when the socket is busy: late audio is worse than a gap.
+                    channel.sendScreenAudio(id, buf.copyOf(len), AUDIO_RATE, 2)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "screen audio stopped: ${e.message}")
+            }
+        }, "airbridge-screen-audio").apply { isDaemon = true; start() }
+    }
+
+    private fun stopAudio() {
+        audioRunning = false
+        val rec = audioRecord
+        audioRecord = null
+        runCatching { rec?.stop() }
+        runCatching { audioThread?.join(300) }
+        audioThread = null
+        runCatching { rec?.release() }
+    }
+
+    /**
+     * Protected (DRM / FLAG_SECURE) content and a locked screen are captured as
+     * black by Android. After a few seconds of an all-black picture, explain it
+     * on the computer; clear the note when a picture returns.
+     */
+    private val blackCheck: Runnable = object : Runnable {
+        override fun run() {
+            val id = sessionId ?: return
+            val bmp = latest
+            if (bmp != null && !bmp.isRecycled) {
+                val black = isNearlyBlack(bmp, minOf(width, bmp.width), minOf(height, bmp.height))
+                blackChecks = if (black) blackChecks + 1 else 0
+                val channel = NativeEngineHost.instance?.continuityChannel()
+                if (black && blackChecks >= BLACK_CHECKS_BEFORE_NOTICE && !blackNoticeShown) {
+                    blackNoticeShown = true
+                    channel?.screenNotice(id, BLACK_NOTICE)
+                } else if (!black && blackNoticeShown) {
+                    blackNoticeShown = false
+                    channel?.screenNotice(id, "")
+                }
+            }
+            handler?.postDelayed(this, BLACK_CHECK_MS)
+        }
+    }
+
+    private fun isNearlyBlack(bmp: Bitmap, w: Int, h: Int): Boolean {
+        if (w <= 0 || h <= 0) return false
+        for (gy in 1..12) for (gx in 1..12) {
+            val p = bmp.getPixel(w * gx / 13, h * gy / 13)
+            val r = (p shr 16) and 0xff
+            val g = (p shr 8) and 0xff
+            val b = p and 0xff
+            if (r > 14 || g > 14 || b > 14) return false
+        }
+        return true
     }
 
     /** (Re)creates the capture surface for the current orientation / captured content size. */
@@ -266,6 +390,8 @@ class ScreenShareService : Service() {
     }
 
     private fun stopEverything() {
+        stopAudio()
+        handler?.removeCallbacks(blackCheck)
         runCatching { display?.release() }
         display = null
         runCatching { reader?.close() }
@@ -324,7 +450,22 @@ class ScreenShareService : Service() {
 
         /** Session currently being captured (null = not sharing). */
         @Volatile var activeSessionId: String? = null
-            private set
+            private set(value) {
+                field = value
+                activeState.value = value
+            }
+        private val activeState = MutableStateFlow<String?>(null)
+
+        /** Observable [activeSessionId] for the "Cast to computer" card. */
+        val active: StateFlow<String?> = activeState.asStateFlow()
+
+        private const val AUDIO_RATE = Continuity.SCREEN_AUDIO_SAMPLE_RATE
+        /** 40 ms of 48 kHz stereo s16: small enough for lip sync, few frames per second. */
+        private const val AUDIO_CHUNK_BYTES = AUDIO_RATE / 25 * 4
+        private const val BLACK_CHECK_MS = 1_500L
+        private const val BLACK_CHECKS_BEFORE_NOTICE = 3
+        private const val BLACK_NOTICE = "The picture is black? The phone may be locked, or the app on screen blocks capture " +
+            "(Netflix, Prime Video, Hotstar and other protected video). That protection can't be bypassed."
 
         /** The computer stopped viewing or disconnected. */
         fun stopSession(context: Context, sessionId: String) {
@@ -345,6 +486,11 @@ class ScreenShareService : Service() {
  * Consent step for a computer's screen-share request: AirBridge explains what
  * will be visible, then Android's own capture prompt follows. Declining (or
  * backing out of either dialog) tells the computer immediately.
+ *
+ * A request answering this phone's own "Cast to computer" invite skips the
+ * AirBridge explanation (the user just chose to cast) but never Android's
+ * capture prompt. When sound was asked for, RECORD_AUDIO is requested first;
+ * declining it only makes the share silent.
  */
 class ScreenShareConsentActivity : Activity() {
     private var sessionId: String = ""
@@ -361,21 +507,17 @@ class ScreenShareConsentActivity : Activity() {
             return
         }
         if (savedInstanceState?.getBoolean(STATE_ASKED) == true) return
+        if (request.invited) {
+            proceed(request.audio)
+            return
+        }
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("Share your screen with ${request.peerName}?")
             .setMessage(
                 "${request.peerName} will see everything on this phone's screen, including notifications, " +
                     "until you stop sharing. The stream is end-to-end encrypted and never leaves your devices.",
             )
-            .setPositiveButton("Continue") { _, _ ->
-                val mpm = getSystemService(MediaProjectionManager::class.java)
-                if (mpm == null) {
-                    decline("Screen capture is unavailable")
-                } else {
-                    @Suppress("DEPRECATION")
-                    startActivityForResult(mpm.createScreenCaptureIntent(), REQUEST_CAPTURE)
-                }
-            }
+            .setPositiveButton("Continue") { _, _ -> proceed(request.audio) }
             .setNegativeButton("Decline") { _, _ -> decline("Declined on the phone") }
             .setOnCancelListener { decline("Declined on the phone") }
             .show()
@@ -384,6 +526,32 @@ class ScreenShareConsentActivity : Activity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putBoolean(STATE_ASKED, true)
+    }
+
+    /** Sound first (runtime permission, Android 10+), then Android's capture prompt. */
+    private fun proceed(audio: Boolean) {
+        if (audio && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_AUDIO)
+            return
+        }
+        askCapture()
+    }
+
+    private fun askCapture() {
+        val mpm = getSystemService(MediaProjectionManager::class.java)
+        if (mpm == null) {
+            decline("Screen capture is unavailable")
+        } else {
+            @Suppress("DEPRECATION")
+            startActivityForResult(mpm.createScreenCaptureIntent(), REQUEST_CAPTURE)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_AUDIO) askCapture() // denied = share without sound
     }
 
     private fun decline(reason: String) {
@@ -414,6 +582,7 @@ class ScreenShareConsentActivity : Activity() {
     companion object {
         const val EXTRA_SESSION_ID = "sessionId"
         private const val REQUEST_CAPTURE = 0x5C
+        private const val REQUEST_AUDIO = 0x5D
         private const val STATE_ASKED = "asked"
     }
 }

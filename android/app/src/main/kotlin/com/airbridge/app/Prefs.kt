@@ -83,6 +83,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("screenSharing", true)
         set(value) = sp.edit().putBoolean("screenSharing", value).apply()
 
+    /** Include media sound when the screen is shared (Android 10+, asked per session). */
+    var screenSound: Boolean
+        get() = sp.getBoolean("screenSound", true)
+        set(value) = sp.edit().putBoolean("screenSound", value).apply()
+
     /**
      * Accessibility-assisted hidden clipboard capture is OFF by default. The
      * user must explicitly opt in, then enable the AirBridge service in

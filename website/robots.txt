@@ -1,0 +1,5 @@
+# AirBridge welcomes search engines and AI answer engines.
+User-agent: *
+Allow: /
+
+Sitemap: https://airbridge.fyi/sitemap.xml

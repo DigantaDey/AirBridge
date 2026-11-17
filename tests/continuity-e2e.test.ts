@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { SignalingHub } from '../src/server/signalingHub.js';
 import { WarpClient } from '../src/client/engine/warpClient.js';
-import type { CallCommand, CallView, ContactShareItem, ScreenFrame, ScreenFrameSource, ScreenShareRequestView } from '../src/client/engine/continuity.js';
+import type { CallCommand, CallView, ContactShareItem, ScreenAudioChunk, ScreenFrame, ScreenFrameSource, ScreenShareRequestView, ScreenShareView } from '../src/client/engine/continuity.js';
 import { SCREEN_MAX_INFLIGHT, type ContactCard } from '../src/shared/continuity.js';
 
 function waitFor(fn: () => boolean, label: string, timeout = 8000): Promise<void> {
@@ -217,6 +217,72 @@ describe('phone continuity over the paired encrypted session', () => {
     await new Promise((r) => setTimeout(r, 150));
     expect(frames.length).toBe(count);
     unsubscribe();
+  }, 30_000);
+
+  it('lets the phone cast to the computer with sound (invite → viewer → consent-free OS prompt)', async () => {
+    const { wsUrl, clients } = await startRig();
+    const requests: ScreenShareRequestView[] = [];
+    const invites: ScreenShareView[] = [];
+    const phone = new WarpClient({
+      wsUrl, initialPairCode: 'CAST01', storage: null, identityStore: null,
+      deviceOverride: { name: 'Pixel 9', platform: 'android', model: 'Pixel', formFactor: 'phone' },
+      screenSourceAvailable: true,
+      screenAudioSource: true,
+      onScreenShareRequest: (r) => requests.push(r),
+    });
+    const mac = new WarpClient({
+      wsUrl, initialPairCode: 'CAST01', storage: null, identityStore: null,
+      deviceOverride: { name: 'MacBook Air', platform: 'macos', model: 'MacBook', formFactor: 'laptop' },
+      screenAudioPlayable: true,
+      onScreenShareInvite: (v) => invites.push(v),
+    });
+    clients.push(phone, mac);
+    await Promise.all([phone.start(), mac.start()]);
+    await waitFor(() => mac.getSnapshot().peers.length === 1 && phone.getSnapshot().peers.length === 1, 'peers');
+    const phoneId = phone.getSnapshot().peerId;
+    const macId = mac.getSnapshot().peerId;
+    await waitFor(() => (mac.getSnapshot().continuity?.peerFeatures[phoneId] ?? []).includes('screen.audio'), 'audio feature at mac');
+    await waitFor(() => (phone.getSnapshot().continuity?.peerFeatures[macId] ?? []).includes('screen.view'), 'viewer feature at phone');
+
+    // A request the viewer starts on its own is never treated as invited.
+    const plainId = mac.requestScreenShare(phoneId);
+    await waitFor(() => requests.some((r) => r.sessionId === plainId), 'plain request');
+    expect(requests.at(-1)!.invited).toBeFalsy();
+    phone.declineScreenShare(plainId);
+    await waitFor(() => mac.getSnapshot().continuity!.screenShares.find((s) => s.sessionId === plainId)?.state === 'declined', 'declined');
+
+    phone.inviteScreenShare(macId, { audio: true });
+    await waitFor(() => invites.length === 1, 'viewer opened on mac');
+    expect(invites[0]).toMatchObject({ peerId: phoneId, role: 'viewer', invited: true, audio: true });
+    await waitFor(() => requests.some((r) => r.sessionId === invites[0].sessionId), 'invited request at phone');
+    const req = requests.at(-1)!;
+    expect(req).toMatchObject({ invited: true, audio: true, peerId: macId });
+    // Invite floods are dropped (one per 2 s per device, and only while idle).
+    phone.inviteScreenShare(macId, { audio: true });
+    await new Promise((r) => setTimeout(r, 150));
+    expect(invites).toHaveLength(1);
+
+    const audio: ScreenAudioChunk[] = [];
+    const frames: ScreenFrame[] = [];
+    mac.subscribeScreenAudio(req.sessionId, (c) => audio.push(c));
+    mac.subscribeScreenFrames(req.sessionId, (f) => frames.push(f));
+    const source = fakeSource();
+    phone.acceptScreenShare(req.sessionId, source);
+    await waitFor(() => mac.getSnapshot().continuity!.screenShares.find((s) => s.sessionId === req.sessionId)?.state === 'active', 'active');
+    await waitFor(() => frames.length >= 2, 'frames');
+    const pcm = Int16Array.from([0, 1000, -1000, 32767, -32768, 5]);
+    await expect(phone.sendScreenAudio(req.sessionId, pcm, 48_000, 2)).resolves.toBe(true);
+    await expect(phone.sendScreenAudio(req.sessionId, pcm.subarray(0, 2), 48_000, 2)).resolves.toBe(true);
+    await waitFor(() => audio.length === 2, 'audio at mac');
+    expect(audio[0]).toMatchObject({ sampleRate: 48_000, channels: 2, seq: 1, peerId: phoneId });
+    expect(Array.from(audio[0].pcm)).toEqual(Array.from(pcm));
+    expect(audio[1].seq).toBe(2);
+    // Audio for a session that never asked for sound is refused at the source.
+    await expect(phone.sendScreenAudio(plainId, pcm, 48_000, 2)).resolves.toBe(false);
+
+    phone.stopScreenShare(req.sessionId);
+    await waitFor(() => mac.getSnapshot().continuity!.screenShares.find((s) => s.sessionId === req.sessionId)?.state === 'stopped', 'stopped');
+    await expect(phone.sendScreenAudio(req.sessionId, pcm, 48_000, 2)).resolves.toBe(false);
   }, 30_000);
 
   it('refuses sensitive requests from nearby devices that are not paired', async () => {

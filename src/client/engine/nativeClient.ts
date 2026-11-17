@@ -1,7 +1,7 @@
 import type { DeviceProfile, VisibilityMode } from '../../shared/protocol.js';
 import { WarpClient, type ClipboardBeamItem, type SendableFileInput, type TransferSessionView, type WarpClientOptions, type WarpClientSnapshot } from './warpClient.js';
 import type { AirBridgeNativeBridge } from './nativeShell.js';
-import type { CallCommandResult, ContactShareItem, ContactsQueryResult, ContinuityOptions, ScreenFrame, ScreenFrameSource } from './continuity.js';
+import type { CallCommandResult, ContactShareItem, ContactsQueryResult, ContinuityOptions, ScreenAudioChunk, ScreenFrame, ScreenFrameSource } from './continuity.js';
 import type { CallInfo, ContactCard } from '../../shared/continuity.js';
 
 /** Public client contract shared by the browser peer and Android's metadata UI. */
@@ -168,6 +168,9 @@ export class NativeClient implements AirBridgeClient {
   declineScreenShare(_sessionId: string): void {}
   stopScreenShare(_sessionId: string): void {}
   subscribeScreenFrames(_sessionId: string, _listener: (frame: ScreenFrame) => void): () => void { return () => {}; }
+  inviteScreenShare(_peerId: string): string { throw new Error(CONTINUITY_NATIVE); }
+  subscribeScreenAudio(_sessionId: string, _listener: (chunk: ScreenAudioChunk) => void): () => void { return () => {}; }
+  async sendScreenAudio(): Promise<boolean> { return false; }
   configureContinuity(_options: Partial<ContinuityOptions>): void {}
 }
 

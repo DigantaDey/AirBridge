@@ -432,6 +432,19 @@ fun main(args: Array<String>) {
             val f = Continuity.decodeScreenFrame(forged)
             check("continuity.frame.tamper[$i]", runCatching { AirCrypto.decryptMediaFrame(key, f.aad, f.iv, f.ciphertext) }.isFailure)
         }
+        c.optArr("audio")!!.items.forEachIndexed { i, v ->
+            val o = v.asObj()
+            val key = javax.crypto.spec.SecretKeySpec(hexToBytes(o.optStr("keyHex")!!), "AES")
+            val aad = Continuity.encodeScreenAudioAad(o.optStr("sessionId")!!, o.optLong("seq")!!, o.optInt("codec")!!, o.optInt("channels")!!, o.optInt("sampleRate")!!)
+            check("continuity.audio.aad[$i]", aad.toHex() == o.optStr("aadHex"))
+            val plain = hexToBytes(o.optStr("plainHex")!!)
+            val (iv, ct) = AirCrypto.encryptMediaFrame(key, aad, plain, hexToBytes(o.optStr("ivHex")!!))
+            check("continuity.audio.seal[$i]", Continuity.encodeScreenAudioFrame(aad, iv, ct).toHex() == o.optStr("frameHex"))
+            val d = Continuity.decodeScreenAudioFrame(hexToBytes(o.optStr("frameHex")!!))
+            check("continuity.audio.decode[$i]", d.sessionId == o.optStr("sessionId") && d.seq == o.optLong("seq") &&
+                d.channels == o.optInt("channels") && d.sampleRate == o.optInt("sampleRate") && d.codec == o.optInt("codec"))
+            check("continuity.audio.open[$i]", AirCrypto.decryptMediaFrame(key, d.aad, d.iv, d.ciphertext).contentEquals(plain))
+        }
     }
 
     if (failed > 0) {

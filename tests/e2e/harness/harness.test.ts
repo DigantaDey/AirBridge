@@ -259,7 +259,7 @@ describe('AirBridge E2E Harness Self-Verification', () => {
 
     // Verify build.gradle.kts signing configs
     const gradle = await readAppBuildGradle();
-    expect(gradle.compileSdk).toBe(35);
+    expect(gradle.compileSdk).toBe(36);
     expect(gradle.minSdk).toBe(26);
     expect(isV1SigningEnabled(gradle, 'ciSideload')).toBe(true);
     expect(isV2SigningEnabled(gradle, 'ciSideload')).toBe(true);

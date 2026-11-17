@@ -224,6 +224,22 @@ describe("ContinuityCenter", () => {
     expect(container.textContent).toContain("Audio plays on Pixel 9");
   });
 
+  it("refuses * and # service codes and explains why", async () => {
+    const { client } = fakeClient();
+    await render(<ContinuityCenter client={client} peers={[phone]} continuity={snapshot()} initialTab="calls" onClose={() => {}} />);
+    const keypad = container.querySelector('[aria-label="Keypad"]')!;
+    expect(Array.from(keypad.querySelectorAll("button")).map((b) => b.textContent || b.getAttribute("aria-label"))).not.toContain("*");
+    const input = container.querySelector('input[aria-label="Phone number"]') as HTMLInputElement;
+    type(input, "**21*5550100#");
+    expect(button(/Call from Pixel 9/).disabled).toBe(true);
+    expect(container.textContent).toContain("can only be dialed on Pixel 9 itself");
+    act(() => button("Delete").click());
+    expect(input.value).toBe("**21*5550100");
+    type(input, "+1 555 0100");
+    expect(button(/Call from Pixel 9/).disabled).toBe(false);
+    expect(container.textContent).not.toContain("can only be dialed");
+  });
+
   it("answers, declines and hangs up calls", async () => {
     const { client } = fakeClient();
     const active: CallView = { ...ringing, callId: "fedcba9876543210", state: "active", connectedAt: Date.now() - 5_000, actions: ["hangup"] };
@@ -278,6 +294,43 @@ describe("ContinuityCenter", () => {
     await render(<ContinuityCenter client={client} peers={[phone]} continuity={snapshot({ screenShares: [{ ...share, state: "declined", reason: "Declined on the phone" }] })} initialTab="screen" onClose={() => {}} />);
     expect(container.textContent).toContain("Pixel 9 declined: Declined on the phone");
     expect(frameListeners.size).toBe(0); // unsubscribed
+  });
+
+  it("asks for sound when the phone can send it and follows a cast started on the phone", async () => {
+    const { client } = fakeClient();
+    const audioSubs: string[] = [];
+    const withAudio = { ...client, subscribeScreenAudio: vi.fn((id: string) => { audioSubs.push(id); return () => {}; }) };
+    class FakeAudioContext {
+      state = "running";
+      currentTime = 0;
+      destination = {};
+      createGain() { return { gain: { value: 1 }, connect() {} }; }
+      resume() { return Promise.resolve(); }
+      close() { return Promise.resolve(); }
+    }
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    const feats = { [PHONE]: ["contacts.receive", "screen.source", "screen.audio"] as const, [MAC]: ["contacts.receive", "screen.source"] as const };
+    const snap = snapshot({ peerFeatures: feats as never });
+    await render(<ContinuityCenter client={withAudio} peers={[mac, phone]} continuity={snap} initialTab="screen" onClose={() => {}} />);
+    // The phone just started casting: it takes focus over the default device.
+    const cast: ScreenShareView = { sessionId: "dddddddddddddddd", peerId: PHONE, peerName: "Pixel 9", role: "viewer", state: "requesting", width: 0, height: 0, maxWidth: 1280, maxFps: 15, frames: 0, fps: 0, kbps: 0, startedAt: 1, updatedAt: 1, invited: true, audio: true };
+    await render(<ContinuityCenter client={withAudio} peers={[mac, phone]} continuity={snapshot({ peerFeatures: feats as never, screenShares: [cast] })} initialTab="screen" focusPeerId={PHONE} onClose={() => {}} />);
+    expect((container.querySelector('select[aria-label="Device"]') as HTMLSelectElement).value).toBe(PHONE);
+    expect(container.textContent).toContain("Pixel 9 is starting to cast");
+    expect(audioSubs).toEqual(["dddddddddddddddd"]);
+    await render(<ContinuityCenter client={withAudio} peers={[mac, phone]} continuity={snapshot({ peerFeatures: feats as never, screenShares: [{ ...cast, state: "active", fps: 30, kbps: 900, reason: "Protected video shows black — the app blocks capture." }] })} initialTab="screen" focusPeerId={PHONE} onClose={() => {}} />);
+    expect(container.textContent).toContain("Casting from Pixel 9");
+    expect(container.querySelector(".screen-notice")?.textContent).toContain("Protected video");
+    act(() => button("Mute").click());
+    expect(button("Unmute").getAttribute("aria-pressed")).toBe("true");
+
+    // Starting from the computer offers "Include sound" and asks for it.
+    await render(<ContinuityCenter client={withAudio} peers={[mac, phone]} continuity={snapshot({ peerFeatures: feats as never, screenShares: [{ ...cast, state: "stopped" }] })} initialTab="screen" focusPeerId={PHONE} onClose={() => {}} />);
+    expect(container.textContent).toContain("Include sound");
+    expect(container.textContent).toContain("DRM-protected");
+    act(() => button(/View Pixel 9 screen/).click());
+    expect(withAudio.requestScreenShare).toHaveBeenCalledWith(PHONE, { maxWidth: 1280, maxFps: 15, audio: true });
+    vi.unstubAllGlobals();
   });
 });
 

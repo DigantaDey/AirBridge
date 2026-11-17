@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy Policy — AirBridge</title>
+  <meta name="description" content="AirBridge has no accounts, cloud, ads or analytics. Data moves only between your own paired devices, end-to-end encrypted. Read what the app handles and why.">
+  <link rel="canonical" href="https://airbridge.fyi/privacy.html">
+  <meta property="og:title" content="AirBridge Privacy Policy">
+  <meta property="og:url" content="https://airbridge.fyi/privacy.html">
+  <meta property="og:image" content="https://airbridge.fyi/og-image.jpg">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<!-- Generated from docs/PRIVACY.md; edit that file and regenerate. -->
+<header class="header"><nav class="nav wrap" aria-label="Main navigation"><a class="brand" href="./" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a><a class="nav-cta" href="./">Back to home</a></nav></header>
+<main class="wrap legal">
+<h1>AirBridge Privacy Policy</h1>
+<p class="meta"><em>Effective 16 November 2026 · Applies to the AirBridge Android app, the AirBridge desktop service (macOS, Windows, Linux) and the web interface it serves.</em> The public copy of this policy is <a href="https://airbridge.fyi/privacy.html">https://airbridge.fyi/privacy.html</a>.</p>
+<h2>The short version</h2>
+<p>AirBridge moves your data <strong>between your own devices</strong> — the Android phone and the computer you paired with it. It has <strong>no accounts, no cloud, no advertising, no analytics and no tracking</strong>. Data travels over your local network (or the phone's own hotspot), end-to-end encrypted between the two paired devices. The AirBridge project never receives it.</p>
+<h2>Who is responsible</h2>
+<p>AirBridge is an open-source project by Diganta Dey and contributors. Contact: <a href="mailto:hello@airbridge.fyi">hello@airbridge.fyi</a>.</p>
+<h2>What AirBridge handles, and why</h2>
+<p>All of the following is processed only to provide the feature you turned on, and only between your paired devices.</p>
+<table><thead><tr><th>Data</th><th>When</th><th>Purpose</th><th>Leaves your devices?</th></tr></thead><tbody><tr><td>Files and photos you choose</td><td>You send them</td><td>File transfer</td><td>No</td></tr><tr><td>Clipboard text and images</td><td>Clipboard sync is on</td><td>Copy on one device, paste on the other</td><td>No</td></tr><tr><td>Notification content (app name, title, text)</td><td>Notification sharing is on <strong>and</strong> you granted Notification access</td><td>Show phone notifications on the computer</td><td>No</td></tr><tr><td>Contacts (name, numbers, emails, photo)</td><td>Contacts is on <strong>and</strong> you granted contacts permission</td><td>The computer searches/calls your contacts while connected; it does not keep a copy</td><td>No</td></tr><tr><td>Call state and the caller's number</td><td>Calls is on <strong>and</strong> you granted phone permission (number: only if you chose AirBridge as Caller ID app)</td><td>Answer, decline and place calls from the computer</td><td>No</td></tr><tr><td>Screen image and app audio</td><td>Only during a screen-sharing session you approve in Android's system prompt</td><td>Show the phone screen (and media sound) on the computer</td><td>No</td></tr><tr><td>Device name, pairing keys, trusted-device list</td><td>Always</td><td>Find, pair with and verify your devices</td><td>No</td></tr><tr><td>Camera image</td><td>Only while the QR scanner is open</td><td>Read a pairing QR code; frames are not stored</td><td>No</td></tr></tbody></table>
+<p>AirBridge <strong>never</strong>: reads what you type or passwords; reads the rest of the screen through Accessibility; opens the microphone; records or logs calls; reads your call log or SMS; sells, shares or uses data for advertising.</p>
+<h3>Accessibility service (optional)</h3>
+<p>The optional "AirBridge clipboard bridge" Accessibility service exists only so text you copy in other apps can reach your paired computer while AirBridge is in the background. It is off by default, is enabled only after you agree to an in-app disclosure and switch it on in Android Settings, does not retrieve window content, does not perform actions, and can be turned off at any time.</p>
+<h3>Screen sharing and audio</h3>
+<p>Every session needs your approval in Android's own "start recording or casting" prompt, shows a persistent notification, and can be stopped from the notification or the app. Sound uses Android's playback-capture API, which captures only media/game audio that the playing app allows; it cannot capture the microphone or calls. Apps that protect their content (for example Netflix, Prime Video, Hotstar) appear black — AirBridge does not bypass this.</p>
+<h2>Storage and retention</h2>
+<ul><li>Transfer history, clipboard history (last 50 items) and settings stay on the device that created them until you clear them or uninstall.</li><li>Pairing keys are stored on-device and are <strong>excluded from Android cloud backup and device-to-device transfer</strong>.</li><li>Contacts, call details, notifications and screen frames are not stored by the computer; they are shown while connected and discarded.</li><li>Received files are saved where you choose (default <code>~/Downloads/AirBridge</code> on a computer, Downloads on Android).</li></ul>
+<h2>Security</h2>
+<p>Sessions use per-pair keys, AES-GCM encryption and a six-digit verification code you can compare on both screens. See <a href="https://github.com/DigantaDey/AirBridge/blob/main/SECURITY.md">SECURITY.md</a> for the threat model and how to report vulnerabilities.</p>
+<h2>Network connections the project can see</h2>
+<p>None by default. The desktop service may contact <code>api.github.com</code> to check for updates, and crash reports are <strong>only</strong> sent if you review and submit them (as a GitHub issue or to an endpoint you configure). The Android app makes no connections other than to your paired computer.</p>
+<h2>Children</h2>
+<p>AirBridge is a general-purpose utility not directed at children under 13 and collects no personal data from anyone.</p>
+<h2>Your choices</h2>
+<p>Every feature above has its own switch in Settings, every Android permission can be revoked in Android Settings, and uninstalling removes all app data. Because the project holds no data about you, there is nothing for us to export or delete — but you can contact us with any question.</p>
+<h2>Changes</h2>
+<p>Changes are published in this file (and on the website) with a new effective date. Material changes are called out in the release notes.</p>
+</main>
+</body>
+</html>

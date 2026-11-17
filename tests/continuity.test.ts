@@ -9,6 +9,13 @@ import {
   contactMatches,
   decodeScreenFrame,
   dialableNumber,
+  decodeScreenAudioFrame,
+  encodeScreenAudioAad,
+  encodeScreenAudioFrame,
+  isServiceCode,
+  SCREEN_AUDIO_AAD_LENGTH,
+  SCREEN_AUDIO_HEADER_LENGTH,
+  SCREEN_AUDIO_MAX_FRAME_BYTES,
   encodeScreenFrame,
   encodeScreenFrameAad,
   nextScreenQuality,
@@ -20,7 +27,7 @@ import {
   type ContactCard,
 } from '../src/shared/continuity.js';
 import { decryptMediaFrame, encryptMediaFrame } from '../src/client/engine/crypto.js';
-import { FRAME_SCREEN } from '../src/shared/protocol.js';
+import { FRAME_SCREEN, FRAME_SCREEN_AUDIO } from '../src/shared/protocol.js';
 
 const ada: ContactCard = {
   name: 'Ada Lovelace',
@@ -129,7 +136,13 @@ describe('contact validation', () => {
     expect(sanitizePhoneNumber('555; DROP TABLE')).toBeUndefined();
     expect(sanitizePhoneNumber('---')).toBeUndefined();
     expect(dialableNumber('+1 (555) 010-0199')).toBe('+15550100199');
-    expect(dialableNumber('*#06#')).toBe('*#06#');
+    // Service/MMI codes (IMEI, call forwarding, USSD) are never dialed remotely.
+    expect(dialableNumber('*#06#')).toBeUndefined();
+    expect(dialableNumber('**21*+15550100#')).toBeUndefined();
+    expect(dialableNumber('*123#')).toBeUndefined();
+    expect(isServiceCode('##002#')).toBe(true);
+    expect(isServiceCode('+1 555 0100')).toBe(false);
+    expect(dialableNumber('555-0100,,123;9')).toBe('5550100,,123;9');
     expect(dialableNumber('12+34')).toBe('1234');
     expect(dialableNumber('tel:123')).toBeUndefined();
   });
@@ -238,5 +251,47 @@ describe('screen frames', () => {
     expect(nextScreenQuality(0.7, 900)).toBe(0.52);
     expect(nextScreenQuality(0.31, 900)).toBe(0.3);
     expect(nextScreenQuality(0.85, 10)).toBe(0.85);
+  });
+});
+
+describe('screen audio frames', () => {
+  const header = { sessionId: 'a1b2c3d4e5f60718', seq: 7, codec: 1, channels: 2, sampleRate: 48_000 };
+
+  it('encodes a fixed 27-byte authenticated header', () => {
+    const aad = encodeScreenAudioAad(header);
+    expect(aad.byteLength).toBe(SCREEN_AUDIO_AAD_LENGTH);
+    expect(aad[0]).toBe(FRAME_SCREEN_AUDIO);
+    expect(new TextDecoder().decode(aad.subarray(1, 17))).toBe(header.sessionId);
+    const view = new DataView(aad.buffer);
+    expect(view.getUint32(17)).toBe(7);
+    expect(aad[21]).toBe(1);
+    expect(aad[22]).toBe(2);
+    expect(view.getUint32(23)).toBe(48_000);
+    expect(() => encodeScreenAudioAad({ ...header, channels: 3 })).toThrow();
+    expect(() => encodeScreenAudioAad({ ...header, sampleRate: 192_000 })).toThrow();
+    expect(() => encodeScreenAudioAad({ ...header, sessionId: 'zz' })).toThrow();
+  });
+
+  it('seals PCM bound to the header and rejects malformed or oversized frames', async () => {
+    const key = await crypto.subtle.importKey('raw', new Uint8Array(32).fill(9), 'AES-GCM', false, ['encrypt', 'decrypt']);
+    const pcm = new Uint8Array([1, 0, 255, 255, 0, 128, 255, 127]);
+    const aad = encodeScreenAudioAad(header);
+    const { iv, ciphertext } = await encryptMediaFrame(key, aad, pcm);
+    const wire = encodeScreenAudioFrame(aad, iv, ciphertext);
+    expect(wire.byteLength).toBe(SCREEN_AUDIO_HEADER_LENGTH + pcm.byteLength + 16);
+    const decoded = decodeScreenAudioFrame(wire);
+    expect(decoded).toMatchObject(header);
+    expect(await decryptMediaFrame(key, decoded.aad, decoded.iv, decoded.ciphertext)).toEqual(pcm);
+
+    const forged = wire.slice();
+    forged[20] ^= 1; // replayed sequence
+    const f = decodeScreenAudioFrame(forged);
+    await expect(decryptMediaFrame(key, f.aad, f.iv, f.ciphertext)).rejects.toThrow();
+    // A video frame type byte is not an audio frame.
+    const wrongType = wire.slice();
+    wrongType[0] = FRAME_SCREEN;
+    expect(() => decodeScreenAudioFrame(wrongType)).toThrow();
+    expect(() => decodeScreenAudioFrame(new Uint8Array(20))).toThrow();
+    expect(() => decodeScreenAudioFrame(encodeScreenAudioFrame(aad, iv, new Uint8Array(SCREEN_AUDIO_MAX_FRAME_BYTES + 17)))).toThrow();
   });
 });

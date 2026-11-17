@@ -124,7 +124,7 @@ jobs:
             exit 1
           fi
           yes | "$SDKMGR" --licenses >/dev/null 2>&1 || true
-          "$SDKMGR" --install "platforms;android-35" "build-tools;35.0.0" 2>&1 | tail -5
+          "$SDKMGR" --install "platforms;android-36" "build-tools;35.0.0" 2>&1 | tail -5
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.14.3

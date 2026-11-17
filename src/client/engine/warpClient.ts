@@ -48,10 +48,11 @@ import {
   type ContactsQueryResult,
   type ContinuityOptions,
   type ContinuitySnapshot,
+  type ScreenAudioChunk,
   type ScreenFrame,
   type ScreenFrameSource,
 } from './continuity.js';
-import { FRAME_SCREEN, type CallInfo, type ContactCard } from '../../shared/continuity.js';
+import { FRAME_SCREEN, FRAME_SCREEN_AUDIO, type CallInfo, type ContactCard } from '../../shared/continuity.js';
 import {
   type DeviceIdentity,
   type IdentityStore,
@@ -1361,8 +1362,23 @@ export class WarpClient {
   }
 
   /** Ask a device to share its screen; returns the session id. */
-  public requestScreenShare(peerId: string, options?: { maxWidth?: number; maxFps?: number }): string {
+  public requestScreenShare(peerId: string, options?: { maxWidth?: number; maxFps?: number; audio?: boolean }): string {
     return this.continuity.requestScreenShare(peerId, options);
+  }
+
+  /** Offer to cast this device's screen to a paired viewer (it opens a viewer and asks to start). */
+  public inviteScreenShare(peerId: string, options?: { audio?: boolean }): string {
+    return this.continuity.inviteScreenShare(peerId, options);
+  }
+
+  /** Decrypted screen audio for a viewer session. */
+  public subscribeScreenAudio(sessionId: string, listener: (chunk: ScreenAudioChunk) => void): () => void {
+    return this.continuity.subscribeScreenAudio(sessionId, listener);
+  }
+
+  /** Source side: one chunk of interleaved s16 PCM for a session that includes sound. */
+  public sendScreenAudio(sessionId: string, pcm: Int16Array, sampleRate: number, channels: number): Promise<boolean> {
+    return this.continuity.sendScreenAudio(sessionId, pcm, sampleRate, channels);
   }
 
   public acceptScreenShare(sessionId: string, source: ScreenFrameSource): void {
@@ -2791,6 +2807,8 @@ export class WarpClient {
             this.applyChunkAck(sourcePeerId, { transferId: sack.transferId, fileIndex: sack.fileIndex, ackedChunkIndex: sack.chunkIndex });
           } else if (payload[0] === FRAME_SCREEN) {
             void this.continuity.handleScreenFrame(sourcePeerId, payload);
+          } else if (payload[0] === FRAME_SCREEN_AUDIO) {
+            void this.continuity.handleScreenAudioFrame(sourcePeerId, payload);
           } else {
             this.handleIncomingEncryptedChunk(sourcePeerId, payload, 'ws-relay').catch(() => {});
           }
@@ -2805,6 +2823,8 @@ export class WarpClient {
             this.applyChunkAck(sourcePeerId, { transferId: sack.transferId, fileIndex: sack.fileIndex, ackedChunkIndex: sack.chunkIndex });
           } else if (payload[0] === FRAME_SCREEN) {
             void this.continuity.handleScreenFrame(sourcePeerId, payload);
+          } else if (payload[0] === FRAME_SCREEN_AUDIO) {
+            void this.continuity.handleScreenAudioFrame(sourcePeerId, payload);
           } else {
             this.handleIncomingEncryptedChunk(sourcePeerId, payload, 'ws-relay').catch(() => {});
           }

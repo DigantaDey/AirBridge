@@ -20,8 +20,8 @@ describe('Tier 4 Scenario 10: Seamless APK Upgrade Continuity & Encrypted Histor
     expect(gradle.rawText).toContain('enableV3Signing = true');
     expect(isV1SigningEnabled(gradle, 'ciSideload')).toBe(true);
     expect(isV2SigningEnabled(gradle, 'ciSideload')).toBe(true);
-    expect(gradle.compileSdk).toBe(35);
-    expect(gradle.targetSdk).toBe(35);
+    expect(gradle.compileSdk).toBe(36);
+    expect(gradle.targetSdk).toBe(36);
   });
 
   it('rejoins same room across app restart/upgrade and synchronizes encrypted transfer history cleanly', async () => {

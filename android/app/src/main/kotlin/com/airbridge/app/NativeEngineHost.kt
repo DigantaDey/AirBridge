@@ -57,6 +57,8 @@ data class NativeEngineUiState(
     val pairingError: String? = null,
     /** "Use this phone's hotspot" handoff to the paired computer. */
     val handoff: HandoffUiState = HandoffUiState(),
+    /** Verified computers that can show this screen ("Cast to computer"). */
+    val castPeerIds: List<String> = emptyList(),
 )
 
 /**
@@ -334,6 +336,9 @@ class NativeEngineHost(
                             phoneContinuity.onScreenShareEnded(sessionId)
                         }
 
+                        // A computer announced what it can do (e.g. show this screen).
+                        override fun onContinuityChanged() = refresh()
+
                         override fun onIncomingOffer(transfer: TransferView) {
                             refresh()
                             onOffer(transfer)
@@ -496,6 +501,7 @@ class NativeEngineHost(
             viaRelay = current.connectedViaRelay,
             pairingError = current.pairingError,
             handoff = handoff.state,
+            castPeerIds = castTargets().map { it.peerId },
         )
         _uiState.value = next
         onState(next)
@@ -624,6 +630,23 @@ class NativeEngineHost(
         require(targets.isNotEmpty()) { "Connect to a verified computer first" }
         targets.forEach { current.continuity.shareContacts(it.peerId, cards) }
         targets.joinToString { it.device.name }
+    }
+
+    /** Verified computers that can show this screen (advertise screen.view). */
+    fun castTargets(): List<Peer> = engine?.let { current ->
+        current.peersSnapshot().filter { p ->
+            p.discoveryScope == "paired" && (p.verified || current.isTrustedPeer(p)) &&
+                Continuity.FEATURE_SCREEN_VIEW in current.continuity.peerFeatures(p.peerId)
+        }
+    } ?: emptyList()
+
+    /**
+     * "Cast to computer": the computer opens a viewer and asks to start; the
+     * request skips AirBridge's own prompt (the user just tapped this) and goes
+     * straight to Android's capture prompt.
+     */
+    fun castScreen(peerId: String, audio: Boolean): Result<String> = submitSync { current ->
+        current.continuity.inviteScreenShare(peerId, audio)
     }
 
     fun startHotspotHandoff() = handoff.start()

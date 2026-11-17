@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { Maximize2, Phone, PhoneIncoming, PhoneOff, ScreenShare, Search, Upload, Download, UserPlus } from "lucide-react";
+import { Delete, Maximize2, Phone, PhoneIncoming, PhoneOff, ScreenShare, Search, Upload, Download, UserPlus, Volume2, VolumeX } from "lucide-react";
 import {
   MAX_VCARD_LENGTH,
   buildVCard,
@@ -7,6 +7,7 @@ import {
   callPartyLabel,
   contactMatches,
   dialableNumber,
+  isServiceCode,
   parseVCards,
   type ContactCard,
   type ContinuityFeature,
@@ -18,10 +19,12 @@ import type {
   ContactShareItem,
   ContactsQueryResult,
   ContinuitySnapshot,
+  ScreenAudioChunk,
   ScreenFrame,
   ScreenShareRequestView,
   ScreenShareView,
 } from "../engine/continuity.js";
+import { ScreenAudioPlayer, canPlayScreenAudio } from "../engine/screenAudio.js";
 
 export type ContinuityTab = "contacts" | "calls" | "screen";
 
@@ -34,9 +37,10 @@ export interface ContinuityClient {
   rejectCall(peerId: string, callId: string): Promise<CallCommandResult>;
   hangUpCall(peerId: string, callId: string): Promise<CallCommandResult>;
   dialNumber(peerId: string, number: string): Promise<CallCommandResult>;
-  requestScreenShare(peerId: string, options?: { maxWidth?: number; maxFps?: number }): string;
+  requestScreenShare(peerId: string, options?: { maxWidth?: number; maxFps?: number; audio?: boolean }): string;
   stopScreenShare(sessionId: string): void;
   subscribeScreenFrames(sessionId: string, listener: (frame: ScreenFrame) => void): () => void;
+  subscribeScreenAudio?(sessionId: string, listener: (chunk: ScreenAudioChunk) => void): () => void;
 }
 
 const TAB_FEATURE: Record<ContinuityTab, ContinuityFeature> = {
@@ -128,11 +132,13 @@ interface ContinuityCenterProps {
   peers: PeerSummary[];
   continuity: ContinuitySnapshot | undefined;
   initialTab: ContinuityTab;
+  /** Select this device (e.g. it just started casting). */
+  focusPeerId?: string;
   onClose: () => void;
 }
 
 /** Contacts, calls and screen viewing for paired devices (top bar → Contacts / Calls / Screen). */
-export function ContinuityCenter({ client, peers, continuity, initialTab, onClose }: ContinuityCenterProps) {
+export function ContinuityCenter({ client, peers, continuity, initialTab, focusPeerId, onClose }: ContinuityCenterProps) {
   const snap = continuity ?? EMPTY_SNAPSHOT;
   const [tab, setTab] = useState<ContinuityTab>(initialTab);
   useEffect(() => setTab(initialTab), [initialTab]);
@@ -146,6 +152,11 @@ export function ContinuityCenter({ client, peers, continuity, initialTab, onClos
     setPeerId(next?.peerId ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, paired, snap.peerFeatures]);
+  // A device that just started casting (or ringing) takes the focus.
+  useEffect(() => {
+    if (focusPeerId && paired.some((p) => p.peerId === focusPeerId)) setPeerId(focusPeerId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusPeerId]);
   const peer = paired.find((p) => p.peerId === peerId);
   const guidance = featureGuidance(tab, peer, peer ? snap.peerFeatures[peer.peerId] : undefined);
   const canCall = Boolean(peer && snap.peerFeatures[peer.peerId]?.includes("calls.control"));
@@ -194,7 +205,7 @@ export function ContinuityCenter({ client, peers, continuity, initialTab, onClos
             onCall={(number) => { setAutoDial({ number, at: Date.now() }); setTab("calls"); }}
           />
         )}
-        {tab === "screen" && <ScreenPanel client={client} peer={peer} guidance={guidance} shares={snap.screenShares} />}
+        {tab === "screen" && <ScreenPanel client={client} peer={peer} guidance={guidance} shares={snap.screenShares} peerFeatures={peer ? snap.peerFeatures[peer.peerId] : undefined} />}
       </section>
     </div>
   );
@@ -209,6 +220,7 @@ function CallsPanel({ client, calls, peer, guidance, autoDial }: { client: Conti
   const live = calls.filter((c) => c.state !== "ended" || Date.now() - c.updatedAt < 5000);
   const now = useNow(live.some((c) => c.state === "active"));
   const dialable = dialableNumber(number);
+  const serviceCode = isServiceCode(number);
 
   const dial = async (event?: FormEvent, override?: string) => {
     event?.preventDefault();
@@ -256,12 +268,17 @@ function CallsPanel({ client, calls, peer, guidance, autoDial }: { client: Conti
             onChange={(e) => setNumber(e.target.value)}
           />
           <div className="dial-pad" role="group" aria-label="Keypad">
-            {["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"].map((d) => (
-              <button key={d} type="button" className="dial-key" onClick={() => setNumber((n) => (n + d).slice(0, 40))}>{d}</button>
+            {["1", "2", "3", "4", "5", "6", "7", "8", "9", "+", "0"].map((d) => (
+              <button key={d} type="button" className="dial-key" onClick={() => setNumber((n) => (d === "+" && n ? n : n + d).slice(0, 40))}>{d}</button>
             ))}
+            <button type="button" className="dial-key dial-key-delete" aria-label="Delete" disabled={!number} onClick={() => setNumber((n) => n.slice(0, -1))}>
+              <Delete size={17} aria-hidden="true" />
+            </button>
           </div>
+          {serviceCode && (
+            <small className="continuity-note" role="status">Codes with * or # (USSD, call forwarding, settings codes) can only be dialed on {peer?.device.name ?? "the phone"} itself.</small>
+          )}
           <div className="dialer-actions">
-            <button type="button" className="quiet-button" disabled={!number} onClick={() => setNumber((n) => n.slice(0, -1))}>Delete</button>
             <button type="submit" className="beam-button call-button" disabled={!dialable || busy}>
               <Phone size={15} aria-hidden="true" /> {busy ? "Calling…" : `Call from ${peer?.device.name ?? "phone"}`}
             </button>
@@ -509,9 +526,13 @@ function SendContactForm({ client, peer, onSent }: { client: ContinuityClient; p
 
 // ---------------------------------------------------------------- screen
 
-function ScreenPanel({ client, peer, guidance, shares }: { client: ContinuityClient; peer?: PeerSummary; guidance: string | null; shares: ScreenShareView[] }) {
+function ScreenPanel({ client, peer, guidance, shares, peerFeatures }: { client: ContinuityClient; peer?: PeerSummary; guidance: string | null; shares: ScreenShareView[]; peerFeatures?: ContinuityFeature[] }) {
   const [preset, setPreset] = useState<ScreenPreset>("standard");
+  const [withSound, setWithSound] = useState(true);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const playerRef = useRef<ScreenAudioPlayer | null>(null);
+  const soundPossible = Boolean(client.subscribeScreenAudio) && canPlayScreenAudio() &&
+    Boolean(peer && peerFeatures?.includes("screen.audio"));
   const [error, setError] = useState<string | null>(null);
   const viewing = shares.filter((s) => s.role === "viewer");
   // Reattach to a session started earlier (panel reopened).
@@ -523,7 +544,14 @@ function ScreenPanel({ client, peer, guidance, shares }: { client: ContinuityCli
     setError(null);
     try {
       const p = SCREEN_PRESETS[preset];
-      setSessionId(client.requestScreenShare(peer.peerId, { maxWidth: p.maxWidth, maxFps: p.maxFps }));
+      const audio = soundPossible && withSound;
+      // Create the audio context inside the click so autoplay rules allow sound.
+      if (audio) {
+        playerRef.current?.close();
+        playerRef.current = new ScreenAudioPlayer();
+        void playerRef.current.unlock();
+      }
+      setSessionId(client.requestScreenShare(peer.peerId, { maxWidth: p.maxWidth, maxFps: p.maxFps, ...(audio ? { audio: true } : {}) }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not ask for the screen.");
     }
@@ -545,13 +573,23 @@ function ScreenPanel({ client, peer, guidance, shares }: { client: ContinuityCli
               {(Object.keys(SCREEN_PRESETS) as ScreenPreset[]).map((k) => <option key={k} value={k}>{SCREEN_PRESETS[k].label}</option>)}
             </select>
           </label>
+          {soundPossible && (
+            <label className="setting-toggle screen-sound-toggle">
+              <span><strong>Include sound</strong><small>Plays media audio from {peer?.device.name ?? "the device"} here.</small></span>
+              <input type="checkbox" checked={withSound} onChange={(e) => setWithSound(e.target.checked)} />
+            </label>
+          )}
           <button type="button" className="beam-button" onClick={start}>
             <ScreenShare size={15} aria-hidden="true" /> View {peer?.device.name ?? "device"} screen
           </button>
-          <small className="continuity-note">{peer?.device.name ?? "The device"} asks for permission first. Frames are end-to-end encrypted and adapt to the connection.</small>
+          <small className="continuity-note">
+            {peer?.device.name ?? "The device"} asks for permission first. Frames are end-to-end encrypted and adapt to the connection.
+            {peerFeatures?.includes("screen.audio") ? " You can also start casting from the phone: AirBridge → Cast to computer." : ""}
+            {" "}Video apps that block screen capture (Netflix, Prime Video, Hotstar and other DRM-protected content) show black — that is the app&apos;s copy protection.
+          </small>
         </div>
       ) : (
-        <ScreenViewer client={client} share={share!} onStop={() => { client.stopScreenShare(share!.sessionId); }} />
+        <ScreenViewer client={client} share={share!} playerRef={playerRef} onStop={() => { client.stopScreenShare(share!.sessionId); }} />
       )}
       {error && <p className="clipboard-error" role="alert">{error}</p>}
     </div>
@@ -568,10 +606,29 @@ export function screenEndedLabel(share: ScreenShareView): string {
   }
 }
 
-function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; share: ScreenShareView; onStop: () => void }) {
+function ScreenViewer({ client, share, playerRef, onStop }: { client: ContinuityClient; share: ScreenShareView; playerRef: { current: ScreenAudioPlayer | null }; onStop: () => void }) {
   const imgRef = useRef<HTMLImageElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const [hasFrame, setHasFrame] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [audioState, setAudioState] = useState<"running" | "suspended" | "closed" | "unavailable">("suspended");
+  const wantsAudio = share.audio === true && Boolean(client.subscribeScreenAudio);
+
+  useEffect(() => {
+    if (!wantsAudio || !client.subscribeScreenAudio) return;
+    if (!playerRef.current) playerRef.current = new ScreenAudioPlayer();
+    const player = playerRef.current;
+    void player.unlock().then(() => setAudioState(player.state));
+    const unsubscribe = client.subscribeScreenAudio(share.sessionId, (chunk) => {
+      player.play(chunk.pcm, chunk.sampleRate, chunk.channels);
+      setAudioState(player.state);
+    });
+    return () => {
+      unsubscribe();
+      player.close();
+      if (playerRef.current === player) playerRef.current = null;
+    };
+  }, [client, share.sessionId, wantsAudio, playerRef]);
   useEffect(() => {
     let url: string | null = null;
     const unsubscribe = client.subscribeScreenFrames(share.sessionId, (frame) => {
@@ -590,6 +647,7 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
 
   const status = share.state === "active"
     ? `${share.width && share.height ? `${share.width}×${share.height} · ` : ""}${share.fps} fps · ${share.kbps >= 1000 ? `${(share.kbps / 1000).toFixed(1)} Mbps` : `${share.kbps} kbps`}`
+    : share.invited ? `${share.peerName} is starting to cast… confirm on the phone.`
     : share.state === "pending" ? `Waiting for ${share.peerName} to allow screen sharing…` : `Asking ${share.peerName}…`;
 
   return (
@@ -598,9 +656,19 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
         <img ref={imgRef} alt={`${share.peerName} screen`} className={hasFrame ? "screen-frame" : "screen-frame is-empty"} />
         {!hasFrame && <span className="screen-placeholder">{status}</span>}
       </div>
+      {share.state === "active" && share.reason && <p className="continuity-note screen-notice" role="status">{share.reason}</p>}
       <div className="screen-toolbar">
-        <span className="quiet-count" aria-live="polite">{status}</span>
+        <span className="quiet-count" aria-live="polite">{share.invited && share.state === "active" ? `Casting from ${share.peerName} · ` : ""}{status}</span>
         <span className="call-actions">
+          {wantsAudio && share.state === "active" && (audioState === "suspended" ? (
+            <button type="button" className="quiet-button" onClick={() => { const p = playerRef.current; if (p) void p.unlock().then(() => setAudioState(p.state)); }}>
+              <Volume2 size={13} aria-hidden="true" /> Turn on sound
+            </button>
+          ) : audioState === "running" && (
+            <button type="button" className="quiet-button" aria-pressed={muted} aria-label={muted ? "Unmute" : "Mute"} onClick={() => { const next = !muted; setMuted(next); playerRef.current?.setMuted(next); }}>
+              {muted ? <VolumeX size={13} aria-hidden="true" /> : <Volume2 size={13} aria-hidden="true" />} {muted ? "Unmute" : "Mute"}
+            </button>
+          ))}
           <button type="button" className="quiet-button" aria-label="Full screen" disabled={!hasFrame} onClick={() => { void stageRef.current?.requestFullscreen?.(); }}>
             <Maximize2 size={13} aria-hidden="true" /> Full screen
           </button>

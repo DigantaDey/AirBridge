@@ -7,11 +7,11 @@ import {
 } from '../harness/index.js';
 
 describe('F18: Monotonic VersionCode & Android Package Consistency', () => {
-  it('targets API 35 with compileSdk 35 and minSdk 26 in android/app/build.gradle.kts', async () => {
+  it('targets API 36 (Play requirement since Aug 2026) with compileSdk 36 and minSdk 26 in android/app/build.gradle.kts', async () => {
     const gradle = await readAppBuildGradle();
-    expect(gradle.compileSdk).toBe(35);
+    expect(gradle.compileSdk).toBe(36);
     expect(gradle.minSdk).toBe(26);
-    expect(gradle.targetSdk).toBe(35);
+    expect(gradle.targetSdk).toBe(36);
   });
 
   it('derives a monotonic versionCode >= 100000 from AIRBRIDGE_VERSION_CODE or git commit count', async () => {

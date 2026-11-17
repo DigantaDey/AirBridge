@@ -43,14 +43,14 @@ object ContinuityPermissions {
 
     /**
      * READ_PHONE_STATE: ringing/off-hook/idle. ANSWER_PHONE_CALLS: answer,
-     * reject and hang up. CALL_PHONE: place calls. READ_CALL_LOG (optional):
-     * Android only reveals the caller's number with it (API 29+).
+     * reject and hang up. CALL_PHONE: place calls. The caller's number comes
+     * from the optional Caller ID role ([CallerIdService]), not the restricted
+     * READ_CALL_LOG permission.
      */
     val CALLS: Array<String> = arrayOf(
         Manifest.permission.READ_PHONE_STATE,
         Manifest.permission.ANSWER_PHONE_CALLS,
         Manifest.permission.CALL_PHONE,
-        Manifest.permission.READ_CALL_LOG,
     )
 
     private fun granted(context: Context, permission: String) =
@@ -58,10 +58,10 @@ object ContinuityPermissions {
 
     fun contactsGranted(context: Context) = granted(context, Manifest.permission.READ_CONTACTS)
 
-    /** The caller-ID permission is optional; the other three are required. */
-    fun callsGranted(context: Context) = CALLS.filter { it != Manifest.permission.READ_CALL_LOG }.all { granted(context, it) }
+    fun callsGranted(context: Context) = CALLS.all { granted(context, it) }
 
-    fun callerIdGranted(context: Context) = granted(context, Manifest.permission.READ_CALL_LOG)
+    /** Caller ID role held (optional: without it the computer shows "Incoming call"). */
+    fun callerIdGranted(context: Context) = CallerIdService.held(context)
 
     fun hasTelephony(context: Context) = context.packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)
 
@@ -187,10 +187,28 @@ class CallMonitor(
     private var current: CallInfo? = null
     private var pendingDial: Pair<CallInfo, Long>? = null
 
+    /** Caller number from [CallerIdService], which runs just before the phone rings. */
+    private var pendingCallerId: Pair<String, Long>? = null
+
     /** The call in progress, if any (re-sent when a computer connects). */
     fun currentCall(): CallInfo? = synchronized(lock) { current }
 
+    private fun onCallerId(number: String) = worker.execute {
+        val now = System.currentTimeMillis()
+        val publish = synchronized(lock) {
+            val cur = current
+            if (cur != null && cur.state == "ringing" && cur.direction == "incoming" && cur.number == null) {
+                cur.copy(number = number, name = contacts.lookupName(number), updatedAt = now).also { current = it }
+            } else {
+                pendingCallerId = number to now
+                null
+            }
+        }
+        publish?.let(onChange)
+    }
+
     fun start() = main.post {
+        active = this
         if (listener != null || telephony == null) return@post
         val l = object : PhoneStateListener() {
             override fun onCallStateChanged(state: Int, phoneNumber: String?) {
@@ -203,6 +221,7 @@ class CallMonitor(
     }
 
     fun stop() = main.post {
+        if (active === this) active = null
         val l = listener ?: return@post
         runCatching { telephony?.listen(l, PhoneStateListener.LISTEN_NONE) }
         listener = null
@@ -231,15 +250,21 @@ class CallMonitor(
             val cur = current
             when (state) {
                 TelephonyManager.CALL_STATE_RINGING -> when {
-                    // Second callback with the caller's number (READ_CALL_LOG).
+                    // A later callback that finally carries the number.
                     prev == state && cur != null && cur.number == null && number != null ->
                         cur.copy(number = number, name = contacts.lookupName(number), updatedAt = now)
                     prev == state -> null
-                    else -> CallInfo(
-                        callId = AirCrypto.randomHex16(), state = "ringing", direction = "incoming",
-                        number = number, name = number?.let { contacts.lookupName(it) },
-                        updatedAt = now, actions = listOf("answer", "reject"),
-                    )
+                    else -> {
+                        // Screening (caller ID role) runs moments before ringing.
+                        val screened = pendingCallerId?.takeIf { now - it.second < 15_000 }?.first
+                        pendingCallerId = null
+                        val n = number ?: screened
+                        CallInfo(
+                            callId = AirCrypto.randomHex16(), state = "ringing", direction = "incoming",
+                            number = n, name = n?.let { contacts.lookupName(it) },
+                            updatedAt = now, actions = listOf("answer", "reject"),
+                        )
+                    }
                 }
                 TelephonyManager.CALL_STATE_OFFHOOK -> when {
                     prev == state -> null
@@ -312,8 +337,14 @@ class CallMonitor(
         }
     }
 
-    private companion object {
-        const val TAG = "AirBridgeCalls"
+    companion object {
+        private const val TAG = "AirBridgeCalls"
+        @Volatile private var active: CallMonitor? = null
+
+        /** From [CallerIdService]: the number of the call about to ring. */
+        fun offerCallerId(number: String) {
+            active?.onCallerId(number)
+        }
     }
 }
 
@@ -342,6 +373,8 @@ class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
         val callsOk = prefs.callsFromComputer && ContinuityPermissions.hasTelephony(context) && ContinuityPermissions.callsGranted(context)
         ch.callsReady = callsOk
         ch.screenSourceAvailable = prefs.screenSharing && ContinuityPermissions.screenCaptureSupported(context)
+        // Playback capture exists from Android 10; RECORD_AUDIO is asked per session.
+        ch.screenAudioAvailable = prefs.screenSound && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
         if (callsOk) calls.start() else calls.stop()
         val features = ch.features()
         val changed = synchronized(this) { (features != lastFeatures).also { lastFeatures = features } }
@@ -355,7 +388,22 @@ class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
 
     fun onContactsReceived(item: ContactShareItem) = ContinuityNotifications.contactReceived(context, item)
 
-    fun onScreenShareRequest(request: ScreenShareRequest) = ContinuityNotifications.screenRequest(context, request)
+    fun onScreenShareRequest(request: ScreenShareRequest) {
+        // The user just tapped "Cast to computer" (the app is in front): go
+        // straight to Android's capture prompt. Otherwise ask via notification.
+        if (request.invited) {
+            val opened = runCatching {
+                context.startActivity(
+                    Intent(context, ScreenShareConsentActivity::class.java)
+                        .setPackage(context.packageName)
+                        .putExtra(ScreenShareConsentActivity.EXTRA_SESSION_ID, request.sessionId)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+                )
+            }.isSuccess
+            if (opened) return
+        }
+        ContinuityNotifications.screenRequest(context, request)
+    }
 
     fun onScreenShareEnded(sessionId: String) {
         ContinuityNotifications.cancel(context, ContinuityNotifications.screenRequestId(sessionId))

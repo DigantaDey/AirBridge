@@ -47,19 +47,25 @@
 
     <!--
       Phone on your computer (all optional, each behind a Settings toggle):
-      contacts search, call answer/decline/place with caller ID, and screen
-      sharing that the user approves per session. WRITE_CONTACTS is not needed:
-      cards from the computer are saved through the system contact editor.
+      contacts search, call answer/decline/place, and screen sharing that the
+      user approves per session. WRITE_CONTACTS is not needed: cards from the
+      computer are saved through the system contact editor. Caller ID uses the
+      user-granted Caller ID role (CallerIdService), not READ_CALL_LOG.
+      RECORD_AUDIO is only used for AudioPlaybackCapture of media while the
+      screen is shared (asked at that moment); the microphone is never opened.
     -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.CALL_PHONE" />
-    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <uses-feature
         android:name="android.hardware.telephony"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.microphone"
         android:required="false" />
     <uses-feature
         android:name="android.hardware.camera"
@@ -75,7 +81,8 @@
         android:label="AirBridge"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:enableOnBackInvokedCallback="true"
         tools:targetApi="tiramisu"
         android:networkSecurityConfig="@xml/network_security_config"
@@ -133,6 +140,18 @@
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="connectedDevice|dataSync" />
+        <!--
+          Caller ID for the computer via the Caller ID role (Android 10+). Only
+          reads the incoming number; every call is allowed through unchanged.
+        -->
+        <service
+            android:name=".CallerIdService"
+            android:exported="true"
+            android:permission="android.permission.BIND_SCREENING_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.CallScreeningService" />
+            </intent-filter>
+        </service>
         <!-- Screen sharing to the paired computer, started only after consent. -->
         <service
             android:name=".ScreenShareService"
