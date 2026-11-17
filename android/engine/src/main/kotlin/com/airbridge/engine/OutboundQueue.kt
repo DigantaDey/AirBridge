@@ -5,6 +5,7 @@ internal class OutboundQueue(maxBytes: Int = 8 * 1024 * 1024) {
     private val queue = ByteBoundedQueue<Outbound>(maxBytes, maxItems = 256, timeoutMs = 60_000) { it.payload.size }
     val isEmpty: Boolean get() = queue.isEmpty
     fun put(item: Outbound) = queue.put(item)
+    fun offer(item: Outbound, budgetBytes: Int): Boolean = queue.offer(item, budgetBytes)
     fun take(): Outbound? = queue.take()
     fun tryPoll(): Outbound? = queue.tryPoll()
     fun clear() = queue.clear()

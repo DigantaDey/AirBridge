@@ -26,10 +26,19 @@ import {
   type AirBridgeServerOptions,
 } from '../src/server/index.ts';
 import { createCliBeamSession } from '../src/server/cliSendSession.ts';
+import { installLogCapture, recentLogs, startEventLoopMonitor } from '../src/server/diagnostics.ts';
+import { CrashStore, beginRun, buildCrashReport, endRunCleanly, loadCrashDsn } from '../src/server/crashReports.ts';
+import { Updater, appBundleForExecutable, confirmUpdateHealthy, isScriptRuntime, resolvePendingUpdate } from '../src/server/updater.ts';
+import { emitShellEvent } from '../src/server/shellEvents.ts';
+import { isShellPanel, panelUrl, probeRunningInstance, removeLinuxLauncher, writeLinuxLauncher, type ShellPanel } from '../src/server/desktopLauncher.ts';
+import { DEFAULT_RELAY_PORT, RELAY_ENDPOINT_FILE, parseRelayEndpoint, startRelayServer } from '../src/server/relay.ts';
 import clientAssets from './clientAssets.json';
 import pkg from '../package.json';
 
 const APP_LABEL = 'com.airbridge.daemon';
+/** EX_TEMPFAIL: "restart me" for the macOS app, launchd and systemd supervisors. */
+const RESTART_EXIT_STATUS = 75;
+
 const VERSION = pkg.version;
 
 type StartupAction = 'install' | 'uninstall';
@@ -44,7 +53,12 @@ interface CliOptions {
   tlsDir?: string;
   noBrowser: boolean;
   action: StartupAction | null;
-  subcommand: 'daemon' | 'send';
+  subcommand: 'daemon' | 'send' | 'relay';
+  /** `--relay host:port|off` (persisted for the login item). */
+  relayEndpoint?: string;
+  relayListen?: string;
+  /** `--open [panel]`: open the local UI (a panel of it), reusing a running service. */
+  openPanel?: ShellPanel | 'home';
   sendFiles: string[];
   help: boolean;
   version: boolean;
@@ -57,6 +71,7 @@ function printHelp(): void {
   Usage:
     airbridge [daemon] [options]          Start the AirBridge server
     airbridge send <file...> [options]    One-shot QR beam of files
+    airbridge relay [--listen [host:]port] Run an AirBridge relay (VPS / always-on box)
     airbridge --install-startup           Auto-start at login (user-level, no admin)
     airbridge --uninstall-startup         Remove the auto-start entry
 
@@ -69,6 +84,11 @@ function printHelp(): void {
     --tls-key <pem>       Private key for --tls-cert
     --tls-dir <path>      Where the generated CA lives (default ~/.airbridge/tls)
     --no-browser          Do not open the local UI in a browser
+    --open [panel]        Open the UI (contacts, calls, screen or settings);
+                          hands off to an already-running AirBridge
+    --relay <host:port>   Use this AirBridge relay when phones can't reach this
+                          computer directly (saved; \`--relay off\` removes it).
+                          Traffic stays end-to-end TLS; the relay sees ciphertext.
     -h, --help            Show this help
     -v, --version         Show version
 `);
@@ -107,7 +127,11 @@ function parseArgs(argv: string[]): CliOptions {
     else if (arg === '--tls-key' && argv[i + 1]) opts.tlsKeyPath = path.resolve(argv[++i]);
     else if (arg === '--tls-dir' && argv[i + 1]) opts.tlsDir = path.resolve(argv[++i]);
     else if (arg === '--no-browser') opts.noBrowser = true;
-    else if (arg === '--install-startup') opts.action = 'install';
+    else if (arg === '--relay' && argv[i + 1]) opts.relayEndpoint = argv[++i];
+    else if (arg === '--listen' && argv[i + 1]) opts.relayListen = argv[++i];
+    else if (arg === '--open') {
+      opts.openPanel = isShellPanel(argv[i + 1]) ? (argv[++i] as ShellPanel) : 'home';
+    } else if (arg === '--install-startup') opts.action = 'install';
     else if (arg === '--uninstall-startup') opts.action = 'uninstall';
     else positional.push(arg);
   }
@@ -115,6 +139,8 @@ function parseArgs(argv: string[]): CliOptions {
   if (positional[0] === 'daemon') {
     opts.subcommand = 'daemon';
     opts.sendFiles = positional.slice(1);
+  } else if (positional[0] === 'relay') {
+    opts.subcommand = 'relay';
   } else if (positional[0] === 'send') {
     opts.subcommand = 'send';
     opts.sendFiles = positional.slice(1);
@@ -209,6 +235,7 @@ X-GNOME-Autostart-enabled=true
   );
   fs.chmodSync(desktopPath, 0o755);
   console.log(`✅ Auto-start installed (XDG autostart): ${desktopPath}`);
+  installLinuxLauncher(exe, opts);
 }
 
 function uninstallStartup(): void {
@@ -237,7 +264,22 @@ function uninstallStartup(): void {
     'airbridge.desktop'
   );
   fs.rmSync(desktopPath, { force: true });
+  removeLinuxLauncher();
   console.log('✅ Auto-start removed.');
+}
+
+/** Linux app launcher (top bar / dock / app grid) with the version + panel actions. */
+function launcherArgs(opts: Pick<CliOptions, 'port'>): string[] {
+  return opts.port !== 3000 ? ['--port', String(opts.port)] : [];
+}
+
+function installLinuxLauncher(exe: string, opts: CliOptions): void {
+  try {
+    const file = writeLinuxLauncher({ executable: exe, version: VERSION, extraArgs: launcherArgs(opts), install: true });
+    if (file) console.log(`✅ App launcher installed (Contacts, Calls, Screen Sharing): ${file}`);
+  } catch (err) {
+    console.warn(`[airbridge] could not write the app launcher: ${(err as Error).message}`);
+  }
 }
 
 function escapeXml(s: string): string {
@@ -291,6 +333,23 @@ async function main(): Promise<void> {
     console.log(`airbridge ${VERSION}`);
     process.exit(0);
   }
+  if (opts.relayEndpoint) {
+    const file = path.join(opts.tlsDir ? path.dirname(opts.tlsDir) : path.join(os.homedir(), '.airbridge'), RELAY_ENDPOINT_FILE);
+    if (opts.relayEndpoint === 'off') {
+      fs.rmSync(file, { force: true });
+      console.log('Relay fallback disabled.');
+    } else {
+      const parsed = parseRelayEndpoint(opts.relayEndpoint);
+      if (!parsed) {
+        console.error(`Error: --relay expects host:port, got "${opts.relayEndpoint}"`);
+        process.exit(1);
+      }
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${parsed.endpoint}\n`);
+      console.log(`Relay fallback: ${parsed.endpoint} (saved)`);
+    }
+  }
+
   if (opts.action === 'install') {
     installStartup(opts);
     return;
@@ -308,6 +367,29 @@ async function main(): Promise<void> {
   if (opts.tlsCertPath) tlsOptions.tlsCertPath = opts.tlsCertPath;
   if (opts.tlsKeyPath) tlsOptions.tlsKeyPath = opts.tlsKeyPath;
   if (opts.tlsDir) tlsOptions.tlsDir = opts.tlsDir;
+
+  if (opts.subcommand === 'relay') {
+    const listen = opts.relayListen ?? String(DEFAULT_RELAY_PORT);
+    const m = /^(?:(.+):)?(\d{1,5})$/.exec(listen);
+    if (!m) {
+      console.error('Error: --listen expects [host:]port');
+      process.exit(1);
+    }
+    const relay = await startRelayServer({
+      host: m[1]?.replace(/^\[|\]$/g, '') || '::',
+      port: Number(m[2]),
+      log: (line) => console.log(line),
+    });
+    console.log(`Point computers at it with:  airbridge --relay <this-host>:${relay.port}`);
+    const stop = () => { void relay.close().then(() => process.exit(0)); };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+    setInterval(() => {
+      const s = relay.stats();
+      console.log(`relay: ${s.rooms} computers, ${s.standby} standby, ${s.splices} active, ${(s.bytes / 1048576).toFixed(1)} MiB relayed`);
+    }, 10 * 60_000).unref();
+    return;
+  }
 
   if (opts.subcommand === 'send') {
     if (opts.sendFiles.length === 0) {
@@ -343,10 +425,57 @@ async function main(): Promise<void> {
   }
 
   // Default: daemon / app mode
+  const openPanel = opts.openPanel === 'home' ? null : (opts.openPanel ?? null);
+  if (opts.openPanel) {
+    // Launcher / menu action: if AirBridge already runs, just show the panel.
+    const running = await probeRunningInstance(opts.port);
+    if (running) {
+      openInBrowser(panelUrl(running.url, openPanel));
+      return;
+    }
+  }
+  const stateDir = path.join(os.homedir(), '.airbridge');
+  fs.mkdirSync(stateDir, { recursive: true });
+  const crashStore = new CrashStore(path.join(stateDir, 'crashes'));
+  installDaemonSafetyNets(crashStore);
+  // A previous run that never shut down cleanly (native crash, out of
+  // memory, killed by the watchdog) becomes a local crash report.
+  const previousCrash = beginRun(stateDir, crashStore, VERSION);
+  if (previousCrash) console.warn(`[airbridge] the previous run ended unexpectedly; a crash report is ready to review (${previousCrash.id})`);
+  process.on('exit', (code) => {
+    if (code === 0 || code === RESTART_EXIT_STATUS) endRunCleanly(stateDir);
+  });
+  // A just-installed update that keeps failing to come up is rolled back here.
+  const pending = resolvePendingUpdate(stateDir, VERSION);
+  if (pending === 'rolled-back') {
+    process.exit(RESTART_EXIT_STATUS); // the supervisor (or the user) starts the restored build
+  }
+  // Only the compiled single-file release binary self-updates: the committed
+  // clientAssets.json stub has a single placeholder page, and under node/bun/tsx
+  // process.execPath is the runtime itself (which must never be replaced).
+  const isPackagedBinary = Object.keys(clientAssets as object).length > 1 && !isScriptRuntime(process.execPath);
+  let restartAfterUpdate: (() => void) | null = null;
+  const updater = isPackagedBinary && process.env.AIRBRIDGE_AUTO_UPDATE !== '0'
+    ? new Updater({
+        currentVersion: VERSION,
+        stateDir,
+        executablePath: process.execPath,
+        appBundlePath: appBundleForExecutable(process.execPath),
+        onInstalled: (info) => {
+          // Let the macOS app relaunch from the new bundle (it must not stop
+          // the service on its way out).
+          emitShellEvent({ type: 'update-installed', version: info.version, relaunch: info.appBundle }, 'lifecycle');
+          setTimeout(() => restartAfterUpdate?.(), 500);
+        },
+      })
+    : null;
   const server = await createAirBridgeServer({
     port: opts.port,
     mode: 'production',
     version: VERSION,
+    updater,
+    crashStore,
+    crashDsn: loadCrashDsn(stateDir),
     clientAssets: clientAssets as Record<string, string>,
     ...tlsOptions,
     daemonConfig: {
@@ -389,9 +518,92 @@ async function main(): Promise<void> {
   console.log('     (check the fingerprint above first), then rescan.');
   console.log('  (Ctrl+C to stop)\n');
 
-  if (!opts.noBrowser) {
-    setTimeout(() => openInBrowser(localUrl), 400);
+  if (!opts.noBrowser || opts.openPanel) {
+    setTimeout(() => openInBrowser(panelUrl(localUrl, openPanel)), 400);
   }
+  if (process.platform === 'linux' && isPackagedBinary) {
+    // Keep an installed launcher's version + path current (self-updates).
+    try {
+      writeLinuxLauncher({ executable: currentExecutable(), version: VERSION, extraArgs: launcherArgs(opts) });
+    } catch { /* read-only home: the launcher just keeps its old version text */ }
+  }
+
+  if (pending === 'pending') {
+    // Healthy for a minute: the update is confirmed and the backup kept for manual rollback.
+    setTimeout(() => confirmUpdateHealthy(stateDir), 60_000).unref();
+  }
+  restartAfterUpdate = () => {
+    void server.close().catch(() => {}).finally(() => {
+      // The macOS app, launchd (KeepAlive SuccessfulExit=false) and systemd
+      // (Restart=on-failure) restart the service on this "restart me" status.
+      if (process.env.AIRBRIDGE_SUPERVISED) process.exit(RESTART_EXIT_STATUS);
+      // Unsupervised: start the new build ourselves with the same arguments.
+      const child = spawn(process.execPath, process.argv.slice(2), {
+        detached: true,
+        stdio: 'ignore',
+        env: process.env,
+      });
+      child.unref();
+      process.exit(0);
+    });
+  };
+  updater?.start();
+
+  // Quitting (Ctrl+C, the macOS app, launchctl/systemctl stop) is a clean
+  // shutdown, not a crash. A hung process cannot run this and is SIGKILLed
+  // by its supervisor, so that case is still reported at the next start.
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    endRunCleanly(stateDir);
+    setTimeout(() => process.exit(0), 3_000).unref();
+    void server.close().catch(() => {}).finally(() => process.exit(0));
+  };
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.once(signal, shutdown);
+}
+
+/**
+ * Long-running service hardening:
+ *  - an uncaught error in one connection/helper is logged with its stack and
+ *    the service keeps serving (a crash would drop every device and, under the
+ *    macOS app, look like "AirBridge keeps restarting"). A burst of errors
+ *    still exits so the supervisor can start a clean process.
+ *  - event-loop stalls are logged, so anything that blocks /api/health is
+ *    visible in ~/.airbridge/server.log instead of a silent restart.
+ */
+function installDaemonSafetyNets(crashStore: CrashStore): void {
+  const recent: number[] = [];
+  const startedAt = Date.now();
+  const onFatal = (kind: 'uncaught exception' | 'unhandled rejection') => (err: unknown) => {
+    const now = Date.now();
+    recent.push(now);
+    while (recent.length && now - recent[0]! > 60_000) recent.shift();
+    const detail = err instanceof Error ? err.stack || err.message : String(err);
+    console.error(`[airbridge] ${new Date().toISOString()} ${kind}: ${detail}`);
+    try {
+      crashStore.recordSync(buildCrashReport(err, kind === 'uncaught exception' ? 'uncaught-exception' : 'unhandled-rejection', {
+        version: VERSION,
+        startedAt,
+        logTail: recentLogs(80).map((l) => `${l.t} ${l.level} ${l.msg}`),
+      }));
+    } catch {
+      // Reporting must never make a crash worse.
+    }
+    if (recent.length > 20) {
+      console.error('[airbridge] too many unexpected errors in one minute; exiting for a clean restart');
+      // Already reported above; do not add an "ended unexpectedly" report too.
+      endRunCleanly(path.join(os.homedir(), '.airbridge'));
+      process.exit(70);
+    }
+  };
+  process.on('uncaughtException', onFatal('uncaught exception'));
+  process.on('unhandledRejection', onFatal('unhandled rejection'));
+  process.stdout.on?.('error', () => {});
+  process.stderr.on?.('error', () => {});
+
+  installLogCapture();
+  startEventLoopMonitor(2_000);
 }
 
 main().catch((err) => {

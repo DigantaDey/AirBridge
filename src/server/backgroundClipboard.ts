@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { WarpClient, type ClipboardBeamItem, type NotificationBeamItem } from '../client/engine/warpClient.js';
 import { postMacOsNotification } from './macNotification.js';
+import { jwkIdentityStore } from '../client/engine/identity.js';
 import {
   generatePairCode,
   isValidPairCode,
@@ -154,6 +155,12 @@ export class BackgroundClipboardPeer {
       enableWebRtc: false,
       autoAcceptAll: true,
       deviceOverride: device,
+      // Stable identity across restarts (the file is 0600), so phones that
+      // trusted this computer's background peer keep trusting it.
+      identityStore: jwkIdentityStore(
+        () => this.storage.getItem(`${STORAGE_PREFIX}:identity`),
+        (value) => this.storage.setItem(`${STORAGE_PREFIX}:identity`, value),
+      ),
       writeHostClipboard: false,
       onIncomingClipboard: (item: ClipboardBeamItem) => {
         if (item.contentType === 'image' || !item.text) return;

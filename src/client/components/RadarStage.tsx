@@ -265,25 +265,35 @@ export function RadarStage(p: RadarStageProps) {
                 <button onClick={() => p.onOpenClipboardForPeer(peer)}>
                   <Clipboard size={13} /> Send text
                 </button>
-                <button
-                  onClick={() =>
-                    p.onToggleTrustPeer(
-                      peer.device.publicKey,
-                      !p.trustedPeerKeys.includes(peer.device.publicKey),
-                    )
-                  }
-                >
-                  <ShieldCheck size={13} />
-                  {p.trustedPeerKeys.includes(peer.device.publicKey)
-                    ? "Trusted"
-                    : "Trust device"}
-                </button>
+                {(() => {
+                  // Trust pins the proven long-term identity when there is one.
+                  const key = p.peerSecurity[peer.peerId]?.trustKey ?? peer.device.publicKey;
+                  const trusted = p.trustedPeerKeys.includes(key);
+                  return (
+                    <button onClick={() => p.onToggleTrustPeer(key, !trusted)}>
+                      <ShieldCheck size={13} />
+                      {trusted ? "Trusted" : "Trust device"}
+                    </button>
+                  );
+                })()}
               </div>
-              {p.peerSecurity[peer.peerId]?.sasCode && (
-                <small className="security-code">
-                  Verify on both screens: {p.peerSecurity[peer.peerId].sasCode}
-                </small>
-              )}
+              {(() => {
+                const sec = p.peerSecurity[peer.peerId];
+                if (!sec) return null;
+                if (sec.identityChanged) {
+                  return (
+                    <small className="security-code security-warning" role="alert">
+                      This device presented a different identity than before. Compare {sec.sasCode} on both screens before sending.
+                    </small>
+                  );
+                }
+                if (sec.verification === "verified") {
+                  return <small className="security-code">Verified by the pairing code</small>;
+                }
+                return sec.sasCode ? (
+                  <small className="security-code">Verify on both screens: {sec.sasCode}</small>
+                ) : null;
+              })()}
             </div>
           ))}
         </div>

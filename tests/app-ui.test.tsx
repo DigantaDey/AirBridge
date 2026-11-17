@@ -85,6 +85,7 @@ class FakeSocket {
               type: "welcome",
               peerId: "aabbccddeeff0011",
               pairCode: "ABC123",
+              serverVersion: "0.0.5",
               lanUrls: ["http://localhost:3000"],
               localDaemon: {
                 enabled: false,
@@ -573,5 +574,86 @@ describe("AirBridge app UI", () => {
     expect(rows[0].textContent).toContain("newest-invoice.pdf");
     expect(rows[0].textContent).toContain("Received");
     expect(rows[1].textContent).toContain("older-notes.txt");
+  });
+
+  it("shows the app version and Contacts / Calls / Screen in the top bar, with live call controls", async () => {
+    const { container } = await renderApp();
+    const header = container.querySelector(".utility-header")!;
+    // Version like any desktop app (UI bundle version, falling back to the service's).
+    expect(header.querySelector(".version-badge")?.textContent).toBe("v0.0.5");
+    for (const label of ["Contacts", "Calls", "Screen"]) {
+      expect(Array.from(header.querySelectorAll("button")).some((b) => b.textContent?.includes(label))).toBe(true);
+    }
+
+    // Before the phone announces features, the panel explains what to do.
+    await act(async () => { findButton(container, "Calls").click(); });
+    expect(container.querySelector(".continuity-modal h2")?.textContent).toBe("Calls");
+    expect(container.querySelector(".continuity-guidance")?.textContent).toContain("hasn't announced phone features");
+
+    const socket = FakeSocket.lastInstance!;
+    await act(async () => {
+      await pushEncrypted(socket, { kind: "continuity-hello", v: 1, features: ["contacts.receive", "contacts.provide", "calls.control", "screen.source"] });
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    await waitFor(() => container.querySelector(".dialer") !== null);
+    expect(container.querySelector('[aria-label="Keypad"]')?.querySelectorAll("button").length).toBe(12);
+
+    // A ringing call shows an always-visible banner and a header badge.
+    await act(async () => {
+      await pushEncrypted(socket, {
+        kind: "call-state",
+        call: { callId: "0123456789abcdef", state: "ringing", direction: "incoming", number: "+1 555 0100", name: "Ada Lovelace", updatedAt: Date.now(), actions: ["answer", "reject"] },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    await waitFor(() => container.querySelector(".incoming-call") !== null);
+    const banner = container.querySelector(".incoming-call")!;
+    expect(banner.textContent).toContain("Ada Lovelace");
+    expect(banner.textContent).toContain("Incoming call on Pixel Phone");
+    expect(header.querySelector('[aria-label="Calls (1 active)"]')).not.toBeNull();
+    const before = socket.sentMessages.filter((m) => m.type === "transfer-control").length;
+    await act(async () => {
+      Array.from(banner.querySelectorAll("button")).find((b) => b.textContent === "Answer")!.click();
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    // The answer command left encrypted over the session.
+    await waitFor(() => socket.sentMessages.filter((m) => m.type === "transfer-control").length > before);
+
+    // Escape closes the panel.
+    await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+    expect(container.querySelector(".continuity-modal")).toBeNull();
+  });
+
+  it("opens panels requested by the desktop shells (macOS menu bar, Linux launcher ?panel=)", async () => {
+    // Linux launcher action: AirBridge --open contacts → /?panel=contacts&pair=…
+    window.history.replaceState(null, "", "/?panel=contacts&keep=1#top");
+    // macOS: a menu click that raced the page load is parked for the app.
+    window.__airbridgePendingPanel = "screen";
+    try {
+      const { container } = await renderApp();
+      await waitFor(() => container.querySelector(".continuity-modal") !== null);
+      // ?panel= is consumed (a reload must not reopen it); other params survive.
+      expect(window.location.search).toBe("?keep=1");
+      expect(window.location.hash).toBe("#top");
+      expect(window.__airbridgePendingPanel).toBeUndefined();
+      expect(container.querySelector(".continuity-modal h2")?.textContent).toBe("Contacts");
+
+      // The macOS menu bar calls the page directly once it has loaded.
+      expect(typeof window.__airbridgeOpenPanel).toBe("function");
+      await act(async () => { expect(window.__airbridgeOpenPanel!("calls")).toBe(true); });
+      expect(container.querySelector(".continuity-modal h2")?.textContent).toBe("Calls");
+      await act(async () => { window.__airbridgeOpenPanel!("screen"); });
+      expect(container.querySelector(".continuity-modal h2")?.textContent).toBe("Screen");
+
+      // Unknown names are refused without side effects; Settings opens Preferences.
+      await act(async () => { expect(window.__airbridgeOpenPanel!("javascript:alert(1)")).toBe(false); });
+      expect(container.querySelector(".continuity-modal h2")?.textContent).toBe("Screen");
+      await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+      await act(async () => { expect(window.__airbridgeOpenPanel!("settings")).toBe(true); });
+      expect(container.querySelector("#settings-title")?.textContent).toBe("Settings");
+    } finally {
+      window.history.replaceState(null, "", "/");
+      delete window.__airbridgePendingPanel;
+    }
   });
 });

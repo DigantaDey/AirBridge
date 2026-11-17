@@ -11,6 +11,7 @@ want the Play Store).
 |---|---|---|---|
 | macOS (Apple silicon) | `AirBridge-darwin-arm64` | macOS CI runner | **ad-hoc** `codesign -s -` |
 | macOS (Intel) | `AirBridge-darwin-x64` | macOS CI runner | **ad-hoc** `codesign -s -` |
+| macOS app (Apple silicon / Intel) | `AirBridge-macOS-arm64.zip`, `AirBridge-macOS-x64.zip` (Swift shell + embedded service) | macOS CI runner (`scripts/package-mac-app.sh`) | **ad-hoc**, bundle sealed and verified |
 | Windows x64 | `AirBridge-windows-x64.exe` | Linux CI runner (bun cross-compile) | none (see SmartScreen below) |
 | Windows ARM64 | `AirBridge-windows-arm64.exe` | Linux CI runner | none |
 | Linux x64 (glibc / static) | `AirBridge-linux-x64`, `…-musl` | Linux CI runner | none |
@@ -18,8 +19,11 @@ want the Play Store).
 | Android 8.0+ (API 26) | `AirBridge.apk` | Android CI job (Gradle) | committed sideload key (`android/ci.keystore`) |
 | any OS with Node | `npm run build:desktop` | local / CI | same rules apply |
 
-Every release also carries `SHA256SUMS.txt` — that is the integrity story in
-lieu of paid code-signing certificates.
+Every release also carries `SHA256SUMS.txt` and keyless **Sigstore
+build-provenance attestations** (`gh attestation verify <file> -R DigantaDey/AirBridge`)
+— that is the integrity story in lieu of paid code-signing certificates. The
+desktop self-updater enforces the checksums before installing anything; see
+[desktop-runtime.md](desktop-runtime.md).
 
 ## Why no Apple or Microsoft money is needed
 
@@ -108,8 +112,8 @@ single-file binaries print the same thing from a terminal:
 
 | OS | Install | Autostart |
 |---|---|---|
-| macOS | `install.sh` → `~/.local/bin/AirBridge` + `~/Applications/AirBridge.app` (browser launcher) | `--autostart` → `~/Library/LaunchAgents/com.airbridge.daemon.plist` + `launchctl bootstrap` |
-| Linux | `install.sh` → `~/.local/bin/AirBridge` + `~/Applications/AirBridge.app` (browser launcher) | `--autostart` → `~/.config/autostart/airbridge.desktop` |
+| macOS | `install.sh` → prebuilt `~/Applications/AirBridge.app` (checksum + signature verified) and `~/.local/bin/AirBridge` → symlink to its embedded service; older releases: local `swiftc` build or browser launcher | `--autostart` → `~/Library/LaunchAgents/com.airbridge.app.plist` (the app, `--background`, restarted after crashes); without the native app `com.airbridge.daemon.plist` (`KeepAlive.SuccessfulExit=false`) |
+| Linux | `install.sh` → `~/.local/bin/AirBridge` | `--autostart` → systemd user unit `airbridge.service` (`Restart=on-failure`), else `~/.config/autostart/airbridge.desktop` |
 | Windows | `install.ps1` → `%LOCALAPPDATA%\AirBridge` | `-Autostart` → `HKCU\…\Run` |
 | Android | sideload APK with bundled UI + native engine | foreground connection service after pairing; active transfers do not depend on the screen; no boot auto-start |
 
@@ -129,12 +133,14 @@ A release **must** exist: `install.sh` and `install.ps1` resolve
 2. `.github/workflows/release.yml`:
    * **linux-windows** job: `build-desktop.mjs --only linux` and
      `--only windows --skip-client` (bun cross-compiles from Linux);
-   * **darwin** job: `--only darwin` then `codesign --force -s -`;
+   * **darwin** job: `--only darwin` then `codesign --force -s -`, then
+     `scripts/package-mac-app.sh` for both architectures (prebuilt app zips);
    * **android** job: Node 22 + `npm ci`, then `gradle :engine:check :app:assembleRelease`
      (versionCode = run number). `preBuild` embeds the UI in the APK; engine
      checks cover vectors, pairing, disk integrity and transport regressions;
    * **publish** job: downloads all artifacts, writes `SHA256SUMS.txt`,
-     `gh release create` with every binary + APK.
+     attests build provenance (Sigstore, keyless), `gh release create` with
+     every binary, app zip + APK.
 3. Users run `install.sh` / `install.ps1` or grab files from the release page.
 
 ## Asset names (must stay in sync)
@@ -142,7 +148,8 @@ A release **must** exist: `install.sh` and `install.ps1` resolve
 | Where | Name |
 |---|---|
 | `scripts/build-desktop.mjs` | `AirBridge-darwin-<arch>`, `AirBridge-linux-<arch>[-musl]`, `AirBridge-windows-<arch>.exe` |
-| `install.sh` | requests `AirBridge-<os>-<arch>`, `-musl` only on Linux, then falls back to the GitHub API manifest |
+| `install.sh` | requests `AirBridge-<os>-<arch>`, `-musl` only on Linux, then falls back to the GitHub API manifest; macOS also `AirBridge-macOS-<arch>.zip` |
+| `src/server/updater.ts` (`assetNameFor`) | same names; the macOS app updates from `AirBridge-macOS-<arch>.zip` |
 | `install.ps1` | requests `AirBridge-windows-<arch>.exe` |
 | `src/client/components/DownloadsModal.tsx` | same names as the release assets |
 

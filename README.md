@@ -43,7 +43,7 @@ Installing AirBridge requires **no paid developer accounts, app store logins, or
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.sh | bash
 ```
-> *On macOS, this creates `AirBridge.app` in `~/Applications` and places the executable in `~/.local/bin`.*
+> *On macOS, this installs the prebuilt `AirBridge.app` (menu bar app with native notifications) in `~/Applications` and links the `AirBridge` command in `~/.local/bin`. Add `--autostart` to start at login. Desktop builds update themselves (checksum-verified, one-click restart, automatic rollback) — see [docs/desktop-runtime.md](docs/desktop-runtime.md).*
 
 ### Windows (PowerShell)
 ```powershell
@@ -74,6 +74,21 @@ Download and install `AirBridge.apk` from the [Latest Release](https://github.co
 * **AES-256-GCM Payload Encryption**: Control messages and 256 KiB binary file frames are encrypted on the sender before leaving the device and decrypted only after consent on the receiver.
 * **6-Digit Verification Codes**: SAS (Short Authentication String) derivation lets users visually verify key integrity and prevent man-in-the-middle attacks.
 
+### 🛰️ Pairing & Connectivity Anywhere
+* **Secure Code Exchange (SPAKE2, RFC 9382)**: The pairing code is never transmitted, not even hashed. A wrong guess teaches an eavesdropper or impostor nothing; attempts are rate-limited. The code-holding computer vouches for each device, so paired devices show **Verified** without comparing digits.
+* **Relay Fallback**: When no direct path exists (different networks, client isolation, CGNAT), the phone connects through a self-hostable relay (`airbridge relay`). TLS stays end to end and pinned, so the relay only sees ciphertext. Switches back to direct automatically.
+* **Hotspot Handoff**: Tap **Use this phone's hotspot** and the computer joins the phone's private hotspot for a direct link, after you approve it on the computer. Credentials are sealed to the paired computer and travel over the connection, or over **Bluetooth LE** when there's no connection at all (macOS app).
+* **Crash Reports & Staged Rollouts**: Crashes are recorded locally, scrubbed of personal data, and sent only when you click. Updates reach 10% → 50% → 100% of computers over three days, and a bad release can be paused.
+
+See [Pairing and connectivity](docs/pairing-and-connectivity.md) for the protocols, the threat model and the manual test plan.
+
+### 📞 Your Phone on Your Computer
+* **Contacts**: Search and browse the phone's contacts from the computer, call or save any of them (vCard), and send contacts in either direction. Received contacts open Android's own editor, so AirBridge never needs permission to change your address book.
+* **Calls**: See who's calling, then answer, decline or hang up from the computer, or place calls with the dialer. Call audio stays on the phone or its headset: Android does not let apps carry call audio to a computer. Hanging up needs Android 9 or later.
+* **Screen Sharing**: View the phone's screen live on the computer. Computers can also share a screen or window with each other through the browser's picker. Frames are end-to-end encrypted and adapt to the link. Every session must be approved on the device being shared, and it can be stopped from either side.
+* **Everywhere on the desktop**: Contacts, Calls and Screen buttons in the app's top bar, a **Phone** menu and menu-bar entries in the macOS app, and **Contacts / Calls / Screen Sharing** actions on the Linux app launcher (GNOME, KDE, …). The version is always visible: the top bar, the menu-bar menu, **About AirBridge**, and the launcher.
+* **You stay in control**: Each feature has its own switch and permission in the Android app (**Settings → Phone on your computer**). Only paired, verified devices can use them.
+
 ### 📱 Adaptive Edge-to-Edge Native UI
 * **Dynamic Safe-Area Handling**: Automatically calculates status bar, display cutout, and navigation bar insets, ensuring zero overlap with device status bars.
 * **No Sideways Panning / Webpage Bounce**: Touch-action constraints (`pan-y`) and native overscroll mode (`OVER_SCROLL_NEVER`) eliminate horizontal page sliding for a 100% native app feel.
@@ -91,6 +106,7 @@ Download and install `AirBridge.apk` from the [Latest Release](https://github.co
 | **Direct-to-Disk Chunked Streaming** | **Yes (`.part` Resume Journal)** | ⚠️ Memory Bounded | ⚠️ In-Memory Buffering | ⚠️ Memory Bounded | ❌ In-Memory Assembly | ⚠️ Variable |
 | **SHA-256 Pre-Save Verification** | **Yes (Verified before rename)** | ❌ No | ❌ Post-Transfer | ❌ No | ❌ No | ❌ No |
 | **No Cloud / 100% Offline LAN** | **Yes** | ⚠️ Needs Apple ID | **Yes** | **Yes** | ⚠️ Needs WebRTC STUN | ⚠️ Needs Google Acc |
+| **Contacts, Calls & Screen from the Computer** | **Yes (E2EE, per-feature consent)** | ⚠️ Apple Devices Only | ❌ No | ⚠️ Partial | ❌ No | ❌ No |
 | **CLI / Daemon Execution Mode** | **Yes (`npx airbridge` / Binary)** | ❌ No | ❌ No | ⚠️ Partial | ❌ No | ❌ No |
 
 ---
@@ -141,6 +157,11 @@ AirBridge daemons and CLI sessions can be customized via environment flags:
 | `AIRBRIDGE_HTTPS` | `1` | Enforces TLS/HTTPS (set to `0` behind reverse proxies) |
 | `AIRBRIDGE_TLS_CERT` / `AIRBRIDGE_TLS_KEY` | `null` | Path to custom PEM certificate and private key |
 | `AIRBRIDGE_BACKGROUND_CLIPBOARD` | `1` | Enables/disables the headless encrypted background clipboard peer |
+| `AIRBRIDGE_AUTO_UPDATE` | `1` | Set `0` to disable the desktop self-updater (checks GitHub releases, verifies SHA-256, installs only on request) |
+| `AIRBRIDGE_REVERSE_CONNECT` | `1` | Set `0` to stop the computer from dialling a phone that cannot reach it |
+| `AIRBRIDGE_RELAY` | saved `--relay` value | `host:port` of an AirBridge relay for phones with no direct path (`off` disables it) |
+| `AIRBRIDGE_HANDOFF` | `1` | Set `0` to disable hotspot handoff (also: **Phone hotspots → Never join** in the UI) |
+| `AIRBRIDGE_CRASH_DSN` | unset | Sentry DSN for crash reports you choose to send (otherwise a prefilled GitHub issue opens). Also read from `~/.airbridge/crash-dsn` |
 
 ### Command Line Interface (CLI)
 
@@ -150,6 +171,13 @@ npx airbridge daemon --dir ~/Inbox --reveal
 
 # One-shot terminal file send (generates pairing QR in terminal)
 npx airbridge send ./Presentation.pdf ./Archive.zip
+
+# Open a panel (contacts, calls, screen or settings); reuses a running AirBridge
+AirBridge --open calls
+
+# Run a relay on an always-on box, and point a computer at it
+airbridge relay --listen 0.0.0.0:47391
+airbridge --relay relay.example.com:47391
 ```
 
 ---

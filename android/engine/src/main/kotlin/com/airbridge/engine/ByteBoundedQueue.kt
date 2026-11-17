@@ -39,6 +39,19 @@ internal class ByteBoundedQueue<T>(
         lock.notifyAll()
     }
 
+    /**
+     * Non-blocking admission for droppable traffic (screen frames): succeeds
+     * only while the queue holds at most [budgetBytes] including this item.
+     */
+    fun offer(item: T, budgetBytes: Int): Boolean = synchronized(lock) {
+        val size = sizeOf(item)
+        if (closed || items.size >= maxItems || bytes + size > budgetBytes) return false
+        items.addLast(item)
+        bytes += size
+        lock.notifyAll()
+        true
+    }
+
     fun take(): T? = synchronized(lock) {
         while (!closed && items.isEmpty()) lock.wait()
         val item = items.pollFirst() ?: return null

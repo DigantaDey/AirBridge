@@ -45,7 +45,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.mutableIntStateOf
+import com.airbridge.app.ContinuityPermissions
+import com.airbridge.app.NativeEngineHost
+import com.airbridge.app.Prefs
 import com.airbridge.app.ui.theme.AirBridgeColors
 import com.airbridge.app.ui.viewmodels.AirBridgeAppUiState
 
@@ -231,6 +238,8 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            PhoneContinuityCard()
 
             SettingsCard(title = "Background & Performance") {
                 SwitchRow(
@@ -443,6 +452,74 @@ private fun SwitchRow(
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
+        )
+    }
+}
+
+/**
+ * Contacts, calls and screen sharing for the paired computer. Each toggle asks
+ * for its Android permission when turned on; the computer only sees a feature
+ * once both the toggle and the permission allow it.
+ */
+@Composable
+private fun PhoneContinuityCard() {
+    val context = LocalContext.current
+    val prefs = remember(context) { Prefs(context) }
+    var tick by remember { mutableIntStateOf(0) }
+    fun changed() {
+        tick++
+        NativeEngineHost.instance?.refreshContinuity()
+    }
+    val contactsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { changed() }
+    val callsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { changed() }
+    // Re-read on every recomposition triggered by [tick] (permission results, toggles).
+    @Suppress("UNUSED_VARIABLE") val observe = tick
+    val contactsGranted = ContinuityPermissions.contactsGranted(context)
+    val callsGranted = ContinuityPermissions.callsGranted(context)
+    val callerId = ContinuityPermissions.callerIdGranted(context)
+    val telephony = ContinuityPermissions.hasTelephony(context)
+
+    SettingsCard(title = "Phone on your computer") {
+        SwitchRow(
+            title = "Contacts",
+            subtitle = when {
+                !prefs.contactsOnComputer -> "Browse, search and call your contacts from the computer"
+                contactsGranted -> "Your computer can search your contacts while connected"
+                else -> "Needs contacts permission — tap the switch to allow"
+            },
+            checked = prefs.contactsOnComputer && contactsGranted,
+            onCheckedChange = { on ->
+                prefs.contactsOnComputer = on
+                if (on && !contactsGranted) contactsLauncher.launch(ContinuityPermissions.CONTACTS)
+                changed()
+            },
+        )
+        HorizontalDivider()
+        SwitchRow(
+            title = "Calls",
+            subtitle = when {
+                !telephony -> "This device has no phone service"
+                !prefs.callsFromComputer -> "Answer, decline and place calls from the computer"
+                !callsGranted -> "Needs phone permission — tap the switch to allow"
+                !callerId -> "On. Allow call logs to show who is calling on the computer"
+                else -> "On. Call audio stays on the phone or its headset"
+            },
+            checked = telephony && prefs.callsFromComputer && callsGranted,
+            onCheckedChange = { on ->
+                prefs.callsFromComputer = on
+                if (on && telephony && (!callsGranted || !callerId)) callsLauncher.launch(ContinuityPermissions.CALLS)
+                changed()
+            },
+        )
+        HorizontalDivider()
+        SwitchRow(
+            title = "Screen sharing",
+            subtitle = "Let the computer ask to view this screen. You approve every session",
+            checked = prefs.screenSharing,
+            onCheckedChange = { on ->
+                prefs.screenSharing = on
+                changed()
+            },
         )
     }
 }

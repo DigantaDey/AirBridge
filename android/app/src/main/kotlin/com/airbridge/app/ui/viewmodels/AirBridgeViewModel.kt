@@ -241,6 +241,15 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun startHotspotHandoff() {
+        ConnectionService.currentHost()?.startHotspotHandoff()
+            ?: notifyMessage("Not ready yet. Try again in a moment.")
+    }
+
+    fun stopHotspotHandoff() {
+        ConnectionService.currentHost()?.stopHotspotHandoff()
+    }
+
     fun reconnect() {
         val host = ConnectionService.currentHost()
         if (host != null) {

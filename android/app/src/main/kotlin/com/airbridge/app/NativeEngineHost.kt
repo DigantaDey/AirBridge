@@ -22,6 +22,11 @@ data class PeerUiState(
     val sasCode: String?,
     val fingerprintHex: String?,
     val trusted: Boolean,
+    /**
+     * The computer that knows the pairing code vouched for this device's keys
+     * (no need to compare [sasCode] by hand).
+     */
+    val verified: Boolean = false,
 )
 
 data class NativeEngineUiState(
@@ -46,6 +51,12 @@ data class NativeEngineUiState(
     val transfers: List<TransferView> = emptyList(),
     val clipboardItems: List<ClipboardItem> = emptyList(),
     val trustedKeys: Set<String> = emptySet(),
+    /** No direct path right now: connected through the relay (still end-to-end encrypted). */
+    val viaRelay: Boolean = false,
+    /** The computer rejected the pairing code; reconnecting waits for a new code or QR scan. */
+    val pairingError: String? = null,
+    /** "Use this phone's hotspot" handoff to the paired computer. */
+    val handoff: HandoffUiState = HandoffUiState(),
 )
 
 /**
@@ -102,6 +113,25 @@ class NativeEngineHost(
         ),
     )
     val uiState: StateFlow<NativeEngineUiState> = _uiState.asStateFlow()
+
+    /** Hotspot handoff: starts a local-only hotspot and hands it to the paired computer. */
+    val handoff = HotspotHandoff(
+        context = context,
+        info = { engine?.handoffInfo ?: prefs.handoffInfo },
+        pairCode = { engine?.myPairCode ?: prefs.pairCode },
+        reversePort = { engine?.reversePort },
+        identityKey = { engine?.myIdentityKey ?: "" },
+        deviceName = { prefs.deviceName },
+        sendOverSession = { envelope ->
+            val e = engine
+            e != null && e.currentState == ConnectionState.CONNECTED && e.sendHandoffOffer(envelope)
+        },
+        sendEnd = { id -> engine?.sendHandoffEnd(id) ?: false },
+        onChange = { refresh() },
+    )
+
+    /** Contacts, calls and screen sharing for the paired computer. */
+    private val phoneContinuity = PhoneContinuity(context, prefs)
 
     private var lanUrls = emptyList<String>()
     private val clips = ArrayDeque<ClipboardItem>()
@@ -193,6 +223,11 @@ class NativeEngineHost(
                         initialPairCode = targetPairCode,
                         visibility = prefs.visibility,
                         tlsTrustManager = prefs.tlsTrust(link),
+                        // Long-term identity in the Android Keystore: computers
+                        // pin this phone, not a per-launch session key.
+                        deviceIdentity = KeystoreDeviceIdentity.load(context),
+                        initialRelay = com.airbridge.engine.RelayRoute.deserialize(prefs.relayRoute),
+                        initialHandoff = prefs.handoffInfo,
                         defaultSinkFactory = AndroidFileSinkFactory(context),
                         // Primary + QR alternates + addresses the computer
                         // reported last time; ranked on-link-first per attempt.
@@ -206,6 +241,7 @@ class NativeEngineHost(
                 created.clipboardReceiveEnabled = prefs.receiveClipboard
                 prefs.trustedKeys.forEach { created.setTrusted(it, true) }
                 engine = created
+                phoneContinuity.attach(created.continuity)
                 created.addListener(
                     object : EngineListener {
                         override fun onConnectionState(state: ConnectionState) {
@@ -220,6 +256,13 @@ class NativeEngineHost(
                             connectionProgress = null
                             prefs.peerId = info.peerId
                             prefs.pairCode = info.pairCode
+                            if (info.admission == "pake") {
+                                prefs.relayRoute = created.relayRoute?.serialize()
+                                // Only a verified proof reaches here (Engine checks it).
+                                info.handoff?.let { prefs.handoffInfo = it }
+                                handoff.refreshAvailability()
+                                handoff.onSessionUp()
+                            }
                             synchronized(stateLock) { lanUrls = info.lanUrls }
                             prefs.invitations.learn(info.lanUrls)
                             refresh()
@@ -246,6 +289,13 @@ class NativeEngineHost(
                             refresh()
                         }
 
+                        override fun onRelayConnected(relayHost: String) {
+                            if (closed) return
+                            connectionProgress = "No direct path to the computer. Connecting through the relay ($relayHost), still end-to-end encrypted…"
+                            Log.i(TAG, "Connected via relay $relayHost")
+                            refresh()
+                        }
+
                         override fun onLanUrlsChanged(lanUrls: List<String>) {
                             if (closed) return
                             synchronized(stateLock) { this@NativeEngineHost.lanUrls = lanUrls }
@@ -268,7 +318,20 @@ class NativeEngineHost(
                         }
 
                         override fun onPeersChanged(peers: List<Peer>) {
+                            phoneContinuity.onPeersChanged()
                             refresh()
+                        }
+
+                        override fun onContactsReceived(item: ContactShareItem) {
+                            if (!closed) phoneContinuity.onContactsReceived(item)
+                        }
+
+                        override fun onScreenShareRequest(request: ScreenShareRequest) {
+                            if (!closed) phoneContinuity.onScreenShareRequest(request)
+                        }
+
+                        override fun onScreenShareEnded(sessionId: String, reason: String) {
+                            phoneContinuity.onScreenShareEnded(sessionId)
                         }
 
                         override fun onIncomingOffer(transfer: TransferView) {
@@ -291,6 +354,11 @@ class NativeEngineHost(
                             if (prefs.notificationSharing) {
                                 ConnectionService.postSharedNotification(context, item.title, item.body, item.appName)
                             }
+                        }
+
+                        override fun onHandoffStatus(id: String, state: com.airbridge.engine.Handoff.State, reason: String) {
+                            if (closed) return
+                            handoff.onSessionStatus(id, state, reason)
                         }
 
                         override fun onError(code: String, message: String) {
@@ -393,7 +461,8 @@ class NativeEngineHost(
                 connectedAt = peer.connectedAt,
                 sasCode = current.sasCodeFor(peer.peerId),
                 fingerprintHex = current.fingerprintFor(peer.peerId),
-                trusted = trusted.contains(peer.device.publicKey),
+                trusted = current.isTrustedPeer(peer),
+                verified = peer.verified,
             )
         }
         val transfers = current.transfersSnapshot().sortedByDescending { it.startedAt }
@@ -424,6 +493,9 @@ class NativeEngineHost(
             transfers = transfers,
             clipboardItems = clipSnapshot,
             trustedKeys = trusted,
+            viaRelay = current.connectedViaRelay,
+            pairingError = current.pairingError,
+            handoff = handoff.state,
         )
         _uiState.value = next
         onState(next)
@@ -534,8 +606,34 @@ class NativeEngineHost(
         engine?.reconnect()
     }
 
+    /** The engine's continuity channel (null until the engine started). */
+    fun continuityChannel(): ContinuityChannel? = engine?.continuity
+
+    /** Permissions or Settings toggles changed: re-advertise features to the computer. */
+    fun refreshContinuity() = phoneContinuity.refresh()
+
+    /**
+     * Sends contact cards to every verified computer; returns their names.
+     * Fails with a user-facing message when no computer can take them.
+     */
+    fun shareContacts(cards: List<ContactCard>): Result<String> = submitSync { current ->
+        val targets = current.peersSnapshot().filter { p ->
+            p.discoveryScope == "paired" && (p.verified || current.isTrustedPeer(p)) &&
+                current.continuity.peerFeatures(p.peerId).let { it.isEmpty() || Continuity.FEATURE_CONTACTS_RECEIVE in it }
+        }
+        require(targets.isNotEmpty()) { "Connect to a verified computer first" }
+        targets.forEach { current.continuity.shareContacts(it.peerId, cards) }
+        targets.joinToString { it.device.name }
+    }
+
+    fun startHotspotHandoff() = handoff.start()
+
+    fun stopHotspotHandoff() = handoff.stop()
+
     override fun close() {
+        handoff.shutdown()
         closed = true
+        phoneContinuity.detach()
         reverseAdvertiser.stop()
         runCatching { serverDiscovery.stop() }
         if (instance === this) instance = null

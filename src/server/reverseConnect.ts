@@ -318,6 +318,17 @@ export class ReverseConnector {
     this.timer = null;
   }
 
+  /** Diagnostics: per-target dial state. */
+  describe(): { target: string; failures: number; live: boolean; nextInSeconds: number }[] {
+    const now = this.now();
+    return [...this.state.entries()].map(([target, st]) => ({
+      target,
+      failures: st.failures,
+      live: st.live,
+      nextInSeconds: Math.max(0, Math.round((st.nextAt - now) / 1000)),
+    }));
+  }
+
   /** Forget backoff (network changed: old failures say nothing about the new network). */
   reset(): void {
     for (const s of this.state.values()) {

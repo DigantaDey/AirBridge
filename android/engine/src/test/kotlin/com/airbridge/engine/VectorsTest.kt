@@ -216,12 +216,232 @@ fun main(args: Array<String>) {
             "got ${Base64Url.encode(key)} want ${o.optStr("keyB64")}")
     }
 
+    // ---------------------------------------------------------------- SPAKE2
+    root.optArr("spake2")!!.items.forEach { v ->
+        val o = v.asObj()
+        val name = o.optStr("name")!!
+        val w = java.math.BigInteger(o.optStr("wHex")!!, 16)
+        val x = java.math.BigInteger(o.optStr("xHex")!!, 16)
+        val y = java.math.BigInteger(o.optStr("yHex")!!, 16)
+        val idA = Base64Url.decode(o.optStr("idAB64")!!)
+        val idB = Base64Url.decode(o.optStr("idBB64")!!)
+        val aad = Base64Url.decode(o.optStr("aadB64") ?: "")
+        val a = Spake2(Spake2.Role.A, w, idA, idB, aad, x)
+        val b = Spake2(Spake2.Role.B, w, idA, idB, aad, y)
+        check("spake2[$name].pA", a.share().toHex() == o.optStr("pAHex"), a.share().toHex())
+        check("spake2[$name].pB", b.share().toHex() == o.optStr("pBHex"), b.share().toHex())
+        val ra = a.finish(hexToBytes(o.optStr("pBHex")!!))
+        val rb = b.finish(hexToBytes(o.optStr("pAHex")!!))
+        check("spake2[$name].ke", ra.ke.toHex() == o.optStr("keHex") && rb.ke.toHex() == o.optStr("keHex"), ra.ke.toHex())
+        check("spake2[$name].confirmA", ra.confirm.toHex() == o.optStr("confirmAHex"), ra.confirm.toHex())
+        check("spake2[$name].confirmB", rb.confirm.toHex() == o.optStr("confirmBHex"), rb.confirm.toHex())
+        check("spake2[$name].cross", Spake2.constantTimeEquals(ra.expectedPeerConfirm, rb.confirm))
+        o.optStr("code")?.let { code ->
+            check("spake2[$name].w-from-code", PairingProof.passwordScalar(code) == w)
+        }
+    }
+    run {
+        // Wrong password: confirmations disagree; malformed shares are rejected.
+        val idA = "a".toByteArray(); val idB = "b".toByteArray()
+        val a = Spake2(Spake2.Role.A, PairingProof.passwordScalar("K7Q2XP"), idA, idB)
+        val b = Spake2(Spake2.Role.B, PairingProof.passwordScalar("K7Q2XQ"), idA, idB)
+        val ra = a.finish(b.share()); val rb = b.finish(a.share())
+        check("spake2.wrong-code", !Spake2.constantTimeEquals(ra.expectedPeerConfirm, rb.confirm))
+        val bad = Spake2(Spake2.Role.A, java.math.BigInteger.TEN, idA, idB)
+        check("spake2.reject-zero-share", runCatching { bad.finish(ByteArray(65).also { it[0] = 4 }) }.isFailure)
+        val twice = Spake2(Spake2.Role.A, java.math.BigInteger.TEN, idA, idB)
+        twice.finish(Spake2(Spake2.Role.B, java.math.BigInteger.TEN, idA, idB).share())
+        check("spake2.single-use", runCatching { twice.finish(a.share()) }.isFailure)
+    }
+
+    // ---------------------------------------------------------------- pairing proof
+    root.optArr("pairingProof")!!.items.forEach { v ->
+        val o = v.asObj()
+        val code = o.optStr("code")!!
+        check("nameplate[$code]", PairingProof.nameplateFor(code) == o.optStr("nameplate"), PairingProof.nameplateFor(code))
+        check("w[$code]", P256.to32(PairingProof.passwordScalar(code)).toHex() == o.optStr("wHex"))
+    }
+    root.optArr("vouches")!!.items.forEachIndexed { i, v ->
+        val o = v.asObj()
+        val vk = PairingProof.vouchKeyFrom(hexToBytes(o.optStr("keHex")!!))
+        check("vouch[$i].key", Base64Url.encode(vk) == o.optStr("vouchKeyB64"))
+        val vouch = PairingProof.peerVouch(vk, o.optStr("peerId")!!, o.optStr("publicKey")!!, o.optStr("identityKey"), o.optStr("attestation")!!)
+        check("vouch[$i].mac", vouch == o.optStr("vouch"), vouch)
+        check("vouch[$i].verify", PairingProof.verifyPeerVouch(vk, o.optStr("peerId")!!, o.optStr("publicKey")!!, o.optStr("identityKey"), o.optStr("attestation")!!, o.optStr("vouch")))
+        check("vouch[$i].attestation-bound", !PairingProof.verifyPeerVouch(vk, o.optStr("peerId")!!, o.optStr("publicKey")!!, o.optStr("identityKey"), "legacy", o.optStr("vouch")))
+    }
+    root.optArr("hubProofs")!!.items.forEachIndexed { i, v ->
+        val o = v.asObj()
+        val vk = PairingProof.vouchKeyFrom(hexToBytes(o.optStr("keHex")!!))
+        val proof = PairingProof.hubProof(vk, o.optStr("peerId")!!, o.optStr("pairCode")!!, o.optStr("tlsPin"))
+        check("hubProof[$i]", proof == o.optStr("proof"), proof)
+        check("hubProof[$i].pin-bound", !PairingProof.verifyHubProof(vk, o.optStr("peerId")!!, o.optStr("pairCode")!!, "other", o.optStr("proof")))
+    }
+    // ---------------------------------------------------------------- hotspot handoff
+    root.optArr("handoff")!!.items.forEach { v ->
+        val o = v.asObj()
+        val key = o.optStr("keyB64")!!
+        val beacon = o.optStr("beaconB64")!!
+        val p = o.optObj("proof")!!
+        val vk = Base64Url.decode(p.optStr("vouchKeyB64")!!)
+        val peerId = p.optStr("peerId")!!
+        check("handoff.proof", PairingProof.handoffProof(vk, peerId, key, beacon) == p.optStr("value"))
+        val info = Handoff.Info(key, beacon, p.optStr("value")!!)
+        check("handoff.proof.verify", Handoff.verifyInfo(vk, peerId, info))
+        check("handoff.proof.peer-bound", !Handoff.verifyInfo(vk, "fedcba9876543210", info))
+        check("handoff.proof.key-bound", !Handoff.verifyInfo(vk, peerId, info.copy(key = AirCrypto.generateIdentityKeyPair().publicKeyB64)))
+        check("handoff.info.json", Handoff.Info.parse(info.toJson()) == info)
+        o.optArr("authKeys")!!.items.forEach { a ->
+            val code = a.optStr("code")!!
+            check("handoff.authKey[$code]", Base64Url.encode(Handoff.authKey(code)) == a.optStr("keyB64"))
+        }
+        o.optArr("tags")!!.items.forEachIndexed { i, t ->
+            val now = t.optLong("now")!!
+            val tag = Base64Url.decode(t.optStr("tagB64")!!)
+            check("handoff.tag[$i]", Handoff.beaconTag(Base64Url.decode(beacon), now).contentEquals(tag))
+            check("handoff.tag[$i].matches", Handoff.matchesTag(beacon, tag, now))
+            check("handoff.tag[$i].skew", Handoff.matchesTag(beacon, tag, now + Handoff.BEACON_WINDOW_MS))
+            check("handoff.tag[$i].stale", !Handoff.matchesTag(beacon, tag, now + 3 * Handoff.BEACON_WINDOW_MS))
+            check("handoff.tag[$i].other-computer", !Handoff.matchesTag(Base64Url.encode(ByteArray(16) { 9 }), tag, now))
+        }
+        o.optArr("seals")!!.items.forEachIndexed { i, sv ->
+            val so = sv.asObj()
+            val off = so.optObj("offer")!!
+            val offer = Handoff.Offer(
+                ssid = off.optStr("ssid")!!,
+                psk = off.optStr("psk")!!,
+                security = Handoff.Security.values().first { it.wire == off.optStr("sec") },
+                reversePort = off.optInt("rp")!!,
+                identityKey = off.optStr("id")!!,
+                deviceName = off.optStr("name")!!,
+            )
+            val sealed = Handoff.seal(
+                key, so.optStr("code")!!, offer,
+                ephemeralPrivate = java.math.BigInteger(so.optStr("ephemeralHex")!!, 16),
+                iv = Base64Url.decode(so.optStr("ivB64")!!),
+                nonce = Base64Url.decode(so.optStr("nonceB64")!!),
+                issuedAt = so.optLong("issuedAt")!!,
+            )
+            check("handoff.seal[$i]", Base64Url.encode(sealed) == so.optStr("envelopeB64"), Base64Url.encode(sealed).take(40))
+            val random = Handoff.seal(key, so.optStr("code")!!, offer)
+            check("handoff.seal[$i].randomized", random.size == sealed.size && !random.contentEquals(sealed) && random[0] == 1.toByte())
+        }
+        val rejects = listOf(
+            Handoff.Offer("x".repeat(33), "password1", Handoff.Security.WPA2, 47390, "", "P"),
+            Handoff.Offer("ok", "short", Handoff.Security.WPA2, 47390, "", "P"),
+            Handoff.Offer("bad\nname", "password1", Handoff.Security.WPA2, 47390, "", "P"),
+        )
+        rejects.forEachIndexed { i, r -> check("handoff.validate.reject[$i]", runCatching { Handoff.validate(r) }.isFailure) }
+        check("handoff.status.parse", Handoff.parseBleStatus("{\"s\":\"joined\",\"r\":\"Joined X\"}".toByteArray()) == (Handoff.State.JOINED to "Joined X"))
+        check("handoff.status.junk", Handoff.parseBleStatus("nope".toByteArray()) == null)
+    }
+    root.optArr("identityBindings")!!.items.forEachIndexed { i, v ->
+        val o = v.asObj()
+        val ok = PairingProof.verifyIdentityBinding(o.optStr("identityKey")!!, o.optStr("sig")!!, o.optStr("sessionKey")!!)
+        check("identityBinding[$i]", ok == (o.optBool("valid") == true), "got $ok")
+    }
+    run {
+        val dir = java.nio.file.Files.createTempDirectory("airbridge-id").toFile()
+        val file = java.io.File(dir, "identity")
+        val first = SoftwareDeviceIdentity(file)
+        val again = SoftwareDeviceIdentity(file)
+        check("identity.persistent", first.persistent && again.persistent && first.publicKeyB64 == again.publicKeyB64)
+        val session = AirCrypto.generateIdentityKeyPair().publicKeyB64
+        val sig = again.signBinding(session)
+        check("identity.kotlin-signed-verifies", PairingProof.verifyIdentityBinding(first.publicKeyB64, sig, session))
+        check("identity.der-roundtrip", EcdsaSignatures.derToRaw(EcdsaSignatures.rawToDer(Base64Url.decode(sig))).contentEquals(Base64Url.decode(sig)))
+        check("identity.memory-not-persistent", !SoftwareDeviceIdentity(null).persistent)
+        dir.deleteRecursively()
+    }
+    root.optArr("sessionsV2")!!.items.forEachIndexed { i, v ->
+        val o = v.asObj()
+        val priv = AirCrypto.importPrivateKey(Base64Url.decode(o.optStr("pkcs8")!!))
+        val session = AirCrypto.derivePeerSession(priv, o.optStr("pubA")!!, o.optStr("pubB")!!, o.optStr("idMine")!! to o.optStr("idPeer")!!)
+        check("sessionV2[$i].sas", session.sasCode == o.optStr("sas"), "got ${session.sasCode} want ${o.optStr("sas")}")
+        check("sessionV2[$i].fingerprint", session.fingerprintHex == o.optStr("fingerprint"))
+        val swapped = AirCrypto.derivePeerSession(priv, o.optStr("pubA")!!, o.optStr("pubB")!!, o.optStr("idPeer")!! to o.optStr("idMine")!!)
+        check("sessionV2[$i].symmetric", swapped.sasCode == session.sasCode)
+    }
+    check("relayRoute.parse", RelayRoute.parse("relay.example.com:4740", "a".repeat(64)) == RelayRoute("relay.example.com", 4740, "a".repeat(64)) &&
+        RelayRoute.parse("[2001:db8::1]:4740", "b".repeat(64))?.host == "2001:db8::1" &&
+        RelayRoute.parse("relay:0", "a".repeat(64)) == null && RelayRoute.parse("relay:1", "xyz") == null)
+
+    // ------------------------------------------------------- phone continuity
+    root.optArr("continuity")?.items?.forEach { cv ->
+        val c = cv.asObj()
+        fun cardFrom(o: JsonValue.Obj) = ContactCard(
+            name = o.optStr("name")!!,
+            phones = o.optArr("phones")!!.items.map { ContactPhone(it.asObj().optStr("number")!!, it.asObj().optStr("label")) },
+            emails = o.optArr("emails")!!.items.map { ContactEmail(it.asObj().optStr("address")!!, it.asObj().optStr("label")) },
+            organization = o.optStr("organization"),
+            note = o.optStr("note"),
+            id = o.optStr("id"),
+            starred = o.optBool("starred") == true,
+        )
+        c.optArr("vcards")!!.items.forEachIndexed { i, v ->
+            val o = v.asObj()
+            val cards = o.optArr("cards")!!.items.map { cardFrom(it.asObj()) }
+            val built = VCard.buildAll(cards)
+            check("continuity.vcard.build[$i]", built == o.optStr("vcard"), "got ${built.replace("\r\n", "|")}")
+            check("continuity.vcard.roundtrip[$i]", VCard.parse(built).map { it.name } == cards.map { it.name.trim() })
+        }
+        c.optArr("parses")!!.items.forEachIndexed { i, v ->
+            val o = v.asObj()
+            val want = o.optArr("cards")!!.items.map { cardFrom(it.asObj()) }
+            val got = VCard.parse(o.optStr("text")!!)
+            check("continuity.vcard.parse[$i]", got == want, "got $got want $want")
+        }
+        c.optArr("phones")!!.items.forEachIndexed { i, v ->
+            val o = v.asObj()
+            val input = o.optStr("input")!!
+            check("continuity.phone.sanitize[$i]", Continuity.sanitizePhoneNumber(input) == o.optStr("sanitized"), "got ${Continuity.sanitizePhoneNumber(input)}")
+            check("continuity.phone.dial[$i]", Continuity.dialableNumber(input) == o.optStr("dialable"), "got ${Continuity.dialableNumber(input)}")
+        }
+        c.optArr("calls")!!.items.forEachIndexed { i, v ->
+            val o = v.asObj()
+            val got = Continuity.sanitizeCall(o.optObj("input")!!, 0)
+            val want = o.optObj("sanitized")?.let { w ->
+                CallInfo(
+                    callId = w.optStr("callId")!!, state = w.optStr("state")!!, direction = w.optStr("direction")!!,
+                    number = w.optStr("number"), name = w.optStr("name"), connectedAt = w.optLong("connectedAt"),
+                    updatedAt = w.optLong("updatedAt")!!, actions = w.optArr("actions")!!.items.map { it.asString() },
+                    audioRoute = w.optStr("audioRoute"),
+                )
+            }
+            check("continuity.call[$i]", got == want, "got $got want $want")
+        }
+        c.optArr("quality")!!.items.forEachIndexed { i, v ->
+            val o = v.asObj()
+            val got = Continuity.nextQuality(o["q"]!!.asDouble(), o.optLong("rtt")!!)
+            check("continuity.quality[$i]", Math.abs(got - o["next"]!!.asDouble()) < 1e-9, "got $got")
+        }
+        c.optArr("frames")!!.items.forEachIndexed { i, v ->
+            val o = v.asObj()
+            val key = javax.crypto.spec.SecretKeySpec(hexToBytes(o.optStr("keyHex")!!), "AES")
+            val aad = Continuity.encodeScreenAad(o.optStr("sessionId")!!, o.optLong("seq")!!, o.optInt("codec")!!, o.optInt("width")!!, o.optInt("height")!!)
+            check("continuity.frame.aad[$i]", aad.toHex() == o.optStr("aadHex"))
+            val plain = hexToBytes(o.optStr("plainHex")!!)
+            val (iv, ct) = AirCrypto.encryptMediaFrame(key, aad, plain, hexToBytes(o.optStr("ivHex")!!))
+            val frame = Continuity.encodeScreenFrame(aad, iv, ct)
+            check("continuity.frame.seal[$i]", frame.toHex() == o.optStr("frameHex"))
+            val decoded = Continuity.decodeScreenFrame(hexToBytes(o.optStr("frameHex")!!))
+            check("continuity.frame.decode[$i]", decoded.sessionId == o.optStr("sessionId") && decoded.seq == o.optLong("seq") &&
+                decoded.width == o.optInt("width") && decoded.height == o.optInt("height") && decoded.codec == o.optInt("codec"))
+            check("continuity.frame.open[$i]", AirCrypto.decryptMediaFrame(key, decoded.aad, decoded.iv, decoded.ciphertext).contentEquals(plain))
+            val forged = hexToBytes(o.optStr("frameHex")!!).also { it[20] = (it[20].toInt() xor 1).toByte() }
+            val f = Continuity.decodeScreenFrame(forged)
+            check("continuity.frame.tamper[$i]", runCatching { AirCrypto.decryptMediaFrame(key, f.aad, f.iv, f.ciphertext) }.isFailure)
+        }
+    }
+
     if (failed > 0) {
         println("VECTORS: $failed FAILED, $passed passed")
         exitProcess(1)
     }
     println("VECTORS: ALL PASS ($passed checks)")
 }
+
+private fun ByteArray.toHex(): String = joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
 
 private fun hexToBytes(hex: String): ByteArray {
     val out = ByteArray(hex.length / 2)

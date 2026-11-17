@@ -110,7 +110,8 @@ object AirCrypto {
 
     /** HKDF-SHA256 (RFC 5869) extract+expand. */
     fun hkdfSha256(ikm: ByteArray, salt: ByteArray, info: ByteArray, length: Int): ByteArray {
-        val prk = hmacSha256(salt, ikm)
+        // RFC 5869: an absent salt is HashLen zero bytes (JCA rejects empty keys).
+        val prk = hmacSha256(if (salt.isEmpty()) ByteArray(32) else salt, ikm)
         val out = ByteArray(length)
         var tPrev = ByteArray(0)
         var offset = 0
@@ -126,7 +127,7 @@ object AirCrypto {
         return out
     }
 
-    private fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
+    fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
         val mac = javax.crypto.Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(key, "HmacSHA256"))
         return mac.doFinal(data)
@@ -146,6 +147,8 @@ object AirCrypto {
         myPrivate: PrivateKey,
         myPublicKeyB64: String,
         peerPublicKeyB64: String,
+        /** Both devices' proven identity keys → stable v2 verification code. */
+        identities: Pair<String, String>? = null,
     ): PeerCryptoSession {
         val peerPub = importRawPublicKeyB64(peerPublicKeyB64)
 
@@ -159,7 +162,12 @@ object AirCrypto {
         val rawKey = hkdfSha256(sharedSecret, saltDigest, HKDF_INFO.toByteArray(Charsets.UTF_8), 32)
         val aesKey = SecretKeySpec(rawKey, "AES")
 
-        val sasDigest = sha256((SAS_CONTEXT + sortedPubs).toByteArray(Charsets.UTF_8))
+        val sasInput = if (identities != null) {
+            "airbridge-sas-v2:" + listOf(identities.first, identities.second).sorted().joinToString(":")
+        } else {
+            SAS_CONTEXT + sortedPubs
+        }
+        val sasDigest = sha256(sasInput.toByteArray(Charsets.UTF_8))
         val sixDigits = ((u32Be(sasDigest, 0) % 1_000_000L).toString()).padStart(6, '0')
         val sasCode = sixDigits.substring(0, 3) + " · " + sixDigits.substring(3, 6)
 
@@ -241,6 +249,32 @@ object AirCrypto {
         offset: Int = 0,
         length: Int = ciphertext.size,
     ): ByteArray = aesGcm(aesKey, iv, ciphertext, encrypt = false, offset = offset, length = length)
+
+    /**
+     * Screen-share frame seal: AES-256-GCM under the session key with the frame
+     * header as additional data (see continuity.ts / Continuity.kt). File chunks
+     * carry no AAD, so neither can be replayed as the other.
+     */
+    fun encryptMediaFrame(aesKey: SecretKeySpec, aad: ByteArray, plaintext: ByteArray, fixedIv: ByteArray? = null): Pair<ByteArray, ByteArray> {
+        val iv = fixedIv?.copyOf() ?: ByteArray(Frames.GCM_IV_LENGTH).also { random.nextBytes(it) }
+        require(iv.size == Frames.GCM_IV_LENGTH) { "Invalid IV length" }
+        return iv to aesGcmAad(aesKey, iv, aad, plaintext, 0, plaintext.size, encrypt = true)
+    }
+
+    fun decryptMediaFrame(aesKey: SecretKeySpec, aad: ByteArray, iv: ByteArray, ciphertext: ByteArray, offset: Int = 0, length: Int = ciphertext.size): ByteArray =
+        aesGcmAad(aesKey, iv, aad, ciphertext, offset, length, encrypt = false)
+
+    private fun aesGcmAad(key: SecretKeySpec, iv: ByteArray, aad: ByteArray, data: ByteArray, offset: Int, length: Int, encrypt: Boolean): ByteArray {
+        val cipher = ciphers.get()!!
+        return try {
+            cipher.init(if (encrypt) Cipher.ENCRYPT_MODE else Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
+            cipher.updateAAD(aad)
+            cipher.doFinal(data, offset, length)
+        } catch (e: Exception) {
+            ciphers.remove()
+            throw e
+        }
+    }
 
     private fun aesGcm(
         key: SecretKeySpec,

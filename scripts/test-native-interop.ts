@@ -1,5 +1,6 @@
 /** Run the real Android JVM engine against the desktop implementation, no UI. */
 import { spawn, type ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -167,6 +168,113 @@ try {
     } finally {
       for (const child of children) child.kill('SIGKILL');
       await server.close();
+    }
+  }
+
+  // Secure code exchange + relay fallback: the Kotlin phone proves the code
+  // with SPAKE2 (never sends it), checks the hub's proof over the TLS pin,
+  // then reaches the computer through a relay when the direct path is
+  // blocked, and moves back once it returns. The desktop checks its side.
+  {
+    const dir = path.join(base, 'pake');
+    const { mkdir, readFile: read } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const { startRelayServer } = await import('../src/server/relay.js');
+    const { chainAnchorPinSha256 } = await import('../src/server/tls.js');
+    const { WarpClient } = await import('../src/client/engine/warpClient.js');
+    const relay = await startRelayServer({ port: 0, host: '127.0.0.1' });
+    const joins: string[] = [];
+    const server = await createAirBridgeServer({
+      port: 0, host: '::', mode: 'test', enableMdns: false,
+      https: true, tlsDir: path.join(base, 'pake-certs'), hostClipboard: false,
+      // Only 127.0.0.1 is "this computer"; the phone dials [::1] and must
+      // prove the code like any device on the network.
+      isLocalMachineAddress: (a) => (a ?? '').replace(/^::ffff:/, '') === '127.0.0.1',
+      relay: { endpoint: `127.0.0.1:${relay.port}`, hostKeyFile: path.join(dir, 'relay-host-key') },
+      // Hotspot handoff with a recording Wi-Fi joiner (no real network change in CI).
+      handoff: {
+        stateDir: dir,
+        joiner: {
+          platform: 'linux',
+          unsupportedReason: async () => null,
+          join: async (c) => { joins.push(`join ${c.ssid} ${c.security}`); return { device: 'wlan0', address: '192.168.49.20', previous: 'Home' }; },
+          leave: async (ssid) => { joins.push(`leave ${ssid}`); return 'Home'; },
+        },
+      },
+    });
+    const clips: string[] = [];
+    // The desktop peer runs on the hub computer: plain ws:// over loopback
+    // (the listener serves both), exactly like the local UI.
+    const mac = new WarpClient({
+      wsUrl: `ws://127.0.0.1:${server.port}/ws`,
+      enableWebRtc: false,
+      storage: null,
+      identityStore: null,
+      deviceOverride: { name: 'MacBook', platform: 'macos', model: 'MacBook', formFactor: 'laptop' },
+      onIncomingClipboard: (item) => clips.push(item.text ?? ''),
+    });
+    console.log('\n=== Secure code exchange + relay fallback (Kotlin phone ↔ desktop) ===');
+    const started = performance.now();
+    try {
+      await mac.start();
+      const waitFor = async (pred: () => boolean, label: string, ms = 60_000) => {
+        const deadline = Date.now() + ms;
+        while (!pred()) {
+          if (Date.now() > deadline) throw new Error(`timed out: ${label}`);
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      };
+      await waitFor(() => Boolean(mac.getSnapshot().pairCode) && mac.getSnapshot().connectionState === 'connected', 'desktop connected');
+      const code = mac.getSnapshot().pairCode;
+      const pin = chainAnchorPinSha256(server.tls!.cert) ?? '';
+      if (!pin) throw new Error('server has no TLS pin');
+      const phone = run(java, ['-Xmx128m', '-cp', classpath, 'com.airbridge.engine.PakeInteropKt',
+        `wss://[::1]:${server.port}/ws`, code, pin, dir], 'PAKE phone');
+      const desktop = (async () => {
+        await waitFor(() => fs.existsSync(path.join(dir, 'kotlin-ready')), 'kotlin ready', 90_000);
+        const k = JSON.parse(await read(path.join(dir, 'kotlin-result.json'), 'utf8')) as { sas: string; identityKey: string; macIdentity: string };
+        const snap = mac.getSnapshot();
+        const p = snap.peers.find((x) => x.device?.platform === 'android');
+        if (!p) throw new Error('desktop does not see the phone');
+        const sec = snap.peerSecurity[p.peerId];
+        if (sec.verification !== 'verified') throw new Error(`phone not verified on the desktop (${sec.verification})`);
+        if (sec.identityKey !== k.identityKey) throw new Error('desktop sees a different phone identity');
+        if (sec.sasCode !== k.sas) throw new Error(`SAS mismatch: desktop ${sec.sasCode} vs phone ${k.sas}`);
+        console.log(`  ok: desktop verified the phone (identity match, SAS ${sec.sasCode})`);
+        await writeFile(path.join(dir, 'desktop-ok'), '1');
+        await waitFor(() => clips.includes('hello-through-the-relay-31337'), 'relayed clipboard', 90_000);
+        const viaRelay = (server.hub as unknown as { clients: Map<string, { device: { platform: string }; remoteAddress: string; isLoopback: boolean }> }).clients;
+        const relayed = [...viaRelay.values()].find((c) => c.device.platform === 'android');
+        if (!relayed || relayed.isLoopback) throw new Error('relayed phone was treated as this machine');
+        console.log(`  ok: E2EE clipboard arrived through the relay (relay saw ${relay.stats().bytes} bytes of ciphertext)`);
+        await writeFile(path.join(dir, 'desktop-relay-ok'), '1');
+
+        // Hotspot handoff: the phone's offer shows up on this computer; the user allows it.
+        const api = `http://127.0.0.1:${server.port}/api/handoff`;
+        let pendingId = '';
+        const deadline = Date.now() + 30_000;
+        while (!pendingId && Date.now() < deadline) {
+          const list = await (await fetch(api)).json() as { offers: Array<{ id: string; state: string; deviceName: string; ssid: string }> };
+          const o = list.offers.find((x) => x.state === 'pending');
+          if (o) {
+            if (o.deviceName !== 'Pixel (Kotlin)' || o.ssid !== 'AndroidShare_4821') throw new Error(`unexpected handoff request ${JSON.stringify(o)}`);
+            pendingId = o.id;
+          } else await new Promise((r) => setTimeout(r, 100));
+        }
+        if (!pendingId) throw new Error('handoff request never reached the computer');
+        await fetch(`${api}/${pendingId}/respond`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"allow":true}' });
+        await waitFor(() => joins.includes('leave AndroidShare_4821'), 'left the hotspot', 30_000);
+        if (joins[0] !== 'join AndroidShare_4821 wpa2-wpa3' || joins.filter((j) => j.startsWith('join')).length !== 1) throw new Error(`unexpected joins ${joins.join(', ')}`);
+        console.log(`  ok: Kotlin-sealed hotspot offer opened, allowed, joined once and left (${joins.join(' → ')})`);
+        await writeFile(path.join(dir, 'desktop-handoff-ok'), '1');
+      })();
+      await Promise.all([phone, desktop]);
+      console.log(`Secure code exchange + relay passed in ${((performance.now() - started) / 1000).toFixed(2)}s.`);
+    } finally {
+      mac.stop();
+      for (const child of children) child.kill('SIGKILL');
+      await server.close();
+      await relay.close();
     }
   }
 } finally {

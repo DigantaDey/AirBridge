@@ -474,5 +474,5 @@ describe("high-throughput transfer pipeline", () => {
     } finally {
       pair.stop();
     }
-  });
+  }, 30_000); // 16 MiB of real AES-GCM on a shared CI runner: the 5 s default is too tight, and a timed-out run keeps hogging the CPU for the next tests
 });

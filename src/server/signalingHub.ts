@@ -3,8 +3,12 @@ import type { IncomingMessage } from 'node:http';
 import os from 'node:os';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
+  type Admission,
   type ClientToServerMessage,
   type DeviceProfile,
+  type HandoffInfo,
+  type PakeHello,
+  type RelayOffer,
   type LanEndpoint,
   type HostFirewallStatus,
   type LocalDaemonStatus,
@@ -19,9 +23,23 @@ import {
   overwriteRoutedSourcePeerId,
   unwrapRoutedRelayFrame,
 } from '../shared/protocol.js';
+import {
+  HUB_SPAKE2_IDENTITY,
+  JOIN_PROTOCOL_VERSION,
+  JOIN_SPAKE2_AAD,
+  hubProof,
+  identityBindingMessage,
+  joinerSpake2Identity,
+  nameplateFor,
+  passwordScalar,
+  peerVouch,
+  vouchKeyFrom,
+} from '../shared/pairingProof.js';
+import { Spake2, constantTimeEqual, type Spake2Result } from '../shared/spake2.js';
 import { HostClipboardMonitor, type HostClipboardProvider } from './hostClipboard.js';
 import { isLoopbackAddress } from './tls.js';
 import { isReversePeer } from './reverseConnect.js';
+import { isRelayedPeer } from './relay.js';
 
 interface ConnectedClient {
   peerId: string;
@@ -36,6 +54,64 @@ interface ConnectedClient {
   joinPairAttempts: number[];
   /** Normalized IPv4 of the peer socket (dialled-in phones included). */
   remoteAddress: string;
+  admission: Admission;
+  /** SPAKE2-derived key used to vouch for peers this client sees (admission 'pake' only). */
+  vouchKey?: Uint8Array;
+  /** Recent handoff-offer times (rate limit). */
+  handoffAttempts?: number[];
+}
+
+interface PendingPake {
+  hello: Extract<ClientToServerMessage, { type: 'hello' }>;
+  device: DeviceProfile;
+  room: string;
+  /** No room matched the nameplate: the exchange runs against a random code and always fails. */
+  decoy: boolean;
+  result: Spake2Result;
+}
+
+/** Sliding-window failure counter (per remote address and global). */
+export class PakeFailureLimiter {
+  private readonly perAddress = new Map<string, number[]>();
+  private global: number[] = [];
+  constructor(
+    private readonly windowMs = 5 * 60_000,
+    private readonly maxPerAddress = 8,
+    private readonly maxGlobal = 60,
+    private readonly now: () => number = Date.now,
+  ) {}
+  private prune(list: number[]): number[] {
+    const cutoff = this.now() - this.windowMs;
+    return list.filter((t) => t > cutoff);
+  }
+  allows(address: string): boolean {
+    this.global = this.prune(this.global);
+    const mine = this.prune(this.perAddress.get(address) ?? []);
+    if (mine.length) this.perAddress.set(address, mine); else this.perAddress.delete(address);
+    return mine.length < this.maxPerAddress && this.global.length < this.maxGlobal;
+  }
+  fail(address: string): void {
+    const t = this.now();
+    this.global.push(t);
+    const mine = this.perAddress.get(address) ?? [];
+    mine.push(t);
+    this.perAddress.set(address, mine);
+    if (this.perAddress.size > 1024) this.perAddress.delete(this.perAddress.keys().next().value!);
+  }
+  /** Failures inside the window, for diagnostics. */
+  recentFailures(): number {
+    this.global = this.prune(this.global);
+    return this.global.length;
+  }
+}
+
+function sanitizePakeHello(raw: unknown): PakeHello | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const p = raw as Record<string, unknown>;
+  if (p.v !== JOIN_PROTOCOL_VERSION) return null;
+  if (typeof p.nameplate !== 'string' || !/^[0-9a-f]{2}$/.test(p.nameplate)) return null;
+  if (typeof p.share !== 'string' || p.share.length !== 87) return null;
+  return { v: p.v, nameplate: p.nameplate, share: p.share };
 }
 
 function normalizeRemote(address: string | undefined): string {
@@ -109,7 +185,34 @@ export function sanitizeDeviceProfile(raw: unknown): DeviceProfile | null {
     formFactor: (FORM_FACTORS.has(String(d.formFactor)) ? d.formFactor : 'laptop') as DeviceProfile['formFactor'],
     publicKey: d.publicKey,
     deviceId: typeof d.deviceId === 'string' && /^[0-9a-f]{16}$/.test(d.deviceId) ? d.deviceId : undefined,
+    // An identity whose signature does not cover this session key is dropped,
+    // never forwarded: peers would otherwise pin a key the device can't prove.
+    ...(verifiedIdentity(d.identityKey, d.identitySig, d.publicKey) ?? {}),
   };
+}
+
+function decodeB64Url(value: string): Buffer | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  const buf = Buffer.from(value.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') === value ? buf : null;
+}
+
+/** Verifies identitySig (ECDSA P-256, raw r‖s) over the binding message for publicKey. */
+export function verifiedIdentity(identityKey: unknown, identitySig: unknown, publicKey: string): { identityKey: string; identitySig: string } | null {
+  if (typeof identityKey !== 'string' || typeof identitySig !== 'string' || identityKey.length > 128 || identitySig.length > 128) return null;
+  const raw = decodeB64Url(identityKey);
+  const sig = decodeB64Url(identitySig);
+  if (!raw || !sig || raw.byteLength !== 65 || raw[0] !== 0x04 || sig.byteLength !== 64) return null;
+  try {
+    const key = crypto.createPublicKey({
+      key: { kty: 'EC', crv: 'P-256', x: raw.subarray(1, 33).toString('base64url'), y: raw.subarray(33).toString('base64url') },
+      format: 'jwk',
+    });
+    const ok = crypto.verify('sha256', identityBindingMessage(publicKey), { key, dsaEncoding: 'ieee-p1363' }, sig);
+    return ok ? { identityKey, identitySig } : null;
+  } catch {
+    return null;
+  }
 }
 
 function generatePeerId(): string {
@@ -148,7 +251,14 @@ export class SignalingHub {
    */
   private hostPairCode = generatePairCode(crypto.randomBytes(8));
   /** Last pair code per peerId so reconnects rejoin their existing group. */
-  private readonly pairCodeByPeer = new Map<string, string>();
+  private readonly pairCodeByPeer = new Map<string, { pairCode: string; remote: string }>();
+  private readonly pakeLimiter = new PakeFailureLimiter();
+  private onPakeFailure?: (recentFailures: number) => void;
+  private getRelayOffer: () => RelayOffer | null;
+  private getHandoffInfo: (vouchKey: Uint8Array, peerId: string) => HandoffInfo | null;
+  private onHandoffOffer?: (peerId: string, envelope: Uint8Array) => void;
+  private onHandoffEnd?: (peerId: string, id: string) => void;
+  private readonly isLocalMachine: (remoteAddress: string | undefined) => boolean;
 
   public readonly wss: WebSocketServer;
   private readonly clients = new Map<string, ConnectedClient>();
@@ -178,7 +288,24 @@ export class SignalingHub {
     clipboardProvider?: HostClipboardProvider | null;
     clipboardPollMs?: number;
     onHostPairCodeChange?: (pairCode: string) => void;
+    /** Called after each wrong code; the count covers the limiter window (all addresses). */
+    onPakeFailure?: (recentFailures: number) => void;
+    /** Relay rendezvous handed to code-authenticated devices (null = no relay configured). */
+    getRelayOffer?: () => RelayOffer | null;
+    /** Hotspot-handoff keys for code-authenticated devices (null = handoff off). */
+    getHandoffInfo?: (vouchKey: Uint8Array, peerId: string) => HandoffInfo | null;
+    /** A code-authenticated device sent a sealed hotspot offer. */
+    onHandoffOffer?: (peerId: string, envelope: Uint8Array) => void;
+    onHandoffEnd?: (peerId: string, id: string) => void;
+    /** Override "is this socket from the hub computer itself" (tests). */
+    isLocalMachine?: (remoteAddress: string | undefined) => boolean;
   }) {
+    this.isLocalMachine = opts.isLocalMachine ?? isLocalMachineAddress;
+    this.onPakeFailure = opts.onPakeFailure;
+    this.getRelayOffer = opts.getRelayOffer ?? (() => null);
+    this.getHandoffInfo = opts.getHandoffInfo ?? (() => null);
+    this.onHandoffOffer = opts.onHandoffOffer;
+    this.onHandoffEnd = opts.onHandoffEnd;
     this.getLanUrls = opts.getLanUrls;
     this.getHostFirewall = opts.getHostFirewall ?? (() => null);
     this.getLanEndpoints =
@@ -237,6 +364,24 @@ export class SignalingHub {
     return this.hostPairCode;
   }
 
+  /**
+   * Codes of rooms this hub issued (host room first). A hotspot offer must be
+   * authenticated with one of them.
+   */
+  getRoomCodes(): string[] {
+    const codes = new Set<string>([this.hostPairCode]);
+    for (const entry of this.pairCodeByPeer.values()) codes.add(entry.pairCode);
+    return [...codes];
+  }
+
+  /** Send a control message to one connected peer; false if it is not connected. */
+  sendToPeer(peerId: string, msg: ServerToClientMessage): boolean {
+    const client = this.clients.get(peerId);
+    if (!client || client.ws.readyState !== WebSocket.OPEN) return false;
+    this.sendJson(client.ws, msg);
+    return true;
+  }
+
   /** The daemon's persisted group must also be the startup QR's group. */
   setDefaultPairCode(raw: string): void {
     const code = normalizePairCode(raw);
@@ -258,16 +403,49 @@ export class SignalingHub {
     throw new Error('Unable to allocate a unique pairing code');
   }
 
-  private rememberPairCode(peerId: string, pairCode: string): void {
+  private rememberPairCode(peerId: string, pairCode: string, remote: string): void {
     if (this.pairCodeByPeer.size >= 512) {
       const oldest = this.pairCodeByPeer.keys().next().value;
       if (oldest !== undefined) this.pairCodeByPeer.delete(oldest);
     }
-    this.pairCodeByPeer.set(peerId, pairCode);
+    this.pairCodeByPeer.set(peerId, { pairCode, remote });
+  }
+
+  /**
+   * Room a code-authenticated joiner targets. The host room wins, then the
+   * most recently joined room; the nameplate is only a hint (8 bits), the
+   * SPAKE2 exchange decides.
+   */
+  private roomForNameplate(nameplate: string): string | null {
+    if (nameplateFor(this.hostPairCode) === nameplate) return this.hostPairCode;
+    let best: ConnectedClient | null = null;
+    for (const client of this.clients.values()) {
+      if (nameplateFor(client.pairCode) !== nameplate) continue;
+      if (!best || client.connectedAt > best.connectedAt) best = client;
+    }
+    if (best) return best.pairCode;
+    // Rooms that emptied out (everyone reconnecting) are still known to the
+    // hub that issued them; newest first.
+    const remembered = [...this.pairCodeByPeer.values()].reverse();
+    return remembered.find((entry) => nameplateFor(entry.pairCode) === nameplate)?.pairCode ?? null;
   }
 
   public getStats(): { connectedPeers: number } {
     return { connectedPeers: this.clients.size };
+  }
+
+  /** Diagnostics: connected devices without secrets (no pair codes or keys). */
+  public describeClients(): { name: string; formFactor: string; platform: string; model: string; remoteAddress: string; loopback: boolean; connectedSeconds: number }[] {
+    const now = Date.now();
+    return [...this.clients.values()].map((c) => ({
+      name: c.device.name,
+      formFactor: c.device.formFactor,
+      model: c.device.model,
+      platform: c.device.platform,
+      remoteAddress: c.remoteAddress,
+      loopback: c.isLoopback,
+      connectedSeconds: Math.round((now - c.connectedAt) / 1000),
+    }));
   }
 
   public close(): void {
@@ -367,7 +545,8 @@ export class SignalingHub {
   private handleConnection(ws: WebSocket, req: IncomingMessage): void {
     const networkKey = deriveNetworkKey(req);
     // A phone this server dialled (reverse connection) is never "this machine".
-    const isLoopback = !isReversePeer(req.socket) && isLocalMachineAddress(req.socket.remoteAddress);
+    const relayed = isRelayedPeer(req.socket);
+    const isLoopback = !isReversePeer(req.socket) && !relayed && this.isLocalMachine(req.socket.remoteAddress);
     let registeredClient: ConnectedClient | null = null;
     // Count even sockets which have not sent hello; otherwise an idle client
     // can bypass both limits and retain unbounded upgraded connections.
@@ -391,6 +570,80 @@ export class SignalingHub {
       }
     });
 
+    const remoteAddress = normalizeRemote(req.socket.remoteAddress);
+    let pendingPake: PendingPake | null = null;
+    let pakeTimeout: ReturnType<typeof setTimeout> | null = null;
+    ws.once('close', () => {
+      if (pakeTimeout) clearTimeout(pakeTimeout);
+      if (pendingPake && !registeredClient) this.pakeLimiter.fail(remoteAddress);
+      pendingPake = null;
+    });
+
+    const admit = (
+      hello: Extract<ClientToServerMessage, { type: 'hello' }>,
+      device: DeviceProfile,
+      admission: Admission,
+      room: string | undefined,
+      vouchKey: Uint8Array | undefined,
+      announceHostCode: boolean,
+    ): void => {
+      let peerId = sanitizePeerId(hello.peerId);
+      if (this.clients.has(peerId) && this.clients.get(peerId)?.ws !== ws) {
+        peerId = generatePeerId();
+      }
+      const candidate = { isLoopback, device } as ConnectedClient;
+      const pairCode = room ?? (this.isHostDesktopClient(candidate) ? this.hostPairCode : this.generateUnusedPairCode());
+      this.rememberPairCode(peerId, pairCode, remoteAddress);
+
+      registeredClient = {
+        peerId,
+        ws,
+        networkKey,
+        isLoopback,
+        pairCode,
+        visibility: hello.visibility === 'paired-only' || hello.visibility === 'hidden' ? hello.visibility : 'nearby',
+        device,
+        connectedAt: Date.now(),
+        isAlive: true,
+        joinPairAttempts: [],
+        remoteAddress,
+        admission,
+        vouchKey,
+      };
+      // Only phone apps run the reverse listener; remember where they were.
+      if (!isLoopback && !relayed && registeredClient.remoteAddress && device.platform === 'android') {
+        this.recentRemotes.set(registeredClient.remoteAddress, Date.now());
+        if (this.recentRemotes.size > 32) this.recentRemotes.delete(this.recentRemotes.keys().next().value!);
+      }
+
+      this.clients.set(peerId, registeredClient);
+      this.syncClipboardWatchState();
+      if (announceHostCode && isLoopback && device.model !== 'AirBridge service') {
+        this.onHostPairCodeChange?.(pairCode);
+      }
+
+      const tlsPin = this.getTlsPin();
+      this.sendJson(ws, {
+        type: 'welcome',
+        peerId,
+        pairCode,
+        admission,
+        ...(vouchKey ? { hubProof: hubProof(vouchKey, { peerId, pairCode, tlsPin }) } : {}),
+        // The relay token is a capability: only for devices that proved the code.
+        ...(admission === 'pake' ? { relay: this.getRelayOffer() } : {}),
+        ...(admission === 'pake' && vouchKey ? { handoff: this.getHandoffInfo(vouchKey, peerId) } : {}),
+        lanUrls: this.getLanUrls(),
+        lanEndpoints: this.getLanEndpoints(),
+        tlsPin,
+        hostFirewall: this.getHostFirewall(),
+        ...(this.serverVersion ? { serverVersion: this.serverVersion } : {}),
+        localDaemon: this.resolveClientDaemonStatus(registeredClient),
+        peers: this.computeVisiblePeers(registeredClient),
+      });
+
+      this.broadcastPeerUpdatesFor(registeredClient);
+    };
+
     ws.on('message', (data, isBinary) => {
       if (registeredClient) {
         registeredClient.isAlive = true;
@@ -412,7 +665,7 @@ export class SignalingHub {
       }
 
       if (msg.type === 'hello') {
-        if (registeredClient) { ws.close(1008, 'Already registered'); return; }
+        if (registeredClient || pendingPake) { ws.close(1008, 'Already registered'); return; }
         clearTimeout(helloTimeout);
         const device = sanitizeDeviceProfile(msg.device);
         if (!device) {
@@ -420,65 +673,83 @@ export class SignalingHub {
           ws.close(1008, 'Invalid device profile');
           return;
         }
-        (msg as { device: DeviceProfile }).device = device;
-        let peerId = sanitizePeerId(msg.peerId);
-        if (this.clients.has(peerId) && this.clients.get(peerId)?.ws !== ws) {
-          peerId = generatePeerId();
+        if (msg.pake !== undefined) {
+          // Code-authenticated join: the code itself never crosses the wire.
+          const pake = sanitizePakeHello(msg.pake);
+          if (!pake) {
+            this.sendJson(ws, { type: 'error', code: 'BAD_PAKE', message: 'Unsupported pairing handshake.' });
+            ws.close(1008, 'Bad PAKE');
+            return;
+          }
+          if (!this.pakeLimiter.allows(remoteAddress)) {
+            this.sendJson(ws, { type: 'error', code: 'RATE_LIMITED', message: 'Too many wrong pairing codes. Wait a few minutes and try again.' });
+            ws.close(1008, 'Rate limited');
+            return;
+          }
+          const matched = this.roomForNameplate(pake.nameplate);
+          const room = matched ?? generatePairCode(crypto.randomBytes(8));
+          const party = new Spake2(
+            'B',
+            passwordScalar(room),
+            joinerSpake2Identity(device.publicKey, device.identityKey),
+            HUB_SPAKE2_IDENTITY,
+            JOIN_SPAKE2_AAD,
+          );
+          let result: Spake2Result;
+          try {
+            result = party.finish(Buffer.from(pake.share, 'base64url'));
+          } catch {
+            this.sendJson(ws, { type: 'error', code: 'BAD_PAKE', message: 'Invalid pairing handshake.' });
+            ws.close(1008, 'Bad PAKE');
+            return;
+          }
+          pendingPake = { hello: msg, device, room, decoy: !matched, result };
+          // A joiner that sees a bad confirmation hangs up without answering;
+          // an abandoned exchange therefore counts as a wrong guess too.
+          pakeTimeout = setTimeout(() => {
+            if (pendingPake && !registeredClient) { this.pakeLimiter.fail(remoteAddress); ws.terminate(); }
+          }, 15_000);
+          pakeTimeout.unref();
+          this.sendJson(ws, {
+            type: 'pake-challenge',
+            share: Buffer.from(party.share()).toString('base64url'),
+            confirm: Buffer.from(result.confirm).toString('base64url'),
+          });
+          return;
         }
 
         const requestedPair = msg.pairCode ? normalizePairCode(msg.pairCode) : '';
         const hasRequestedPair = isValidPairCode(requestedPair);
-        let pairCode: string;
+        let room: string | undefined;
         if (hasRequestedPair) {
-          pairCode = requestedPair;
-        } else if (this.pairCodeByPeer.has(peerId)) {
-          pairCode = this.pairCodeByPeer.get(peerId)!;
-        } else if (this.isHostDesktopClient({ isLoopback, device } as ConnectedClient)) {
-          pairCode = this.hostPairCode;
+          room = requestedPair;
         } else {
-          pairCode = this.generateUnusedPairCode();
+          // Reconnect continuity without a code: only for this machine or the
+          // same source address. Peer ids are visible to nearby devices, so an
+          // id alone must never grant membership of someone else's room.
+          const remembered = this.pairCodeByPeer.get(sanitizePeerId(msg.peerId));
+          if (remembered && (isLoopback || remembered.remote === remoteAddress)) room = remembered.pairCode;
         }
-        this.rememberPairCode(peerId, pairCode);
+        admit(msg, device, isLoopback ? 'host' : 'legacy', room, undefined, hasRequestedPair);
+        return;
+      }
 
-        registeredClient = {
-          peerId,
-          ws,
-          networkKey,
-          isLoopback,
-          pairCode,
-          visibility: msg.visibility === 'paired-only' || msg.visibility === 'hidden' ? msg.visibility : 'nearby',
-          device: msg.device,
-          connectedAt: Date.now(),
-          isAlive: true,
-          joinPairAttempts: [],
-          remoteAddress: normalizeRemote(req.socket.remoteAddress),
-        };
-        // Only phone apps run the reverse listener; remember where they were.
-        if (!isLoopback && registeredClient.remoteAddress && device.platform === 'android') {
-          this.recentRemotes.set(registeredClient.remoteAddress, Date.now());
-          if (this.recentRemotes.size > 32) this.recentRemotes.delete(this.recentRemotes.keys().next().value!);
+      if (msg.type === 'pake-confirm') {
+        if (registeredClient || !pendingPake) { ws.close(1008, 'Unexpected confirmation'); return; }
+        const pending = pendingPake;
+        pendingPake = null;
+        if (pakeTimeout) clearTimeout(pakeTimeout);
+        let confirm: Buffer | null = null;
+        if (typeof msg.confirm === 'string' && /^[A-Za-z0-9_-]{43}$/.test(msg.confirm)) confirm = Buffer.from(msg.confirm, 'base64url');
+        const ok = !pending.decoy && confirm !== null && constantTimeEqual(confirm, pending.result.expectedPeerConfirm);
+        if (!ok) {
+          this.pakeLimiter.fail(remoteAddress);
+          this.onPakeFailure?.(this.pakeLimiter.recentFailures());
+          this.sendJson(ws, { type: 'error', code: 'PAIR_CODE_MISMATCH', message: 'The pairing code does not match this computer.' });
+          ws.close(1008, 'Pairing code mismatch');
+          return;
         }
-
-        this.clients.set(peerId, registeredClient);
-        this.syncClipboardWatchState();
-        if (hasRequestedPair && isLoopback && device.model !== 'AirBridge service') {
-          this.onHostPairCodeChange?.(pairCode);
-        }
-
-        this.sendJson(ws, {
-          type: 'welcome',
-          peerId,
-          pairCode,
-          lanUrls: this.getLanUrls(),
-          lanEndpoints: this.getLanEndpoints(),
-          tlsPin: this.getTlsPin(),
-          hostFirewall: this.getHostFirewall(),
-          ...(this.serverVersion ? { serverVersion: this.serverVersion } : {}),
-          localDaemon: this.resolveClientDaemonStatus(registeredClient),
-          peers: this.computeVisiblePeers(registeredClient),
-        });
-
-        this.broadcastPeerUpdatesFor(registeredClient);
+        admit(pending.hello, pending.device, isLoopback ? 'host' : 'pake', pending.room, vouchKeyFrom(pending.result.ke), false);
         return;
       }
 
@@ -491,7 +762,11 @@ export class SignalingHub {
         case 'update-profile': {
           const device = sanitizeDeviceProfile(msg.device);
           if (!device) break;
-          registeredClient.device = device;
+          // Keys are fixed at admission (they are bound into the SPAKE2
+          // transcript and the peers' vouches). New keys need a new connection.
+          const { publicKey, identityKey, identitySig } = registeredClient.device;
+          registeredClient.device = { ...device, publicKey, identityKey, identitySig };
+          if (!identityKey) { delete registeredClient.device.identityKey; delete registeredClient.device.identitySig; }
           if (msg.visibility === 'nearby' || msg.visibility === 'paired-only' || msg.visibility === 'hidden') {
             registeredClient.visibility = msg.visibility;
           }
@@ -519,7 +794,7 @@ export class SignalingHub {
           }
           const prevPairCode = registeredClient.pairCode;
           registeredClient.pairCode = normalized;
-          this.rememberPairCode(registeredClient.peerId, normalized);
+          this.rememberPairCode(registeredClient.peerId, normalized, registeredClient.remoteAddress);
           if (registeredClient.isLoopback && registeredClient.device.model !== 'AirBridge service') {
             this.onHostPairCodeChange?.(normalized);
           }
@@ -543,7 +818,7 @@ export class SignalingHub {
             for (const client of this.clients.values()) {
               if (this.isHostDesktopClient(client) && client.pairCode === prevPairCode) {
                 client.pairCode = fresh;
-                this.rememberPairCode(client.peerId, fresh);
+                this.rememberPairCode(client.peerId, fresh, client.remoteAddress);
                 this.sendJson(client.ws, {
                   type: 'pair-updated',
                   pairCode: fresh,
@@ -553,7 +828,7 @@ export class SignalingHub {
             }
           } else {
             registeredClient.pairCode = fresh;
-            this.rememberPairCode(registeredClient.peerId, fresh);
+            this.rememberPairCode(registeredClient.peerId, fresh, registeredClient.remoteAddress);
             this.sendJson(ws, {
               type: 'pair-updated',
               pairCode: fresh,
@@ -603,6 +878,36 @@ export class SignalingHub {
               from: registeredClient.peerId,
               envelope: msg.envelope,
             });
+          }
+          break;
+        }
+
+        case 'handoff-offer': {
+          // Only devices that proved the code got the handoff key; others cannot
+          // make a valid offer, but refuse early and rate-limit everyone.
+          if (registeredClient.admission !== 'pake' || !this.onHandoffOffer) {
+            this.sendJson(ws, { type: 'error', code: 'HANDOFF_UNAVAILABLE', message: 'Direct links need a device paired with the code.' });
+            break;
+          }
+          const now = Date.now();
+          const attempts = (registeredClient.handoffAttempts ?? []).filter((t) => now - t < 60_000);
+          attempts.push(now);
+          registeredClient.handoffAttempts = attempts;
+          if (attempts.length > 6) {
+            this.sendJson(ws, { type: 'error', code: 'HANDOFF_RATE_LIMITED', message: 'Too many direct-link requests; wait a minute.' });
+            break;
+          }
+          if (typeof msg.envelope !== 'string' || msg.envelope.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(msg.envelope)) {
+            this.sendJson(ws, { type: 'error', code: 'BAD_HANDOFF', message: 'Malformed direct-link request.' });
+            break;
+          }
+          this.onHandoffOffer(registeredClient.peerId, new Uint8Array(Buffer.from(msg.envelope, 'base64url')));
+          break;
+        }
+
+        case 'handoff-end': {
+          if (registeredClient.admission === 'pake' && typeof msg.id === 'string' && /^[0-9a-f]{16}$/.test(msg.id)) {
+            this.onHandoffEnd?.(registeredClient.peerId, msg.id);
           }
           break;
         }
@@ -686,6 +991,25 @@ export class SignalingHub {
     return false;
   }
 
+  private describePeer(viewer: ConnectedClient, candidate: ConnectedClient, discoveryScope: PeerSummary['discoveryScope']): PeerSummary {
+    const summary: PeerSummary = {
+      peerId: candidate.peerId,
+      device: candidate.device,
+      discoveryScope,
+      connectedAt: candidate.connectedAt,
+      attestation: candidate.admission,
+    };
+    if (viewer.vouchKey) {
+      summary.vouch = peerVouch(viewer.vouchKey, {
+        peerId: candidate.peerId,
+        publicKey: candidate.device.publicKey,
+        identityKey: candidate.device.identityKey,
+        attestation: candidate.admission,
+      });
+    }
+    return summary;
+  }
+
   private computeVisiblePeers(viewer: ConnectedClient): PeerSummary[] {
     if (viewer.visibility === 'hidden') return [];
     const peers: PeerSummary[] = [];
@@ -695,23 +1019,13 @@ export class SignalingHub {
       if (candidate.visibility === 'hidden') continue;
 
       if (candidate.pairCode === viewer.pairCode) {
-        peers.push({
-          peerId: candidate.peerId,
-          device: candidate.device,
-          discoveryScope: 'paired',
-          connectedAt: candidate.connectedAt,
-        });
+        peers.push(this.describePeer(viewer, candidate, 'paired'));
       } else if (
         candidate.networkKey === viewer.networkKey &&
         viewer.visibility === 'nearby' &&
         candidate.visibility === 'nearby'
       ) {
-        peers.push({
-          peerId: candidate.peerId,
-          device: candidate.device,
-          discoveryScope: 'nearby',
-          connectedAt: candidate.connectedAt,
-        });
+        peers.push(this.describePeer(viewer, candidate, 'nearby'));
       }
     }
 

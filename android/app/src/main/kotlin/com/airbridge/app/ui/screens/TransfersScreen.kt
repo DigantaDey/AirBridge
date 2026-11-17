@@ -53,8 +53,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.airbridge.app.HandoffUiState
 import com.airbridge.app.NativeFiles
 import com.airbridge.app.PeerUiState
+import com.airbridge.app.ui.components.HotspotHandoffCard
 import com.airbridge.app.ui.components.TransferCard
 import com.airbridge.app.ui.connectionLabel
 import com.airbridge.app.ui.formatBytes
@@ -84,6 +86,8 @@ fun TransfersScreen(
     onRequestBatteryExemption: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
     modifier: Modifier = Modifier,
+    onStartHotspotHandoff: () -> Unit = {},
+    onStopHotspotHandoff: () -> Unit = {},
 ) {
     val activeStatuses = setOf(
         TransferStatus.PENDING_ACCEPT,
@@ -118,6 +122,11 @@ fun TransfersScreen(
                         uiState = uiState,
                         onRequestBatteryExemption = onRequestBatteryExemption,
                         onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                    )
+                    HotspotHandoffCard(
+                        state = uiState.engine.handoff,
+                        onStart = onStartHotspotHandoff,
+                        onStop = onStopHotspotHandoff,
                     )
                     PeersSelectorCard(
                         peers = uiState.engine.peers,
@@ -173,6 +182,16 @@ fun TransfersScreen(
                             uiState = uiState,
                             onRequestBatteryExemption = onRequestBatteryExemption,
                             onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                            modifier = mediumCardModifier,
+                        )
+                    }
+                }
+                if (uiState.engine.handoff.available || uiState.engine.handoff.phase != HandoffUiState.Phase.IDLE) {
+                    item(key = "handoff") {
+                        HotspotHandoffCard(
+                            state = uiState.engine.handoff,
+                            onStart = onStartHotspotHandoff,
+                            onStop = onStopHotspotHandoff,
                             modifier = mediumCardModifier,
                         )
                     }
@@ -401,6 +420,16 @@ private fun ConnectionStatusCard(
                 )
             }
 
+            if (state == ConnectionState.CONNECTED && uiState.engine.viaRelay) {
+                // Honest about the path: slower than Wi-Fi, but the relay only
+                // ever sees ciphertext. AirBridge switches back automatically.
+                Text(
+                    text = "Via relay: no direct path to the computer right now. Still end-to-end encrypted; switches back to the direct path automatically.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
             val progress = uiState.engine.connectionProgress
             if (state != ConnectionState.CONNECTED && !progress.isNullOrBlank()) {
                 Text(
@@ -569,15 +598,14 @@ private fun PeersSelectorCard(
                                 )
                                 Column {
                                     Text(
-                                        text = if (selectedPeer.discoveryScope == "paired") {
-                                            "Paired · E2E encrypted"
-                                        } else {
-                                            "Nearby · E2E encrypted"
-                                        },
+                                        text = (if (selectedPeer.discoveryScope == "paired") "Paired" else "Nearby") +
+                                            (if (selectedPeer.verified) " · Verified" else "") + " · E2E encrypted",
                                         style = MaterialTheme.typography.labelLarge,
                                     )
                                     val sas = selectedPeer.sasCode
-                                    if (!sas.isNullOrBlank()) {
+                                    // A vouched peer was authenticated by the pairing
+                                    // code; the SAS is only needed for older devices.
+                                    if (!sas.isNullOrBlank() && !selectedPeer.verified) {
                                         Text(
                                             text = "Verification code $sas",
                                             style = MaterialTheme.typography.labelSmall,

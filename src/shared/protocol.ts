@@ -1,3 +1,5 @@
+import type { CallAction, CallInfo, ContactCard, ContinuityFeature, ScreenShareState } from './continuity.js';
+
 export type PlatformType = 'macos' | 'android' | 'ios' | 'windows' | 'linux' | 'unknown';
 export type FormFactor = 'laptop' | 'phone' | 'tablet' | 'desktop';
 export type VisibilityMode = 'nearby' | 'paired-only' | 'hidden';
@@ -8,15 +10,33 @@ export interface DeviceProfile {
   platform: PlatformType;
   model: string;
   formFactor: FormFactor;
-  publicKey: string; // base64url raw ECDH P-256 public key (65 bytes)
+  publicKey: string; // base64url raw ECDH P-256 public key (65 bytes), fresh per connection
   deviceId?: string; // persistent identifier for cross-reload history reconciliation
+  /**
+   * Long-term ECDSA P-256 identity key (base64url raw, 65 bytes). Survives
+   * restarts; this is what "trusted device" pins. Optional for older peers.
+   */
+  identityKey?: string;
+  /** base64url raw r‖s ECDSA signature by identityKey over identityBindingMessage(publicKey). */
+  identitySig?: string;
 }
+
+/**
+ * How the hub admitted a device: 'host' = runs on the hub computer itself,
+ * 'pake' = proved knowledge of the pairing code without revealing it,
+ * 'legacy' = older client that sent the code in the clear (or no code).
+ */
+export type Admission = 'host' | 'pake' | 'legacy';
 
 export interface PeerSummary {
   peerId: string;
   device: DeviceProfile;
   discoveryScope: 'paired' | 'nearby';
   connectedAt: number;
+  /** How the hub admitted this peer (newer hubs). */
+  attestation?: Admission;
+  /** Hub's MAC over this entry for a code-authenticated viewer (see pairingProof.ts). */
+  vouch?: string;
 }
 
 export interface LocalDaemonStatus {
@@ -144,6 +164,75 @@ export type ControlPayload =
   | {
       kind: 'pong';
       ts: number;
+    }
+  // ---- Phone continuity (src/shared/continuity.ts; docs/continuity.md) ----
+  | {
+      kind: 'continuity-hello';
+      v: number;
+      features: ContinuityFeature[];
+    }
+  | {
+      kind: 'contacts-request';
+      requestId: string;
+      query?: string;
+      limit?: number;
+    }
+  | {
+      kind: 'contacts-response';
+      requestId: string;
+      contacts?: ContactCard[];
+      total?: number;
+      truncated?: boolean;
+      error?: 'unsupported' | 'disabled' | 'permission' | 'unauthorized' | 'failed';
+      message?: string;
+    }
+  | {
+      kind: 'contact-share';
+      shareId: string;
+      vcard: string;
+      timestamp: number;
+    }
+  | {
+      kind: 'call-state';
+      call: CallInfo;
+    }
+  | {
+      kind: 'call-command';
+      commandId: string;
+      action: CallAction;
+      callId?: string;
+      number?: string;
+    }
+  | {
+      kind: 'call-command-result';
+      commandId: string;
+      ok: boolean;
+      error?: string;
+      callId?: string;
+    }
+  | {
+      kind: 'screen-share-request';
+      sessionId: string;
+      maxWidth?: number;
+      maxFps?: number;
+    }
+  | {
+      kind: 'screen-share-state';
+      sessionId: string;
+      state: ScreenShareState;
+      width?: number;
+      height?: number;
+      reason?: string;
+    }
+  | {
+      kind: 'screen-share-ack';
+      sessionId: string;
+      seq: number;
+    }
+  | {
+      kind: 'screen-share-stop';
+      sessionId: string;
+      reason?: string;
     };
 
 export type ClientToServerMessage =
@@ -151,8 +240,15 @@ export type ClientToServerMessage =
       type: 'hello';
       peerId?: string;
       device: DeviceProfile;
+      /** Legacy cleartext join. New clients send `pake` instead and never reveal the code. */
       pairCode?: string;
       visibility: VisibilityMode;
+      pake?: PakeHello;
+    }
+  | {
+      type: 'pake-confirm';
+      /** base64url HMAC confirmation (SPAKE2 cA). */
+      confirm: string;
     }
   | {
       type: 'update-profile';
@@ -179,6 +275,16 @@ export type ClientToServerMessage =
   | {
       type: 'set-host-clipboard';
       text: string;
+    }
+  | {
+      /** Hotspot handoff: credentials sealed to the computer's handoff key (base64url, see handoff.ts). */
+      type: 'handoff-offer';
+      envelope: string;
+    }
+  | {
+      /** The phone stopped its hotspot (or the user ended the direct link). */
+      type: 'handoff-end';
+      id: string;
     };
 
 /**
@@ -214,11 +320,34 @@ export interface HostFirewallStatus {
   appPath: string;
 }
 
+export interface PakeHello {
+  v: number;
+  /** 2 hex chars of a hash of the code; picks among the hub's rooms. */
+  nameplate: string;
+  /** base64url SPAKE2 share pA (65-byte uncompressed point). */
+  share: string;
+}
+
 export type ServerToClientMessage =
+  | {
+      type: 'pake-challenge';
+      /** base64url SPAKE2 share pB. */
+      share: string;
+      /** base64url SPAKE2 confirmation cB; proves the hub knows the code. */
+      confirm: string;
+    }
   | {
       type: 'welcome';
       peerId: string;
       pairCode: string;
+      /** How this connection was admitted (newer hubs). */
+      admission?: Admission;
+      /** For admission 'pake': MAC over peerId, pairCode and tlsPin under the vouch key. */
+      hubProof?: string;
+      /** Encrypted-relay rendezvous for code-authenticated native clients (see relay docs). */
+      relay?: RelayOffer | null;
+      /** Hotspot/Bluetooth handoff keys for code-authenticated native clients. */
+      handoff?: HandoffInfo | null;
       lanUrls: string[];
       /** Same order as lanUrls, with interface details. Optional for older servers. */
       lanEndpoints?: LanEndpoint[];
@@ -267,10 +396,52 @@ export type ServerToClientMessage =
       timestamp: number;
     }
   | {
+      type: 'handoff-status';
+      id: string;
+      state: HandoffState;
+      /** Short human-readable detail (why it failed, which network was joined). */
+      reason?: string;
+    }
+  | {
       type: 'error';
       code: string;
       message: string;
     };
+
+/**
+ * What a code-authenticated phone needs for a hotspot handoff with this
+ * computer when they share no network: the computer's static P-256 handoff
+ * key (offers are sealed to it) and the secret behind its rotating Bluetooth
+ * tag. `proof` = HMAC(vouch key, "handoff\n{peerId}\n{key}\n{beacon}") binds
+ * both to the code-authenticated session.
+ */
+export interface HandoffInfo {
+  v: 1;
+  /** base64url uncompressed P-256 public key (65 bytes). */
+  key: string;
+  /** base64url 16-byte secret for the rotating Bluetooth tag. */
+  beacon: string;
+  proof: string;
+}
+
+export type HandoffState =
+  /** Waiting for the user on the computer to allow it. */
+  | 'pending'
+  | 'joining'
+  | 'joined'
+  | 'declined'
+  | 'expired'
+  | 'failed'
+  /** Not a valid offer for this computer (wrong key, code, replay, bad credentials). */
+  | 'invalid'
+  | 'ended';
+
+export interface RelayOffer {
+  /** host:port of an AirBridge relay (TCP rendezvous; traffic inside stays TLS to this computer). */
+  endpoint: string;
+  /** 64 hex chars; secret rendezvous token for this computer. */
+  token: string;
+}
 
 // ============================================================================
 // Pair Code Formatting & Generation (Unambiguous 32-char Crockford-like alphabet)
@@ -320,6 +491,8 @@ export function formatPairCode(code: string): string {
 export const FRAME_ENCRYPTED_CHUNK = 0x01;
 export const FRAME_ROUTED_RELAY = 0x02;
 export const FRAME_BINARY_SACK = 0x03;
+/** Encrypted screen-share frame (see continuity.ts). */
+export { FRAME_SCREEN } from './continuity.js';
 
 export const ID_ASCII_LENGTH = 16; // 16 hex chars = 64 bits entropy
 export const GCM_IV_LENGTH = 12;

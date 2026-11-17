@@ -67,6 +67,23 @@ class Prefs(context: Context) {
         set(value) = sp.edit().putBoolean("notificationSharing", value).apply()
 
     /**
+     * Phone continuity toggles. Each feature is only advertised to the computer
+     * when its toggle is on AND Android granted the matching permission.
+     * Screen sharing additionally asks for consent on every session.
+     */
+    var contactsOnComputer: Boolean
+        get() = sp.getBoolean("contactsOnComputer", true)
+        set(value) = sp.edit().putBoolean("contactsOnComputer", value).apply()
+
+    var callsFromComputer: Boolean
+        get() = sp.getBoolean("callsFromComputer", true)
+        set(value) = sp.edit().putBoolean("callsFromComputer", value).apply()
+
+    var screenSharing: Boolean
+        get() = sp.getBoolean("screenSharing", true)
+        set(value) = sp.edit().putBoolean("screenSharing", value).apply()
+
+    /**
      * Accessibility-assisted hidden clipboard capture is OFF by default. The
      * user must explicitly opt in, then enable the AirBridge service in
      * Android's Accessibility settings; the app cannot enable it silently.
@@ -123,6 +140,25 @@ class Prefs(context: Context) {
         get() = sp.getStringSet("nativeTrustedKeys", emptySet())?.toSet() ?: emptySet()
         set(value) = sp.edit().putStringSet("nativeTrustedKeys", value).apply()
 
+    /**
+     * Relay route from the last code-authenticated welcome
+     * ([com.airbridge.engine.RelayRoute.serialize]); includes the TLS pin it
+     * must lead to.
+     */
+    var relayRoute: String?
+        get() = sp.getString("nativeRelayRoute", null)
+        set(value) = sp.edit().apply { if (value == null) remove("nativeRelayRoute") else putString("nativeRelayRoute", value) }.apply()
+
+    /**
+     * Hotspot handoff keys from the last code-authenticated welcome
+     * ([com.airbridge.engine.Handoff.Info]): the computer's offer key and
+     * Bluetooth tag secret. Kept so a hotspot can be handed over with no
+     * network at all. Proof already verified when saved.
+     */
+    var handoffInfo: com.airbridge.engine.Handoff.Info?
+        get() = com.airbridge.engine.Handoff.Info.parse(sp.getString("nativeHandoffInfo", null))
+        set(value) = sp.edit().apply { if (value == null) remove("nativeHandoffInfo") else putString("nativeHandoffInfo", value.toJson()) }.apply()
+
     fun tlsTrust(link: PairingLink): com.airbridge.engine.PinnedTlsTrust = invitations.tlsTrust(link)
 
     fun forget() {
@@ -130,6 +166,8 @@ class Prefs(context: Context) {
         sp.edit()
             .remove("nativeTrustedKeys")
             .remove("nativePeerId")
+            .remove("nativeRelayRoute")
+            .remove("nativeHandoffInfo")
             .apply()
     }
 }

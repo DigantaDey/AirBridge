@@ -37,8 +37,10 @@ jobs:
         run: |
           node scripts/build-desktop.mjs --only darwin-arm64
           codesign --force -s - dist-bin/AirBridge-darwin-arm64
+      - name: Package prebuilt AirBridge.app (same script as the release)
+        run: bash scripts/package-mac-app.sh arm64 dist-bin/AirBridge-darwin-arm64 dist-mac com.airbridge.launcher.ci
       - name: Compile + exercise AirBridge.app supervisor
-        run: bash scripts/test-mac-app.sh dist-bin/AirBridge-darwin-arm64
+        run: bash scripts/test-mac-app.sh dist-bin/AirBridge-darwin-arm64 dist-mac/AirBridge-macOS-arm64.app
 
   android:
     name: Android (engine vectors + app APK)
@@ -86,7 +88,7 @@ jobs:
             echo "::error title=Android Gradle build failed::$(tail -n 40 gradle-build.log | tr '\n' '|' | cut -c1-3000)"
             exit 1
           }
-      - name: Native headless interop (HTTP + TLS + QR hotspot pairing, 128 MiB heap)
+      - name: Native headless interop (HTTP + TLS + QR hotspot pairing + SPAKE2 join + relay, 128 MiB heap)
         run: npx tsx scripts/test-native-interop.ts
       - uses: actions/upload-artifact@v4
         with:

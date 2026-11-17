@@ -42,10 +42,13 @@ import {
   setNativeTransferActive,
   scanPairingCode,
 } from "./engine/nativeShell.js";
-import { createAirBridgeClient, type AirBridgeClient } from "./engine/nativeClient.js";
-import { isStaleUi, reloadForServerVersion } from "./engine/buildInfo.js";
+import { createAirBridgeClient, hasNativeEngine, type AirBridgeClient } from "./engine/nativeClient.js";
+import { isStaleUi, reloadForServerVersion, UI_VERSION } from "./engine/buildInfo.js";
+import { ContinuityAlerts, ContinuityCenter, activeCallCount, downloadVCard, type ContinuityTab } from "./components/ContinuityCenter.js";
+import { canCaptureScreen, startDisplayCapture } from "./engine/screenCapture.js";
 import { canRestartLocalService, isThisComputerPage, requestLocalServiceRestart } from "./engine/desktopShell.js";
-import { ClipboardList, Clock, Download, FolderOpen, Settings } from "lucide-react";
+import { ServiceStatusBar, useDiagnosticsCopy } from "./components/ServiceStatusBar.js";
+import { ClipboardList, Clock, Contact, Download, FolderOpen, Phone, ScreenShare, Settings } from "lucide-react";
 
 interface ToastNotice {
   id: string;
@@ -53,6 +56,10 @@ interface ToastNotice {
   body: string;
   actionLabel?: string;
   onAction?: () => void;
+}
+
+function isShellPanel(panel: string): panel is ContinuityTab {
+  return panel === "contacts" || panel === "calls" || panel === "screen";
 }
 
 export function App() {
@@ -151,6 +158,9 @@ export function App() {
     } finally { setFolderSaving(false); }
   };
   const [toast, setToast] = useState<ToastNotice | null>(null);
+  // Contacts / Calls / Screen (top bar). The Android app has its own native UI for these.
+  const [continuityTab, setContinuityTab] = useState<ContinuityTab | null>(null);
+  const continuityEnabled = !hasNativeEngine();
 
   useEffect(() => {
     // The Android shell reserves the real status/nav bar insets in a native
@@ -251,6 +261,22 @@ export function App() {
 
     const client = createAirBridgeClient({
       initialPairCode,
+      // This computer can share its screen when the browser supports it; each
+      // request still needs the user's approval and the browser's own picker.
+      screenSourceAvailable: canCaptureScreen,
+      onIncomingContact: (item) => {
+        const names = item.contacts.map((c) => c.name);
+        showToast({
+          id: `contact-${item.shareId}`,
+          title: `${names.length === 1 ? "Contact" : `${names.length} contacts`} from ${item.peerName}`,
+          body: names.slice(0, 3).join(", ") + (names.length > 3 ? ` +${names.length - 3}` : ""),
+          actionLabel: "Save .vcf",
+          onAction: () => { downloadVCard(item.vcard, names[0] ?? "contact"); setToast(null); },
+        });
+      },
+      onCallStateChanged: (call) => {
+        if (call.state === "ringing" && call.direction === "incoming") playIncomingChime(soundMutedRef.current);
+      },
       onIncomingTransfer: () => {
         playIncomingChime(soundMutedRef.current);
       },
@@ -654,6 +680,17 @@ export function App() {
   const [downloadsOpen, setDownloadsOpen] = useState(false);
   const [recentOpen, setRecentOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const diagnosticsPage = useMemo(
+    () => ({
+      connectionState: snap.connectionState,
+      connectionError: snap.connectionError || null,
+      peers: snap.peers.length,
+      nativeShell: isNativeShell(),
+      macApp: canRestartLocalService(),
+    }),
+    [snap.connectionState, snap.connectionError, snap.peers.length],
+  );
+  const diagnostics = useDiagnosticsCopy(diagnosticsPage);
   const [connectionContinuity, setConnectionContinuity] = useState(getNativeConnectionContinuity);
   const [accessibilityOptIn, setAccessibilityOptIn] = useState(getNativeAccessibilityOptIn);
   const [accessibilityServiceEnabled, setAccessibilityServiceEnabled] = useState(isNativeAccessibilityServiceEnabled);
@@ -669,6 +706,7 @@ export function App() {
   useEffect(() => {
     const closeTopmostLayer = (): boolean => {
       if (folderPickerOpen) { setFolderPickerOpen(false); return true; }
+      if (continuityTab) { setContinuityTab(null); return true; }
       if (clipboardOpen) { setClipboardOpen(false); return true; }
       if (activeIncomingOffer) {
         clientRef.current?.declineIncomingTransfer(activeIncomingOffer.transferId);
@@ -691,7 +729,33 @@ export function App() {
       delete window.__airbridgeSystemBack;
       window.removeEventListener("keydown", onEscape);
     };
-  }, [folderPickerOpen, clipboardOpen, activeIncomingOffer, pairingOpen, downloadsOpen, recentOpen, settingsOpen, showAdvanced, toast]);
+  }, [folderPickerOpen, continuityTab, clipboardOpen, activeIncomingOffer, pairingOpen, downloadsOpen, recentOpen, settingsOpen, showAdvanced, toast]);
+
+  // Desktop shells (macOS menu bar, Phone menu) open panels by name. A request
+  // that arrived before React mounted is parked in __airbridgePendingPanel.
+  useEffect(() => {
+    const open = (panel: string): boolean => {
+      if (panel === "settings") { setSettingsOpen(true); return true; }
+      if (!isShellPanel(panel) || !continuityEnabled) return false;
+      setContinuityTab(panel);
+      return true;
+    };
+    window.__airbridgeOpenPanel = open;
+    const pending = window.__airbridgePendingPanel;
+    if (pending) { delete window.__airbridgePendingPanel; open(pending); }
+    // Linux launcher actions / `AirBridge --open calls` arrive as ?panel=calls.
+    // Remove it so a reload doesn't reopen the panel; ?pair= etc. are kept.
+    try {
+      const url = new URL(window.location.href);
+      const requested = url.searchParams.get("panel");
+      if (requested) {
+        url.searchParams.delete("panel");
+        window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+        open(requested);
+      }
+    } catch { /* non-standard location (file://, sandboxed frame) */ }
+    return () => { delete window.__airbridgeOpenPanel; };
+  }, [continuityEnabled]);
 
   // Android reports the OS Accessibility Service state after the page loads and
   // whenever the user returns from Android Settings. Keep the opt-in UI honest.
@@ -774,11 +838,63 @@ export function App() {
     [snap.transfers],
   );
 
+  // Version shown in the top bar like any desktop app: the UI bundle's version,
+  // falling back to the service's when running unbundled.
+  const appVersion = (UI_VERSION && UI_VERSION !== "dev" ? UI_VERSION : snap.serverVersion || UI_VERSION) ?? null;
+  const versionTitle = [
+    `AirBridge ${appVersion === "dev" ? "development build" : `version ${appVersion}`}`,
+    snap.serverVersion && snap.serverVersion !== appVersion ? `Service ${snap.serverVersion}` : null,
+  ].filter(Boolean).join(" · ");
+  const callCount = activeCallCount(snap.continuity);
+  const viewingCount = (snap.continuity?.screenShares ?? []).filter((s) => s.role === "viewer" && s.state === "active").length;
+
   return (
     <div className="utility-shell">
       <header className="utility-header">
-        <div className="brand"><span className="brand-mark">A</span><span>AirBridge</span></div>
+        <div className="brand">
+          <span className="brand-mark">A</span><span>AirBridge</span>
+          {appVersion && (
+            <span className="version-badge" title={versionTitle} aria-label={`Version ${appVersion}`}>
+              {appVersion === "dev" ? "dev" : `v${appVersion}`}
+            </span>
+          )}
+        </div>
         <div className="header-actions">
+          {continuityEnabled && (
+            <>
+              <button
+                type="button"
+                className="header-action-button"
+                aria-label="Contacts"
+                title="Contacts on your phone"
+                onClick={() => setContinuityTab("contacts")}
+              >
+                <Contact className="header-action-icon" size={16} aria-hidden="true" />
+                <span className="header-action-label">Contacts</span>
+              </button>
+              <button
+                type="button"
+                className={callCount > 0 ? "header-action-button has-live-call" : "header-action-button"}
+                aria-label={callCount > 0 ? `Calls (${callCount} active)` : "Calls"}
+                title="Answer and place phone calls"
+                onClick={() => setContinuityTab("calls")}
+              >
+                <Phone className="header-action-icon" size={16} aria-hidden="true" />
+                <span className="header-action-label">Calls</span>
+                {callCount > 0 && <span className="header-count-badge"> ({callCount})</span>}
+              </button>
+              <button
+                type="button"
+                className={viewingCount > 0 ? "header-action-button has-live-call" : "header-action-button"}
+                aria-label="Screen sharing"
+                title="View a phone or computer screen"
+                onClick={() => setContinuityTab("screen")}
+              >
+                <ScreenShare className="header-action-icon" size={16} aria-hidden="true" />
+                <span className="header-action-label">Screen</span>
+              </button>
+            </>
+          )}
           <button
             type="button"
             className="header-action-button"
@@ -889,10 +1005,14 @@ export function App() {
                 ) : (
                   <button className="text-button" onClick={() => window.location.reload()}>Try again</button>
                 )}
+                <button className="text-button" onClick={() => void diagnostics.copy()}>{diagnostics.label}</button>
               </>
             )}
           </div>
         )}
+        {isThisComputerPage() && snap.connectionState === "connected" ? (
+          <ServiceStatusBar page={diagnosticsPage} connected />
+        ) : null}
         <section className="devices-section">
           <div className="section-title"><h2>Devices</h2><button className="text-button" onClick={() => setPairingOpen(true)}>Pair a device</button></div>
           {(() => {
@@ -907,7 +1027,7 @@ export function App() {
               const verification = snap.peerSecurity[peer.peerId];
               return <li className="device-row" key={peer.peerId}>
                 <span className="device-glyph" aria-hidden="true">{peer.device.formFactor === "phone" ? "▯" : "▱"}</span>
-                <span className="device-copy"><strong>{peer.device.name}</strong><small>{peer.discoveryScope === "paired" ? "Paired" : "Nearby"}{verification ? " · Encrypted session established" : " · Discovered; pair to send"}</small></span>
+                <span className="device-copy"><strong>{peer.device.name}</strong><small>{peer.discoveryScope === "paired" ? "Paired" : "Nearby"}{verification?.identityChanged ? <span className="security-warning" role="alert"> · Identity changed: compare {verification.sasCode} before sending</span> : verification?.verification === "verified" ? " · Verified by pairing code · Encrypted" : verification ? " · Encrypted session established" : " · Discovered; pair to send"}</small></span>
                 <button className="quiet-button clipboard-device-button" aria-label={`Send clipboard text to ${peer.device.name}`} title="Send text / link / code" onClick={() => openClipboardForPeer(peer.peerId)}>Clipboard</button>
                 <button className="send-device-button" disabled={stagedFiles.length === 0 || !verification} onClick={() => { handleSendFilesToPeer(peer.peerId, stagedFiles); setStagedFiles([]); }}>Send</button>
               </li>;
@@ -928,7 +1048,7 @@ export function App() {
         {activeTransfers.length > 0 && <section className="transfers-section"><div className="section-title"><h2>Transfers</h2><span className="quiet-count">{activeTransfers.length}</span></div>{activeTransfers.map((transfer) => <div className="transfer-row" key={transfer.transferId}><div className="transfer-heading"><strong>{transfer.direction === "incoming" ? `From ${transfer.peerName}` : `To ${transfer.peerName}`}</strong><span className="transfer-heading-state">{transfer.status === "pending-accept" ? "Waiting for approval" : transfer.status === "connecting" ? "Connecting" : "Transferring"}{transfer.status === "transferring" && <TransferSpeed transfer={transfer} showEta className="transfer-speed-badge" />}</span></div><progress value={transfer.totalBytes ? transfer.transferredBytes : 0} max={Math.max(transfer.totalBytes, 1)} aria-label={`Transfer to ${transfer.peerName}`} /><div className="transfer-foot"><span>{formatBytes(transfer.transferredBytes)} of {formatBytes(transfer.totalBytes)}{transfer.status === "transferring" ? <>{" · "}<TransferSpeed transfer={transfer} showEta={false} /></> : ""}</span>{transfer.direction === "outgoing" && <button className="text-button" onClick={() => clientRef.current?.cancelTransfer(transfer.transferId)}>Cancel</button>}</div></div>)}</section>}
         <footer className="utility-footer"><span>Encrypted transfers. No account or cloud storage.</span><button className="text-button" onClick={() => setRecentOpen(true)}>Recent transfers</button></footer>
       </main>
-      {pairingOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPairingOpen(false); }}><section className="utility-modal pairing-modal" role="dialog" aria-modal="true" aria-labelledby="pair-title"><div className="modal-heading"><div><p className="section-kicker">PAIR DEVICES</p><h2 id="pair-title">Scan to pair</h2></div><button className="modal-close" aria-label="Close" onClick={() => setPairingOpen(false)}>×</button></div><p className="modal-explainer">Scan this code from AirBridge on your other device. Compare the verification code on both screens before accepting a transfer.</p>{isNativeShell() && <button type="button" className="secondary-button" onClick={() => scanPairingCode()}>Scan with this phone&apos;s camera</button>}<PairingDock connected={snap.connectionState === "connected"} pairCode={snap.pairCode} lanUrls={snap.lanUrls} lanEndpoints={snap.lanEndpoints} tlsPin={snap.tlsPin} hostFirewall={snap.hostFirewall} transfers={snap.transfers} clipboardItems={snap.clipboardItems} onJoinPairCode={(code) => clientRef.current?.joinPairCode(code)} onRotatePairCode={() => clientRef.current?.rotatePairCode()} onCancelTransfer={(id) => clientRef.current?.cancelTransfer(id)} onMarkCopied={markLocalCopyHandled} /><button className="text-button advanced-toggle" onClick={() => setShowAdvanced((value) => !value)}>{showAdvanced ? "Hide network details" : "Having trouble pairing?"}</button>{showAdvanced && <div className="help-copy"><p>Both devices must be running the AirBridge app on the same local network. Guest Wi-Fi and some office networks block device-to-device connections.</p><p>Current service: {snap.connectionState}. {snap.lanUrls.length ? `Local address${snap.lanUrls.length > 1 ? "es" : ""}: ${snap.lanUrls.join(", ")}` : "No local address was reported."}</p><p>Using a phone hotspot? Connect this computer to the hotspot first; the code above then includes the hotspot address. A private address only works when the phone has a direct route to it (same Wi-Fi or hotspot) — not over mobile data.</p></div>}</section></div>}
+      {pairingOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPairingOpen(false); }}><section className="utility-modal pairing-modal" role="dialog" aria-modal="true" aria-labelledby="pair-title"><div className="modal-heading"><div><p className="section-kicker">PAIR DEVICES</p><h2 id="pair-title">Scan to pair</h2></div><button className="modal-close" aria-label="Close" onClick={() => setPairingOpen(false)}>×</button></div><p className="modal-explainer">Scan this code from AirBridge on your other device. The code is proven with a password-authenticated key exchange and never sent over the network; devices it verifies are marked “Verified”.</p>{snap.connectionError && <p className="pairing-error" role="alert">{snap.connectionError}</p>}{isNativeShell() && <button type="button" className="secondary-button" onClick={() => scanPairingCode()}>Scan with this phone&apos;s camera</button>}<PairingDock connected={snap.connectionState === "connected"} pairCode={snap.pairCode} lanUrls={snap.lanUrls} lanEndpoints={snap.lanEndpoints} tlsPin={snap.tlsPin} hostFirewall={snap.hostFirewall} transfers={snap.transfers} clipboardItems={snap.clipboardItems} onJoinPairCode={(code) => clientRef.current?.joinPairCode(code)} onRotatePairCode={() => clientRef.current?.rotatePairCode()} onCancelTransfer={(id) => clientRef.current?.cancelTransfer(id)} onMarkCopied={markLocalCopyHandled} /><button className="text-button advanced-toggle" onClick={() => setShowAdvanced((value) => !value)}>{showAdvanced ? "Hide network details" : "Having trouble pairing?"}</button>{showAdvanced && <div className="help-copy"><p>Both devices must be running the AirBridge app on the same local network. Guest Wi-Fi and some office networks block device-to-device connections.</p><p>Current service: {snap.connectionState}. {snap.lanUrls.length ? `Local address${snap.lanUrls.length > 1 ? "es" : ""}: ${snap.lanUrls.join(", ")}` : "No local address was reported."}</p><p>Using a phone hotspot? Connect this computer to the hotspot first; the code above then includes the hotspot address. A private address only works when the phone has a direct route to it (same Wi-Fi or hotspot) — not over mobile data.</p></div>}</section></div>}
       {downloadsOpen && <DownloadsModal onClose={() => setDownloadsOpen(false)} />}
       {recentOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setRecentOpen(false); }}><section className="utility-modal recent-modal" role="dialog" aria-modal="true" aria-labelledby="recent-title"><div className="modal-heading"><div><p className="section-kicker">HISTORY</p><h2 id="recent-title">Recent transfers</h2></div><button className="modal-close" aria-label="Close" onClick={() => setRecentOpen(false)}>×</button></div>{recentTransfers.length ? <div className="recent-list">{recentTransfers.map((transfer) => { const savedMacPath = transfer.receivedFiles.find((f) => f.savedToMacPath)?.savedToMacPath; const savedDiskPath = transfer.receivedFiles.find((f) => f.savedToDiskPath)?.savedToDiskPath; const isSavedToDisk = Boolean(savedMacPath || savedDiskPath); const canSave = transfer.status === "completed" && transfer.direction === "incoming" && transfer.receivedFiles.length > 0 && !isSavedToDisk; return <div className="recent-row" key={transfer.transferId}><span><strong>{transfer.files.map((file) => file.name).join(", ")}</strong><small>{transfer.direction === "incoming" ? "Received" : "Sent"} · {transfer.peerName} · {formatBytes(transfer.totalBytes)} {isSavedToDisk ? "· Saved to folder" : transfer.status === "completed" && transfer.direction === "incoming" ? "· Auto-saved to downloads" : ""}</small></span><span className="recent-actions">{transfer.direction === "incoming" && transfer.status === "completed" && (savedMacPath || receivedFolder) && <button type="button" className="icon-button folder-locate-button" aria-label={`Locate ${transfer.files[0]?.name ?? "received files"} in folder`} title="Locate in received-files folder" onClick={() => openReceivedFolder(savedMacPath)}><FolderOpen size={15} aria-hidden="true" /></button>}{canSave && <button type="button" className="text-button" onClick={() => saveReceivedTransferFiles(transfer)}>{transfer.receivedFiles.length > 1 ? "Save again" : "Save again"}</button>}<span className="recent-state">{transfer.status === "completed" ? "Complete" : transfer.status === "cancelled" ? "Cancelled" : transfer.status === "declined" ? "Declined" : "Failed"}</span></span></div>; })}</div> : <p className="empty-history">Completed transfers will appear here.</p>}</section></div>}
       {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="utility-modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="modal-heading"><div><p className="section-kicker">PREFERENCES</p><h2 id="settings-title">Settings</h2></div><button className="modal-close" aria-label="Close" onClick={() => setSettingsOpen(false)}>×</button></div><label className="setting-field">Device name<input defaultValue={deviceName} maxLength={40} onBlur={(event) => { const name = event.target.value.trim(); if (name && name !== deviceName) handleRenameDevice(name); }} /></label>{isNativeShell() && <label className="setting-toggle"><span><strong>Background clipboard &amp; connection</strong><small>{connectionContinuity ? "A native foreground service transfers files and receives clipboard content when you switch apps or turn off the screen. Android may block reading other apps’ clipboards; use Share → AirBridge or the AirBridge selected-text action." : "Opt in to an ongoing notification to keep clipboard sharing and the encrypted session alive while you switch apps."}</small></span><input type="checkbox" checked={connectionContinuity} onChange={(event) => { const enabled = event.target.checked; if (setNativeConnectionContinuity(enabled)) setConnectionContinuity(enabled); }} /></label>}<label className="setting-toggle"><span><strong>Dark appearance</strong><small>Use a monochrome dark theme</small></span><input type="checkbox" checked={darkMode} onChange={() => setDarkMode((value) => !value)} /></label><label className="setting-toggle"><span><strong>Auto-beam copied text</strong><small>{isNativeShell() ? "Beam text when Android permits clipboard access; incoming delivery and explicit Share work without this screen" : snap.localDaemon.clipboardBridge ? "Automatically beam copied text in the background without returning to this page" : "Automatically beam newly copied or shared text to your connected device"}</small></span><input type="checkbox" checked={snap.autoClipboardSync} onChange={(event) => clientRef.current?.setAutoClipboardSync(event.target.checked)} /></label><label className="setting-toggle"><span><strong>Receive clipboard beams</strong><small>{snap.clipboardReceiveEnabled ? "Incoming clipboard text and images are copied by the native service, even without the app screen" : "Blocked — you still beam but won't receive (per-device)"}</small></span><input type="checkbox" checked={snap.clipboardReceiveEnabled} onChange={(event) => clientRef.current?.setClipboardReceiveEnabled(event.target.checked)} /></label><label className="setting-toggle"><span><strong>Notification sharing</strong><small>{snap.notificationSharing ? "Notifications are mirrored bidirectionally between paired devices" : "Disabled — notifications are not shared"}</small></span><input type="checkbox" checked={snap.notificationSharing} onChange={(event) => clientRef.current?.setNotificationSharing(event.target.checked)} /></label>{receivedFolder ? (
@@ -949,6 +1069,12 @@ export function App() {
           {isNativeShell() && <div className="settings-info"><strong>Background battery access</strong><p>{batteryUnrestricted ? "Android battery optimization is disabled for AirBridge." : "Android battery optimization is enabled. For long screen-off transfers, choose AirBridge → Unrestricted or Don’t optimize in Android’s battery settings."} The native service keeps transfers independent of this screen; some manufacturers also require allowing background activity or auto-start. Force-stop and Android’s Stop action still end the service.</p><button type="button" className="secondary-button" onClick={() => openNativeBatterySettings()}>Open battery settings</button></div>}{isNativeShell() && <div className="settings-info accessibility-settings"><strong>Accessibility-assisted clipboard capture</strong><p>Off by default. Android 10+ can hide clipboard changes from background apps. Opting in lets AirBridge watch for copy and selection events through a service you enable in Android Settings, then beam plain text to your paired computer while this screen is hidden. AirBridge cannot enable the service for you, never reads other apps' text fields or keystrokes, and Android may still block hidden clipboard reads. Accessibility is not a clipboard-permission bypass. If a copy is blocked, use Share → AirBridge or select text → AirBridge in the other app.</p><label className="setting-toggle"><span><strong>Use Accessibility Service for hidden clipboard</strong><small>{accessibilityOptIn ? "Opted in. " : "Off. "}{accessibilityServiceEnabled ? "Service enabled in Android Settings." : "Service not enabled yet — open Android Settings below."}</small></span><input type="checkbox" checked={accessibilityOptIn} onChange={(event) => { const enabled = event.target.checked; if (setNativeAccessibilityOptIn(enabled)) { setAccessibilityOptIn(enabled); if (enabled && !accessibilityServiceEnabled) openNativeAccessibilitySettings(); } }} /></label><p className="accessibility-status" aria-live="polite"><strong>Android Settings:</strong> {accessibilityServiceEnabled ? "AirBridge clipboard bridge is enabled." : "AirBridge clipboard bridge is not enabled."}</p><button type="button" className="secondary-button" onClick={() => openNativeAccessibilitySettings()}>Open Accessibility settings</button></div>}<div className="settings-info"><strong>About connection status</strong><p>“Running” means this app is connected to its transfer service. “Nearby” means another device was discovered; a secure session is only ready after pairing completes.</p></div><div className="settings-info"><strong>Privacy and consent</strong><p>Incoming transfers ask before saving. Auto-accept is off. Revoke trusted devices in advanced trust management.</p></div>{isNativeShell() && <div className="settings-info"><strong>Paired computer</strong><p>The UI is bundled with this app. The native service connects to your paired computer independently of this screen. Changing computers ends active transfers and starts a fresh pairing.</p><button type="button" className="secondary-button" onClick={() => forgetNativeComputer()}>Change computer</button></div>}<a className="text-button advanced-toggle" href="https://github.com/DigantaDey/AirBridge#android-background-behavior" target="_blank" rel="noreferrer">About this version</a></section></div>}
       <TransferModal offer={activeIncomingOffer} senderPublicKey={incomingSenderPubKey} onAccept={(transferId, trustSender) => { if (trustSender && incomingSenderPubKey) clientRef.current?.toggleTrustedPeer(incomingSenderPubKey, true); clientRef.current?.acceptIncomingTransfer(transferId).catch((error: unknown) => showToast({ id: "accept-error", title: "Could not accept transfer", body: error instanceof Error ? error.message : "Try accepting the offer again." })); }} onDecline={(transferId) => { clientRef.current?.declineIncomingTransfer(transferId).catch(() => {}); }} />
       {clipboardOpen && <ClipboardCenter peers={snap.peers} items={snap.clipboardItems} autoSync={snap.autoClipboardSync} hostClipboardActive={Boolean(snap.localDaemon.clipboardBridge)} receiveEnabled={snap.clipboardReceiveEnabled} initialPeerId={clipboardPeerId} prefill={clipboardPrefill} onToggleAutoSync={(enabled) => clientRef.current?.setAutoClipboardSync(enabled)} onToggleReceive={(enabled) => clientRef.current?.setClipboardReceiveEnabled(enabled)} onMarkCopied={markLocalCopyHandled} onSend={handleSendClipboard} onSendImage={handleSendClipboardImage} onClose={() => setClipboardOpen(false)} />}
+      {continuityEnabled && continuityTab && clientRef.current && (
+        <ContinuityCenter client={clientRef.current} peers={snap.peers} continuity={snap.continuity} initialTab={continuityTab} onClose={() => setContinuityTab(null)} />
+      )}
+      {continuityEnabled && clientRef.current && (
+        <ContinuityAlerts client={clientRef.current} continuity={snap.continuity} onOpenCalls={() => setContinuityTab("calls")} startCapture={startDisplayCapture} />
+      )}
       {folderPickerOpen && <FolderPickerModal initialPath={receivedFolder || receivedFolderInput || ''} onSelect={(p) => { setReceivedFolderInput(p); setFolderPickerOpen(false); }} onClose={() => setFolderPickerOpen(false)} />}
       {toast && <div className="utility-toast" role="status"><strong>{toast.title}</strong><span>{toast.body}</span>{toast.actionLabel && <button type="button" className="toast-action" onClick={toast.onAction}>{toast.actionLabel}</button>}<button aria-label="Dismiss notification" onClick={() => setToast(null)}>×</button></div>}
     </div>
