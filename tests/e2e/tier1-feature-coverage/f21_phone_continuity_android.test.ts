@@ -32,12 +32,19 @@ describe('F21: Phone continuity (Android)', () => {
     expect(hasPermission(manifest, 'CALL_PHONE')).toBe(true);
     expect(continuity).toContain('placeCall(');
 
+    // Show a time-to-full estimate only when the Android platform can provide one.
+    expect(continuity).toContain('computeChargeTimeRemaining()');
+    expect(continuity).toContain('BatteryChargeEstimate.sanitize');
+    expect(continuity).not.toContain('BatteryManager.EXTRA_VOLTAGE');
+
     // Playback Capture is optional, per-session, and uses the platform API;
     // there is no package/DRM classification or alternate capture path.
     expect(hasPermission(manifest, 'RECORD_AUDIO')).toBe(true);
     const screen = await readRepoFile(`${APP}/ScreenShareService.kt`);
     expect(screen).toContain('AudioPlaybackCaptureConfiguration.Builder(mp)');
+    expect(screen).toContain('Also share permitted app audio (videos, music, games)');
     expect(screen).toContain('isChecked = false');
+    expect(screen).toContain('not microphone recording');
     expect(screen).toContain('setScreenAudioAvailable');
     expect(screen).not.toMatch(/netflix|hotstar|disney\+|drm app list/i);
     // Call history is not needed for remote controls and is intentionally absent.

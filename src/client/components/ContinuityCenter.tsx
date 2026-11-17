@@ -54,8 +54,9 @@ const TAB_FEATURE: Record<ContinuityTab, ContinuityFeature> = {
 const TAB_LABEL: Record<ContinuityTab, string> = { contacts: "Contacts", calls: "Calls", screen: "Screen" };
 
 const SCREEN_PRESETS = {
+  motion: { label: "Smooth video · 1280 px, 30 fps", maxWidth: 1280, maxFps: 30 },
   standard: { label: "Standard · 1280 px, 15 fps", maxWidth: 1280, maxFps: 15 },
-  high: { label: "High · 1920 px, 30 fps", maxWidth: 1920, maxFps: 30 },
+  high: { label: "High detail · 1920 px, 30 fps", maxWidth: 1920, maxFps: 30 },
   saver: { label: "Data saver · 960 px, 10 fps", maxWidth: 960, maxFps: 10 },
 } as const;
 type ScreenPreset = keyof typeof SCREEN_PRESETS;
@@ -514,18 +515,25 @@ function SendContactForm({ client, peer, onSent }: { client: ContinuityClient; p
   );
 }
 
+export function formatChargeTimeRemaining(ms: number | undefined): string | null {
+  if (!Number.isSafeInteger(ms) || ms === undefined || ms <= 0 || ms > 7 * 24 * 60 * 60 * 1000) return null;
+  const minutes = Math.ceil(ms / 60_000);
+  if (minutes < 60) return `Full in about ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `Full in about ${hours}h${remainingMinutes ? ` ${remainingMinutes}m` : ""}`;
+}
+
 function PhoneBatteryStatus({ status }: { status: PhoneBatteryStatusView }) {
   const isLow = status.level < 20 && !status.charging;
-  const voltage = status.charging && status.voltageMv
-    ? `Battery voltage ${ (status.voltageMv / 1000).toFixed(2) } V`
-    : null;
+  const eta = status.charging ? formatChargeTimeRemaining(status.chargeTimeRemainingMs) : null;
   return (
     <div className={`phone-battery ${isLow ? "is-low" : ""}`}>
-      <div className="phone-battery-line" role="status" aria-label={`${status.peerName} battery ${status.level} percent${status.charging ? ", charging" : ""}`}>
+      <div className="phone-battery-line" role="status" aria-label={`${status.peerName} battery ${status.level} percent${status.charging ? `, charging${eta ? `, ${eta}` : ""}` : ""}`}>
         <span className="phone-battery-label">Phone battery</span>
         <strong>{status.level}%</strong>
         <span>{status.charging ? "Charging" : "On battery"}</span>
-        {voltage && <span className="phone-battery-voltage">{voltage}</span>}
+        {eta && <span className="phone-battery-eta">{eta}</span>}
       </div>
       {isLow && <div className="phone-battery-warning" role="alert">Low battery — put {status.peerName} on charge soon.</div>}
     </div>
@@ -535,7 +543,7 @@ function PhoneBatteryStatus({ status }: { status: PhoneBatteryStatusView }) {
 // ---------------------------------------------------------------- screen
 
 function ScreenPanel({ client, peer, guidance, shares }: { client: ContinuityClient; peer?: PeerSummary; guidance: string | null; shares: ScreenShareView[] }) {
-  const [preset, setPreset] = useState<ScreenPreset>("standard");
+  const [preset, setPreset] = useState<ScreenPreset>("motion");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const viewing = shares.filter((s) => s.role === "viewer");
@@ -800,7 +808,7 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
       </div>
       {videoError && <p className="clipboard-error" role="alert">{videoError}</p>}
       {audioError && <p className="clipboard-error" role="alert">{audioError}</p>}
-      {share.state === "active" && !share.audioAvailable && <small className="continuity-note">App audio is disabled, unavailable, or blocked by the source app or platform. Protected content cannot be cast.</small>}
+      {share.state === "active" && !share.audioAvailable && <small className="continuity-note">To share sound, stop and share again, select “Also share permitted app audio” in the phone’s consent, and allow Android’s optional audio-capture permission if asked. When audio becomes available, click “Play app audio” here. This captures app playback, not microphone audio; Android, the source app, or protected content may block it.</small>}
     </div>
   );
 }

@@ -123,6 +123,7 @@ object Continuity {
     const val MAX_CONTACT_VALUES = 20
     const val MAX_VCARD_LENGTH = 64 * 1024
     const val MAX_CONTACT_QUERY = 100
+    const val MAX_CHARGE_TIME_ESTIMATE_MS = 7L * 24 * 60 * 60 * 1_000
 
     val CALL_STATES = listOf("ringing", "dialing", "active", "held", "ended")
     val CALL_ACTIONS = listOf("answer", "reject", "hangup", "dial")
@@ -258,6 +259,18 @@ object Continuity {
             else -> current + 0.02
         }
         return Math.round(next.coerceIn(0.3, 0.85) * 100).toDouble() / 100
+    }
+
+    /**
+     * Low-latency AVC target in bits/second. Scale with pixels, frame rate and
+     * the RTT-controlled quality percentage; never let a percent value such as
+     * 70 be mistaken for a 0.70 multiplier by the Android encoder.
+     */
+    fun screenVideoBitrate(width: Int, height: Int, maxFps: Int, qualityPercent: Int): Int {
+        val pixels = width.coerceAtLeast(1).toLong() * height.coerceAtLeast(1).toLong()
+        val fps = maxFps.coerceIn(1, SCREEN_MAX_FPS)
+        val quality = qualityPercent.coerceIn(30, 85) / 70.0
+        return (pixels * fps * 0.08 * quality).toLong().coerceIn(500_000L, 8_000_000L).toInt()
     }
 
     fun encodeScreenAad(sessionId: String, seq: Long, codec: Int, width: Int, height: Int): ByteArray {
@@ -814,14 +827,14 @@ class ContinuityChannel internal constructor(private val host: Host) {
     }
 
     /** Publish minimal live battery telemetry only to code-verified paired computers. */
-    fun publishBatteryStatus(level: Int, charging: Boolean, voltageMv: Int?, updatedAt: Long = System.currentTimeMillis()) {
+    fun publishBatteryStatus(level: Int, charging: Boolean, chargeTimeRemainingMs: Long?, updatedAt: Long = System.currentTimeMillis()) {
         if (level !in 0..100 || updatedAt <= 0) return
-        val cleanVoltage = voltageMv?.takeIf { it in 2_500..6_000 }
+        val cleanEstimate = chargeTimeRemainingMs?.takeIf { charging && it > 0L && it <= Continuity.MAX_CHARGE_TIME_ESTIMATE_MS }
         val payload = JsonValue.Obj()
             .put("kind", "battery-status")
             .put("level", level)
             .put("charging", charging)
-            .putOpt("voltageMv", cleanVoltage?.toLong())
+            .putOpt("chargeTimeRemainingMs", cleanEstimate)
             .put("updatedAt", updatedAt)
         for (id in host.peerIds()) if (host.isAuthorized(id)) send(id, payload)
     }

@@ -156,6 +156,19 @@ describe("featureGuidance", () => {
 });
 
 describe("ContinuityCenter", () => {
+  it("shows an estimated time to full when Android can provide one, never pack voltage", async () => {
+    const { client } = fakeClient();
+    await render(<ContinuityCenter
+      client={client}
+      peers={[phone]}
+      continuity={snapshot({ batteryStatus: { [PHONE]: { peerId: PHONE, peerName: "Pixel 9", level: 62, charging: true, chargeTimeRemainingMs: 95 * 60_000, updatedAt: Date.now() } } })}
+      initialTab="screen"
+      onClose={() => {}}
+    />);
+    expect(container.textContent).toContain("Full in about 1h 35m");
+    expect(container.textContent).not.toContain("Battery voltage");
+  });
+
   it("shows live phone battery status and a charging warning below 20 percent", async () => {
     const { client } = fakeClient();
     await render(<ContinuityCenter
@@ -265,6 +278,16 @@ describe("ContinuityCenter", () => {
     expect(client.requestContacts).not.toHaveBeenCalled();
   });
 
+  it("defaults to a 30 fps motion preset at a lower capture width", async () => {
+    const { client } = fakeClient();
+    await render(<ContinuityCenter client={client} peers={[phone]} continuity={snapshot()} initialTab="screen" onClose={() => {}} />);
+    const select = container.querySelector('select[aria-label="Screen quality"]') as HTMLSelectElement;
+    expect(select.value).toBe("motion");
+    expect(select.textContent).toContain("Smooth video · 1280 px, 30 fps");
+    act(() => button(/View Pixel 9 screen/).click());
+    expect(client.requestScreenShare).toHaveBeenCalledWith(PHONE, { maxWidth: 1280, maxFps: 30 });
+  });
+
   it("requests a screen, renders encrypted frames and stops", async () => {
     const { client, frameListeners } = fakeClient();
     Object.assign(URL, { createObjectURL: vi.fn(() => "blob:frame-1"), revokeObjectURL: vi.fn() });
@@ -287,6 +310,8 @@ describe("ContinuityCenter", () => {
     expect(img.src).toBe("blob:frame-1");
     expect(img.className).not.toContain("is-empty");
     expect(container.textContent).toContain("1080×2400 · 24 fps · 3.2 Mbps");
+    expect(container.textContent).toContain("select “Also share permitted app audio” in the phone’s consent");
+    expect(container.textContent).toContain("not microphone audio");
     act(() => button("Stop viewing").click());
     expect(client.stopScreenShare).toHaveBeenCalledWith("cccccccccccccccc");
 

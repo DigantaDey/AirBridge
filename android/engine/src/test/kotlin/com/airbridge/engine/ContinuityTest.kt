@@ -96,6 +96,12 @@ fun main() {
     channel.callController = CallController { cmd -> commands.add(cmd); CallCommandResult(true) }
     channel.callsReady = true
     channel.screenSourceAvailable = true
+    val motionBitrate = Continuity.screenVideoBitrate(864, 1920, 30, 70)
+    expect("screen.bitrate-adapts-to-quality", Continuity.screenVideoBitrate(864, 1920, 30, 30) < motionBitrate &&
+        Continuity.screenVideoBitrate(864, 1920, 30, 85) > motionBitrate)
+    expect("screen.bitrate-is-not-permanently-maxed", motionBitrate in 3_000_000..5_000_000 &&
+        Continuity.screenVideoBitrate(1280, 720, 15, 70) < motionBitrate)
+    expect("screen.bitrate-clamped", Continuity.screenVideoBitrate(0, 0, 99, 99) in 500_000..8_000_000)
     expect("features.all", channel.features() == listOf("contacts.receive", "contacts.provide", "calls.control", "screen.source", "screen.audio.capture"))
     channel.onPeersChanged(host.peers.values.toList())
     val hellos = host.sent.filter { it.second.optStr("kind") == "continuity-hello" }
@@ -111,13 +117,16 @@ fun main() {
     expect("hello.stranger-ignored", channel.peerFeatures(stranger).isEmpty() && host.sent.none { it.first == stranger })
 
     host.sent.clear()
-    channel.publishBatteryStatus(17, charging = false, voltageMv = 4_010, updatedAt = 1234)
+    channel.publishBatteryStatus(17, charging = true, chargeTimeRemainingMs = 90 * 60_000L, updatedAt = 1234)
     expect("battery.authorized-only", host.sent.map { it.first } == listOf(mac))
     expect("battery.payload", host.last("battery-status")!!.second.let {
-        it.optLong("level") == 17L && it.optBool("charging") == false && it.optLong("voltageMv") == 4_010L && it.optLong("updatedAt") == 1_234L
+        it.optLong("level") == 17L && it.optBool("charging") == true && it.optLong("chargeTimeRemainingMs") == 90 * 60_000L && it.optLong("updatedAt") == 1_234L
     })
-    channel.publishBatteryStatus(101, charging = false, voltageMv = 4_010)
-    expect("battery.invalid-level-dropped", host.sent.size == 1)
+    channel.publishBatteryStatus(18, charging = false, chargeTimeRemainingMs = 90 * 60_000L)
+    expect("battery.eta-only-while-charging", host.last("battery-status")!!.second.optLong("chargeTimeRemainingMs") == null)
+    val batteryCount = host.sent.count { it.second.optStr("kind") == "battery-status" }
+    channel.publishBatteryStatus(101, charging = false, chargeTimeRemainingMs = null)
+    expect("battery.invalid-level-dropped", host.sent.count { it.second.optStr("kind") == "battery-status" } == batteryCount)
 
     // ---- contacts -----------------------------------------------------------
     channel.handleControl(mac, obj("kind" to "contacts-request", "requestId" to "0123456789abcdef", "query" to "al", "limit" to 10))

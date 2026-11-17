@@ -27,26 +27,30 @@ function makeHost(overrides: Partial<ContinuityHost> = {}): ContinuityHost {
 }
 
 describe('phone battery status', () => {
-  it('accepts paired status, sanitizes voltage, and warns once per low-battery episode', async () => {
+  it('accepts paired status, sanitizes charge-time estimates, and warns once per low-battery episode', async () => {
     const lowBattery: PhoneBatteryStatusView[] = [];
     const host = makeHost();
     const manager = new ContinuityManager(host, { onLowPhoneBattery: (status) => lowBattery.push(status) });
     try {
       manager.onPeersChanged([{ peerId: phoneId, publicKey: 'phone-key' }]);
       const send = (status: Extract<ControlPayload, { kind: 'battery-status' }>) => manager.handleControl(phoneId, status);
-      await send({ kind: 'battery-status', level: 18, charging: false, voltageMv: 4010, updatedAt: 100 });
-      await send({ kind: 'battery-status', level: 17, charging: false, voltageMv: 9000, updatedAt: 200 });
+      await send({ kind: 'battery-status', level: 18, charging: false, updatedAt: 100 });
+      await send({ kind: 'battery-status', level: 17, charging: false, updatedAt: 200, chargeTimeRemainingMs: 90 * 60_000 });
       expect(manager.snapshot().batteryStatus[phoneId]).toMatchObject({
-        peerId: phoneId, peerName: 'Pixel phone', level: 17, charging: false, voltageMv: undefined, updatedAt: 200,
+        peerId: phoneId, peerName: 'Pixel phone', level: 17, charging: false, chargeTimeRemainingMs: undefined, updatedAt: 200,
       });
       expect(lowBattery).toHaveLength(1);
 
-      await send({ kind: 'battery-status', level: 19, charging: true, updatedAt: 300 });
-      await send({ kind: 'battery-status', level: 19, charging: false, updatedAt: 400 });
+      await send({ kind: 'battery-status', level: 19, charging: true, chargeTimeRemainingMs: 90 * 60_000, updatedAt: 300 });
+      expect(manager.snapshot().batteryStatus[phoneId]?.chargeTimeRemainingMs).toBe(90 * 60_000);
+      await send({ kind: 'battery-status', level: 19, charging: false, chargeTimeRemainingMs: 80 * 60_000, updatedAt: 400 });
+      expect(manager.snapshot().batteryStatus[phoneId]?.chargeTimeRemainingMs).toBeUndefined();
+      await send({ kind: 'battery-status', level: 19, charging: true, chargeTimeRemainingMs: 8 * 24 * 60 * 60_000, updatedAt: 500 });
+      expect(manager.snapshot().batteryStatus[phoneId]?.chargeTimeRemainingMs).toBeUndefined();
       expect(lowBattery).toHaveLength(2);
 
-      await manager.handleControl('fedcba9876543210', { kind: 'battery-status', level: 10, charging: false, updatedAt: 500 });
-      await send({ kind: 'battery-status', level: 101, charging: false, updatedAt: 600 });
+      await manager.handleControl('fedcba9876543210', { kind: 'battery-status', level: 10, charging: false, updatedAt: 600 });
+      await send({ kind: 'battery-status', level: 101, charging: false, updatedAt: 700 });
       expect(manager.snapshot().batteryStatus[phoneId]?.level).toBe(19);
       expect(lowBattery).toHaveLength(2);
 

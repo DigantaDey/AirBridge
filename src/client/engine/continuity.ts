@@ -74,8 +74,8 @@ export interface PhoneBatteryStatusView {
   peerName: string;
   level: number;
   charging: boolean;
-  /** Phone battery pack voltage in millivolts (not charger-adapter voltage). */
-  voltageMv?: number;
+  /** Android estimate in milliseconds; absent when not charging or unavailable. */
+  chargeTimeRemainingMs?: number;
   updatedAt: number;
 }
 
@@ -226,6 +226,7 @@ const ENDED_CALL_LINGER_MS = 5_000;
 const STOPPED_SHARE_LINGER_MS = 8_000;
 const MAX_CALLS = 8;
 const MAX_SHARED_CONTACTS = 30;
+const MAX_CHARGE_TIME_REMAINING_MS = 7 * 24 * 60 * 60 * 1000;
 const ACK_STALL_MS = 3_000;
 const STATS_EMIT_MS = 500;
 
@@ -646,15 +647,16 @@ export class ContinuityManager {
         typeof payload.charging !== 'boolean' || !Number.isFinite(payload.updatedAt) || payload.updatedAt <= 0) return;
     const previous = this.batteryStatus.get(fromPeerId);
     if (previous && previous.updatedAt > payload.updatedAt) return;
-    const voltageMv = Number.isInteger(payload.voltageMv) && payload.voltageMv! >= 2_500 && payload.voltageMv! <= 6_000
-      ? payload.voltageMv
+    const eta = payload.chargeTimeRemainingMs;
+    const chargeTimeRemainingMs = payload.charging && Number.isSafeInteger(eta) && eta! > 0 && eta! <= MAX_CHARGE_TIME_REMAINING_MS
+      ? eta
       : undefined;
     const status: PhoneBatteryStatusView = {
       peerId: fromPeerId,
       peerName: this.peerName(fromPeerId),
       level: payload.level,
       charging: payload.charging,
-      voltageMv,
+      chargeTimeRemainingMs,
       updatedAt: payload.updatedAt,
     };
     this.batteryStatus.set(fromPeerId, status);

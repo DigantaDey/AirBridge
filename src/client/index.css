@@ -377,7 +377,7 @@ html.dark .clipboard-error { color: #f87171; }
 .phone-battery-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--ab-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
 .phone-battery-line strong { color: var(--ab-text); font-size: 13px; }
 .phone-battery-label { color: var(--ab-muted); }
-.phone-battery-voltage { color: var(--ab-muted); }
+.phone-battery-eta { color: var(--ab-muted); }
 .phone-battery.is-low { border-color: var(--ab-warning, #d18b00); }
 .phone-battery-warning { margin-top: 5px; color: var(--ab-warning, #a76500); font-size: 12px; }
 .continuity-panel { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }

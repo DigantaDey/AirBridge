@@ -326,7 +326,7 @@ class CallMonitor(
  * incoming contact cards and screen-share consent.
  */
 class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
-    private data class BatteryReading(val level: Int, val charging: Boolean, val voltageMv: Int?)
+    private data class BatteryReading(val level: Int, val charging: Boolean, val chargeTimeRemainingMs: Long?)
 
     private val contacts = AndroidContactProvider(context)
     @Volatile private var channel: ContinuityChannel? = null
@@ -339,9 +339,14 @@ class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
             val reading = readBattery(intent) ?: return
             val shouldPublish = synchronized(this@PhoneContinuity) {
                 val previous = lastBattery
-                val changed = previous == null || previous.level != reading.level || previous.charging != reading.charging ||
-                    (previous.voltageMv != null && reading.voltageMv != null && abs(previous.voltageMv - reading.voltageMv) >= 50) ||
-                    (previous.voltageMv == null) != (reading.voltageMv == null)
+                val priorEta = previous?.chargeTimeRemainingMs
+                val nextEta = reading.chargeTimeRemainingMs
+                val etaChanged = when {
+                    priorEta == null -> nextEta != null
+                    nextEta == null -> true
+                    else -> abs(priorEta - nextEta) >= 60_000L
+                }
+                val changed = previous == null || previous.level != reading.level || previous.charging != reading.charging || etaChanged
                 if (changed) lastBattery = reading
                 changed
             }
@@ -379,12 +384,15 @@ class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
         val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
         val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
             (status == BatteryManager.BATTERY_STATUS_UNKNOWN && plugged)
-        val voltage = intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1).takeIf { it in 2_500..6_000 }
-        return BatteryReading(level, charging, voltage)
+        val estimatedMs = if (charging && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            runCatching { context.getSystemService(BatteryManager::class.java)?.computeChargeTimeRemaining() }.getOrNull()
+        } else null
+        val chargeTimeRemainingMs = BatteryChargeEstimate.sanitize(estimatedMs, charging)
+        return BatteryReading(level, charging, chargeTimeRemainingMs)
     }
 
     private fun publishBattery(reading: BatteryReading) {
-        channel?.publishBatteryStatus(reading.level, reading.charging, reading.voltageMv)
+        channel?.publishBatteryStatus(reading.level, reading.charging, reading.chargeTimeRemainingMs)
     }
 
     /** Re-evaluate toggles/permissions (Settings change, app resume); re-announce if changed. */

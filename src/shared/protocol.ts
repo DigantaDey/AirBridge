@@ -201,8 +201,8 @@ export type ControlPayload =
       kind: 'battery-status';
       level: number;
       charging: boolean;
-      /** Phone battery pack voltage, millivolts; this is not charger-adapter voltage. */
-      voltageMv?: number;
+      /** Android estimate in milliseconds; omitted if charging time cannot be estimated. */
+      chargeTimeRemainingMs?: number;
       updatedAt: number;
     }
   | {
