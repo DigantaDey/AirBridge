@@ -85,7 +85,9 @@ jobs:
         run: |
           set -o pipefail
           gradle -p android :engine:check :app:assembleDebug --no-daemon 2>&1 | tee gradle-build.log || {
-            echo "::error title=Android Gradle build failed::$(tail -n 40 gradle-build.log | tr '\n' '|' | cut -c1-3000)"
+            # Keep the actual Kotlin/compiler diagnostics visible in the GitHub
+            # annotation. The Gradle summary alone is not actionable.
+            echo "::error title=Android Gradle build failed::$(tail -n 160 gradle-build.log | tr '\n' '|' | cut -c1-12000)"
             exit 1
           }
       - name: Native headless interop (HTTP + TLS + QR hotspot pairing + SPAKE2 join + relay, 128 MiB heap)
