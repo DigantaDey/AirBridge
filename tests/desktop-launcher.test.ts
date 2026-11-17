@@ -169,7 +169,7 @@ describe('desktop shell integration stays wired', () => {
     expect(sh).toContain('X-AirBridge-Version=$app_version');
     // Only binaries that know --open (it's in their --help) get a launcher.
     expect(sh).toContain(`[ "$mode" = "binary" ]`);
-    expect(sh).toContain(`grep -q -- '--open'`);
+    expect(sh).toContain(`grep -aqF -- '--open [panel]' "$bin"`);
     expect(fs.readFileSync(path.join(root, 'packaging/desktop-entry.ts'), 'utf8')).toMatch(/^ {4}--open \[panel\]/m);
     for (const action of LAUNCHER_ACTIONS) {
       expect(sh).toContain(`[Desktop Action ${action.id}]`);

@@ -231,6 +231,44 @@ describe('macOS installer', () => {
   });
 });
 
+describe('install.sh Linux app launcher', () => {
+  const linux = () => mock('uname', 'if [ "$1" = "-s" ]; then echo Linux; else echo x86_64; fi');
+  const launcher = () => path.join(home, '.local/share/applications/airbridge.desktop');
+  /** Release binaries embed their help text; mark the mock as one that knows --open. */
+  const supportsOpen = () => {
+    const curlPath = path.join(mocks, 'curl');
+    fs.writeFileSync(curlPath, fs.readFileSync(curlPath, 'utf8').replace("#!/bin/bash\nif [", "#!/bin/bash\n# --open [panel]\nif ["));
+  };
+
+  it('writes a launcher with the version and Contacts / Calls / Screen Sharing actions, without running the binary', () => {
+    linux();
+    supportsOpen();
+    const result = install('--no-start');
+    expect(result.status, result.stderr).toBe(0);
+    const entry = fs.readFileSync(launcher(), 'utf8');
+    const bin = path.join(env.AIRBRIDGE_INSTALL_DIR!, 'AirBridge');
+    expect(entry).toContain('X-AirBridge-Version=1.0');
+    expect(entry).toContain('Comment=AirBridge 1.0');
+    expect(entry).toContain(`Exec="${bin}" --open\n`);
+    expect(entry).toContain('Actions=Contacts;Calls;ScreenSharing;');
+    expect(entry).toContain(`Exec="${bin}" --open calls`);
+    expect(entry).toContain('[Desktop Action ScreenSharing]');
+    // Probing for --open must not start (or otherwise run) the service.
+    expect(fs.existsSync(path.join(root, 'starts'))).toBe(false);
+    expect(result.stdout).toContain('app launcher:');
+  });
+
+  it('skips binaries that do not know --open, and honours AIRBRIDGE_LAUNCHER=0', () => {
+    linux();
+    expect(install('--no-start').status).toBe(0);
+    expect(fs.existsSync(launcher())).toBe(false);
+    supportsOpen();
+    env.AIRBRIDGE_LAUNCHER = '0';
+    expect(install('--no-start').status).toBe(0);
+    expect(fs.existsSync(launcher())).toBe(false);
+  });
+});
+
 describe('install.sh platform checks', () => {
   const script = fs.readFileSync(path.join(__dirname, '..', 'install.sh'), 'utf8');
 

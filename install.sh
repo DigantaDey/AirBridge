@@ -485,8 +485,9 @@ if [ "$os" = "Darwin" ]; then
 fi
 # Only binaries that understand `--open` get a launcher (source installs run
 # the Node CLI, and an older release would read the flag as a file to send).
+# The help text is embedded in the binary, so this check runs nothing.
 if [ "$os" = "Linux" ] && [ "${AIRBRIDGE_LAUNCHER:-1}" != "0" ] && [ "$mode" = "binary" ] \
-  && "$bin" --help 2>/dev/null | grep -q -- '--open'; then
+  && grep -aqF -- '--open [panel]' "$bin" 2>/dev/null; then
   # App launcher: GNOME/KDE/… show it in the app grid, dock and top bar with
   # the version and Contacts / Calls / Screen Sharing actions (right-click).
   # `--open` hands off to an already-running service. The binary refreshes the
