@@ -31,7 +31,7 @@ class HotspotHandoffGuidanceTest {
         assertTrue(guidance.contains("compatible Mac"))
         assertTrue(guidance.contains("private service"))
         assertTrue(guidance.contains("phone's Bluetooth name is irrelevant", ignoreCase = true))
-        assertTrue(guidance.contains("no Bluetooth pairing", ignoreCase = true))
+        assertTrue(guidance.contains("no manual Bluetooth pairing", ignoreCase = true))
     }
 
     @Test
