@@ -120,10 +120,13 @@ fun main() {
         val gradle = appGradleFile.readText()
         check("build.gradle.kts enables V2 and V3 signing",
             gradle.contains("enableV2Signing = true") && gradle.contains("enableV3Signing = true"))
-        check("build.gradle.kts uses monotonic 100000+ versionCode",
-            gradle.contains("100000 + ciRunNumber") && gradle.contains("100000 + gitCommitCount"))
-        check("build.gradle.kts uses ciSideload for debug buildType",
-            gradle.contains("signingConfig = signingConfigs.getByName(\"ciSideload\")"))
+        check("build.gradle.kts uses a monotonic Play-safe versionCode floor",
+            gradle.contains("AIRBRIDGE_VERSION_CODE") &&
+                gradle.contains("versionCode = configuredVersionCode ?: 2_300_000 + gitCommitCount"))
+        check("build.gradle.kts requires a private release upload key and never a CI sideload key",
+            gradle.contains("AIRBRIDGE_KEYSTORE_FILE") &&
+                gradle.contains("signingConfig = signingConfigs.findByName(\"release\")") &&
+                !gradle.contains("ciSideload"))
     }
 
     println("Milestone1Test: $passed passed, $failed failed")
