@@ -54,17 +54,14 @@ describe('F16: Bidirectional Clipboard Sync & Background Android Access', () => 
     });
   });
 
-  it('restricts ClipboardAccessibilityService metadata so it cannot retrieve window content or inject gestures', async () => {
-    const a11yXml = await readRepoFile('android/app/src/main/res/xml/accessibility_service_config.xml');
-    const a11yKt = await readRepoFile(
-      'android/app/src/main/kotlin/com/airbridge/app/ClipboardAccessibilityService.kt',
-    );
-    expect(a11yXml).toContain('android:canRetrieveWindowContent="false"');
-    expect(a11yXml).toContain('android:canPerformGestures="false"');
-    expect(a11yXml).not.toContain('typeAllMask');
-    expect(a11yKt).not.toContain('rootInActiveWindow');
-    expect(a11yKt).toContain('TYPE_ACCESSIBILITY_OVERLAY');
-    expect(a11yKt).toContain('removeFocusOverlay()');
+  it('uses explicit Android clipboard-send paths instead of Accessibility observation', async () => {
+    const manifest = await readRepoFile('android/app/src/main/AndroidManifest.xml');
+    const tile = await readRepoFile('android/app/src/main/kotlin/com/airbridge/app/ClipboardTileService.kt');
+    const share = await readRepoFile('android/app/src/main/kotlin/com/airbridge/app/ShareTextActivity.kt');
+    expect(manifest).not.toContain('BIND_ACCESSIBILITY_SERVICE');
+    expect(manifest).not.toContain('ClipboardAccessibilityService');
+    expect(tile).toContain('explicit, one-tap clipboard beam');
+    expect(share).toContain('Intent.ACTION_PROCESS_TEXT');
   });
 
   it('implements own-write echo suppression and burst deduplication in ConnectionService', async () => {

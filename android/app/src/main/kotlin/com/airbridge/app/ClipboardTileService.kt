@@ -8,8 +8,8 @@ import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 
 /**
- * Quick Settings tile giving the user a 1-tap clipboard beam from any app on
- * Android 10–15 without depending solely on Accessibility focus overlays.
+ * Quick Settings tile giving the user an explicit, one-tap clipboard beam
+ * from any app on Android 10–15.
  */
 class ClipboardTileService : TileService() {
     override fun onStartListening() {

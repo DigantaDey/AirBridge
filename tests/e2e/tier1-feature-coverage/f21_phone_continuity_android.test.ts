@@ -31,9 +31,18 @@ describe('F21: Phone continuity (Android)', () => {
     expect(continuity).toContain('endCall()');
     expect(hasPermission(manifest, 'CALL_PHONE')).toBe(true);
     expect(continuity).toContain('placeCall(');
-    // Caller number on API 29+ (optional: calls still work without it).
-    expect(hasPermission(manifest, 'READ_CALL_LOG')).toBe(true);
-    expect(continuity).toContain('callerIdGranted');
+
+    // Playback Capture is optional, per-session, and uses the platform API;
+    // there is no package/DRM classification or alternate capture path.
+    expect(hasPermission(manifest, 'RECORD_AUDIO')).toBe(true);
+    const screen = await readRepoFile(`${APP}/ScreenShareService.kt`);
+    expect(screen).toContain('AudioPlaybackCaptureConfiguration.Builder(mp)');
+    expect(screen).toContain('isChecked = false');
+    expect(screen).toContain('setScreenAudioAvailable');
+    expect(screen).not.toMatch(/netflix|hotstar|disney\+|drm app list/i);
+    // Call history is not needed for remote controls and is intentionally absent.
+    expect(hasPermission(manifest, 'READ_CALL_LOG')).toBe(false);
+    expect(continuity).not.toContain('callerIdGranted');
 
     // Contact cards from the computer go through the system editor.
     expect(hasPermission(manifest, 'WRITE_CONTACTS')).toBe(false);
@@ -44,9 +53,23 @@ describe('F21: Phone continuity (Android)', () => {
     expect(manifest.rawXml).toMatch(/android:name="android\.hardware\.telephony"\s+android:required="false"/);
   });
 
+  it('starts sensitive remote capabilities disabled and revokes a live screen share when disabled', async () => {
+    const prefs = await readRepoFile(`${APP}/Prefs.kt`);
+    const continuity = await readRepoFile(`${APP}/PhoneContinuity.kt`);
+    expect(prefs).toContain('getBoolean("contactsOnComputer", false)');
+    expect(prefs).toContain('getBoolean("callsFromComputer", false)');
+    expect(prefs).toContain('getBoolean("screenSharing", false)');
+    expect(continuity).toContain('ch.contactsReady = prefs.contactsOnComputer');
+    expect(continuity).toContain('ch.callsReady = callsOk');
+    expect(continuity).toContain('ch.screenSourceAvailable = screenSharingEnabled');
+    expect(continuity).toContain('ch.declineScreenShare(request.sessionId, "Screen sharing was disabled on the phone")');
+    expect(continuity).toContain('ch.stopScreenShare(sessionId, "Screen sharing was disabled on the phone")');
+  });
+
   it('runs screen capture in a private mediaProjection foreground service', async () => {
     const manifest = await readAndroidManifest();
     expect(hasPermission(manifest, 'FOREGROUND_SERVICE_MEDIA_PROJECTION')).toBe(true);
+    expect(hasPermission(manifest, 'FOREGROUND_SERVICE_MICROPHONE')).toBe(true);
     const svc = getService(manifest, 'ScreenShareService');
     expect(svc?.exported).toBe(false);
     expect(hasForegroundServiceType(manifest, 'ScreenShareService', 'mediaProjection')).toBe(true);
@@ -68,10 +91,13 @@ describe('F21: Phone continuity (Android)', () => {
     expect(display).toBeGreaterThan(callback); // callback before the virtual display
     // One virtual display per token: later size changes resize it.
     expect(svc).toContain('vd.resize(');
-    // Frames flow only after the user accepted, through the engine's flow control.
+    // Encoded access units flow only after consent and are dropped under the
+    // engine's bounded flow-control window rather than queued as JPEG images.
     expect(svc.indexOf('acceptScreenShare(')).toBeGreaterThan(token);
-    expect(svc).toContain('canSendScreenFrame(');
-    expect(svc).toContain('sendScreenFrame(');
+    expect(svc).toContain('MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)');
+    expect(svc).toContain('sendScreenVideoFrame(');
+    expect(svc).toContain('BUFFER_FLAG_KEY_FRAME');
+    expect(svc).not.toContain('Bitmap.CompressFormat.JPEG');
     expect(svc).toContain('createScreenCaptureIntent()');
   });
 

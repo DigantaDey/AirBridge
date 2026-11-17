@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { Maximize2, Phone, PhoneIncoming, PhoneOff, ScreenShare, Search, Upload, Download, UserPlus } from "lucide-react";
+import { Maximize2, Phone, PhoneIncoming, PhoneOff, ScreenShare, Search, Upload, Download, UserPlus, Volume2 } from "lucide-react";
 import {
   MAX_VCARD_LENGTH,
   buildVCard,
@@ -18,7 +18,9 @@ import type {
   ContactShareItem,
   ContactsQueryResult,
   ContinuitySnapshot,
+  ScreenAudioFrame,
   ScreenFrame,
+  ScreenVideoFrame,
   ScreenShareRequestView,
   ScreenShareView,
 } from "../engine/continuity.js";
@@ -37,6 +39,8 @@ export interface ContinuityClient {
   requestScreenShare(peerId: string, options?: { maxWidth?: number; maxFps?: number }): string;
   stopScreenShare(sessionId: string): void;
   subscribeScreenFrames(sessionId: string, listener: (frame: ScreenFrame) => void): () => void;
+  subscribeScreenVideo?(sessionId: string, listener: (frame: ScreenVideoFrame) => void): () => void;
+  subscribeScreenAudio?(sessionId: string, listener: (frame: ScreenAudioFrame) => void): () => void;
 }
 
 const TAB_FEATURE: Record<ContinuityTab, ContinuityFeature> = {
@@ -570,8 +574,28 @@ export function screenEndedLabel(share: ScreenShareView): string {
 
 function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; share: ScreenShareView; onStop: () => void }) {
   const imgRef = useRef<HTMLImageElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const contextRef = useRef<AudioContext | null>(null);
+  const playheadRef = useRef(0);
+  /** Maps Android's shared video/audio elapsed clock to this viewer's clock. */
+  const timelineRef = useRef<{ remotePtsMs: number; localMs: number } | null>(null);
+  const audioNodesRef = useRef(new Set<AudioBufferSourceNode>());
   const [hasFrame, setHasFrame] = useState(false);
+  const [h264Active, setH264Active] = useState(false);
+  const [videoError, setVideoError] = useState<string | null>(null);
+  const [audioEnabled, setAudioEnabled] = useState(false);
+  const [audioError, setAudioError] = useState<string | null>(null);
+  const mapSourceTime = (ptsMs: number): number => {
+    const now = performance.now();
+    const prior = timelineRef.current;
+    const delta = prior ? ((ptsMs - prior.remotePtsMs + 0x80000000) % 0x100000000 + 0x100000000) % 0x100000000 - 0x80000000 : 0;
+    if (!prior || Math.abs(delta) > 10_000) {
+      timelineRef.current = { remotePtsMs: ptsMs, localMs: now };
+      return now;
+    }
+    return prior.localMs + delta;
+  };
   useEffect(() => {
     let url: string | null = null;
     const unsubscribe = client.subscribeScreenFrames(share.sessionId, (frame) => {
@@ -580,6 +604,7 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
       imgRef.current.src = next;
       if (url) URL.revokeObjectURL(url);
       url = next;
+      setH264Active(false);
       setHasFrame(true);
     });
     return () => {
@@ -588,25 +613,137 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
     };
   }, [client, share.sessionId]);
 
+  // Android uses AVC access units rather than serialised bitmaps. WebCodecs
+  // keeps decode off the layout path; a legacy browser can still view JPEG
+  // streams from browser peers, but is told when it cannot render Android AVC.
+  useEffect(() => {
+    if (!client.subscribeScreenVideo) return;
+    type DecoderCtor = new (init: { output: (frame: { displayWidth: number; displayHeight: number; close: () => void }) => void; error: (error: Error) => void }) => {
+      configure(config: Record<string, unknown>): void;
+      decode(chunk: unknown): void;
+      close(): void;
+    };
+    type ChunkCtor = new (init: { type: 'key' | 'delta'; timestamp: number; data: Uint8Array }) => unknown;
+    const api = window as unknown as Window & { VideoDecoder?: DecoderCtor; EncodedVideoChunk?: ChunkCtor };
+    if (!api.VideoDecoder || !api.EncodedVideoChunk) {
+      setVideoError("This browser cannot decode the phone's low-latency H.264 stream. Use a current Chromium-based AirBridge desktop browser.");
+      return;
+    }
+    let decoder: InstanceType<DecoderCtor>;
+    try {
+      decoder = new api.VideoDecoder({
+        output: (frame) => {
+          const canvas = canvasRef.current;
+          const context = canvas?.getContext('2d');
+          if (canvas && context) {
+            canvas.width = frame.displayWidth;
+            canvas.height = frame.displayHeight;
+            context.drawImage(frame as unknown as CanvasImageSource, 0, 0);
+            setH264Active(true);
+            setHasFrame(true);
+          }
+          frame.close();
+        },
+        error: () => setVideoError("The H.264 stream could not be decoded. The phone will send another sync frame shortly."),
+      });
+      // MediaCodec emits Annex-B AVC (SPS/PPS are prepended to sync frames),
+      // so no codec-private description or unauthenticated side channel is used.
+      decoder.configure({ codec: 'avc1.42E01E', optimizeForLatency: true });
+    } catch {
+      setVideoError("This browser cannot initialise low-latency H.264 playback.");
+      return;
+    }
+    const unsubscribe = client.subscribeScreenVideo(share.sessionId, (frame) => {
+      mapSourceTime(frame.ptsMs);
+      try {
+        decoder.decode(new api.EncodedVideoChunk!({ type: frame.keyFrame ? 'key' : 'delta', timestamp: frame.ptsMs * 1000, data: frame.data }));
+      } catch {
+        // A delta after decoder recovery is expected; wait for the next key frame.
+      }
+    });
+    return () => {
+      unsubscribe();
+      try { decoder.close(); } catch { /* decoder already closed */ }
+    };
+  }, [client, share.sessionId]);
+
+  // The source sends timestamped, small PCM packets. Keep a bounded local
+  // jitter buffer and drop old packets rather than letting A/V drift grow.
+  useEffect(() => {
+    if (!audioEnabled || !client.subscribeScreenAudio || !contextRef.current) return;
+    const context = contextRef.current;
+    const unsubscribe = client.subscribeScreenAudio(share.sessionId, (frame) => {
+      // Video and AudioRecord carry the same elapsed-realtime PTS. Map that
+      // source clock once at arrival, then keep about 60 ms of jitter room.
+      const desired = context.currentTime + (mapSourceTime(frame.ptsMs) - performance.now()) / 1000 + 0.06;
+      if (desired < context.currentTime - 0.18) return;
+      const startAt = Math.max(context.currentTime + 0.015, Math.min(desired, context.currentTime + 0.2), playheadRef.current);
+      const buffer = context.createBuffer(frame.channels, frame.frames, frame.sampleRate);
+      for (let channel = 0; channel < frame.channels; channel += 1) {
+        const samples = buffer.getChannelData(channel);
+        for (let index = 0; index < frame.frames; index += 1) {
+          const byteOffset = (index * frame.channels + channel) * 2;
+          const value = frame.data[byteOffset] | (frame.data[byteOffset + 1] << 8);
+          samples[index] = (value & 0x8000 ? value - 0x10000 : value) / 0x8000;
+        }
+      }
+      const node = context.createBufferSource();
+      node.buffer = buffer;
+      node.connect(context.destination);
+      audioNodesRef.current.add(node);
+      node.onended = () => { audioNodesRef.current.delete(node); node.disconnect(); };
+      node.start(startAt);
+      playheadRef.current = startAt + buffer.duration;
+    });
+    return () => {
+      unsubscribe();
+      for (const node of audioNodesRef.current) { try { node.stop(); } catch { /* already stopped */ } }
+      audioNodesRef.current.clear();
+      playheadRef.current = 0;
+      timelineRef.current = null;
+    };
+  }, [audioEnabled, client, share.sessionId]);
+
+  useEffect(() => () => { void contextRef.current?.close(); }, []);
+
+  const toggleAudio = () => {
+    if (audioEnabled) { setAudioEnabled(false); return; }
+    const AudioContextCtor = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) { setAudioError("This browser cannot play the shared app audio."); return; }
+    const context = contextRef.current ?? new AudioContextCtor();
+    contextRef.current = context;
+    void context.resume().then(() => { setAudioError(null); setAudioEnabled(true); }).catch(() => setAudioError("Allow audio playback in this browser, then try again."));
+  };
+
   const status = share.state === "active"
     ? `${share.width && share.height ? `${share.width}×${share.height} · ` : ""}${share.fps} fps · ${share.kbps >= 1000 ? `${(share.kbps / 1000).toFixed(1)} Mbps` : `${share.kbps} kbps`}`
     : share.state === "pending" ? `Waiting for ${share.peerName} to allow screen sharing…` : `Asking ${share.peerName}…`;
+  const audioLabel = share.audioAvailable
+    ? audioEnabled ? "App audio playing" : "App audio is available"
+    : "App audio is off or unavailable";
 
   return (
     <div className="screen-viewer">
       <div ref={stageRef} className="screen-stage">
-        <img ref={imgRef} alt={`${share.peerName} screen`} className={hasFrame ? "screen-frame" : "screen-frame is-empty"} />
-        {!hasFrame && <span className="screen-placeholder">{status}</span>}
+        <img ref={imgRef} alt={`${share.peerName} screen`} className={hasFrame && !h264Active ? "screen-frame" : "screen-frame is-empty"} />
+        <canvas ref={canvasRef} aria-label={`${share.peerName} screen`} className={h264Active ? "screen-frame" : "screen-frame is-empty"} />
+        {!hasFrame && <span className="screen-placeholder">{videoError ?? status}</span>}
       </div>
       <div className="screen-toolbar">
-        <span className="quiet-count" aria-live="polite">{status}</span>
+        <span className="quiet-count" aria-live="polite">{status} · {audioLabel}</span>
         <span className="call-actions">
+          {share.audioAvailable && client.subscribeScreenAudio && <button type="button" className="quiet-button" onClick={toggleAudio} aria-pressed={audioEnabled}>
+            <Volume2 size={13} aria-hidden="true" /> {audioEnabled ? "Mute app audio" : "Play app audio"}
+          </button>}
           <button type="button" className="quiet-button" aria-label="Full screen" disabled={!hasFrame} onClick={() => { void stageRef.current?.requestFullscreen?.(); }}>
             <Maximize2 size={13} aria-hidden="true" /> Full screen
           </button>
           <button type="button" className="secondary-button" onClick={onStop}>Stop viewing</button>
         </span>
       </div>
+      {videoError && <p className="clipboard-error" role="alert">{videoError}</p>}
+      {audioError && <p className="clipboard-error" role="alert">{audioError}</p>}
+      {share.state === "active" && !share.audioAvailable && <small className="continuity-note">App audio is disabled, unavailable, or blocked by the source app or platform. Protected content cannot be cast.</small>}
     </div>
   );
 }

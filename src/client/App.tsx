@@ -30,13 +30,9 @@ import {
   forgetNativeComputer,
   isNativeShell,
   getNativeConnectionContinuity,
-  getNativeAccessibilityOptIn,
-  isNativeAccessibilityServiceEnabled,
-  openNativeAccessibilitySettings,
   isNativeBatteryOptimizationExempt,
   openNativeBatterySettings,
   publishNativeTransferSpeed,
-  setNativeAccessibilityOptIn,
   setNativeConnectionContinuity,
   setNativeDarkTheme,
   setNativeTransferActive,
@@ -692,8 +688,6 @@ export function App() {
   );
   const diagnostics = useDiagnosticsCopy(diagnosticsPage);
   const [connectionContinuity, setConnectionContinuity] = useState(getNativeConnectionContinuity);
-  const [accessibilityOptIn, setAccessibilityOptIn] = useState(getNativeAccessibilityOptIn);
-  const [accessibilityServiceEnabled, setAccessibilityServiceEnabled] = useState(isNativeAccessibilityServiceEnabled);
   const [clipboardOpen, setClipboardOpen] = useState(false);
   const [clipboardPeerId, setClipboardPeerId] = useState<string | null>(null);
   const [clipboardPrefill, setClipboardPrefill] = useState("");
@@ -757,21 +751,6 @@ export function App() {
     return () => { delete window.__airbridgeOpenPanel; };
   }, [continuityEnabled]);
 
-  // Android reports the OS Accessibility Service state after the page loads and
-  // whenever the user returns from Android Settings. Keep the opt-in UI honest.
-  useEffect(() => {
-    if (!isNativeShell()) return;
-    window.__airbridgeNativeAccessibilityState = (enabled: boolean) => {
-      setAccessibilityServiceEnabled(Boolean(enabled));
-    };
-    return () => {
-      delete window.__airbridgeNativeAccessibilityState;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (settingsOpen) setAccessibilityServiceEnabled(isNativeAccessibilityServiceEnabled());
-  }, [settingsOpen]);
 
   const filePicker = useRef<HTMLInputElement>(null);
   const deviceName = snap.myDevice?.name || "This device";
@@ -1066,7 +1045,7 @@ export function App() {
           ) : (
             <div className="settings-info"><strong>Received files folder</strong><p>{isNativeShell() ? "Verified files are saved automatically to Downloads/AirBridge by the native service, even when this screen is closed." : "Received files are saved by your browser (auto-download to Downloads folder). On the device running AirBridge you can set an exact folder."}</p>{!isNativeShell() && <div className="received-folder-controls"><input aria-label="Received files folder path" value={receivedFolderInput} onChange={(e) => setReceivedFolderInput(e.target.value)} placeholder="~/Downloads/AirBridge" /><button type="button" className="secondary-button" onClick={() => setFolderPickerOpen(true)}>Browse</button><button type="button" className="secondary-button" disabled={folderSaving || !receivedFolderInput.trim()} onClick={saveReceivedFolder}>{folderSaving ? "Saving…" : "Set folder"}</button></div>}</div>
           )}
-          {isNativeShell() && <div className="settings-info"><strong>Background battery access</strong><p>{batteryUnrestricted ? "Android battery optimization is disabled for AirBridge." : "Android battery optimization is enabled. For long screen-off transfers, choose AirBridge → Unrestricted or Don’t optimize in Android’s battery settings."} The native service keeps transfers independent of this screen; some manufacturers also require allowing background activity or auto-start. Force-stop and Android’s Stop action still end the service.</p><button type="button" className="secondary-button" onClick={() => openNativeBatterySettings()}>Open battery settings</button></div>}{isNativeShell() && <div className="settings-info accessibility-settings"><strong>Accessibility-assisted clipboard capture</strong><p>Off by default. Android 10+ can hide clipboard changes from background apps. Opting in lets AirBridge watch for copy and selection events through a service you enable in Android Settings, then beam plain text to your paired computer while this screen is hidden. AirBridge cannot enable the service for you, never reads other apps' text fields or keystrokes, and Android may still block hidden clipboard reads. Accessibility is not a clipboard-permission bypass. If a copy is blocked, use Share → AirBridge or select text → AirBridge in the other app.</p><label className="setting-toggle"><span><strong>Use Accessibility Service for hidden clipboard</strong><small>{accessibilityOptIn ? "Opted in. " : "Off. "}{accessibilityServiceEnabled ? "Service enabled in Android Settings." : "Service not enabled yet — open Android Settings below."}</small></span><input type="checkbox" checked={accessibilityOptIn} onChange={(event) => { const enabled = event.target.checked; if (setNativeAccessibilityOptIn(enabled)) { setAccessibilityOptIn(enabled); if (enabled && !accessibilityServiceEnabled) openNativeAccessibilitySettings(); } }} /></label><p className="accessibility-status" aria-live="polite"><strong>Android Settings:</strong> {accessibilityServiceEnabled ? "AirBridge clipboard bridge is enabled." : "AirBridge clipboard bridge is not enabled."}</p><button type="button" className="secondary-button" onClick={() => openNativeAccessibilitySettings()}>Open Accessibility settings</button></div>}<div className="settings-info"><strong>About connection status</strong><p>“Running” means this app is connected to its transfer service. “Nearby” means another device was discovered; a secure session is only ready after pairing completes.</p></div><div className="settings-info"><strong>Privacy and consent</strong><p>Incoming transfers ask before saving. Auto-accept is off. Revoke trusted devices in advanced trust management.</p></div>{isNativeShell() && <div className="settings-info"><strong>Paired computer</strong><p>The UI is bundled with this app. The native service connects to your paired computer independently of this screen. Changing computers ends active transfers and starts a fresh pairing.</p><button type="button" className="secondary-button" onClick={() => forgetNativeComputer()}>Change computer</button></div>}<a className="text-button advanced-toggle" href="https://github.com/DigantaDey/AirBridge#android-background-behavior" target="_blank" rel="noreferrer">About this version</a></section></div>}
+          {isNativeShell() && <div className="settings-info"><strong>Background battery access</strong><p>{batteryUnrestricted ? "Android battery optimization is disabled for AirBridge." : "Android battery optimization is enabled. For long screen-off transfers, choose AirBridge → Unrestricted or Don’t optimize in Android’s battery settings."} The native service keeps transfers independent of this screen; some manufacturers also require allowing background activity or auto-start. Force-stop and Android’s Stop action still end the service.</p><button type="button" className="secondary-button" onClick={() => openNativeBatterySettings()}>Open battery settings</button></div>}<div className="settings-info"><strong>About connection status</strong><p>“Running” means this app is connected to its transfer service. “Nearby” means another device was discovered; a secure session is only ready after pairing completes.</p></div><div className="settings-info"><strong>Privacy and consent</strong><p>Incoming transfers ask before saving. Auto-accept is off. Revoke trusted devices in advanced trust management.</p></div>{isNativeShell() && <div className="settings-info"><strong>Paired computer</strong><p>The UI is bundled with this app. The native service connects to your paired computer independently of this screen. Changing computers ends active transfers and starts a fresh pairing.</p><button type="button" className="secondary-button" onClick={() => forgetNativeComputer()}>Change computer</button></div>}<a className="text-button advanced-toggle" href="https://github.com/DigantaDey/AirBridge#android-background-behavior" target="_blank" rel="noreferrer">About this version</a></section></div>}
       <TransferModal offer={activeIncomingOffer} senderPublicKey={incomingSenderPubKey} onAccept={(transferId, trustSender) => { if (trustSender && incomingSenderPubKey) clientRef.current?.toggleTrustedPeer(incomingSenderPubKey, true); clientRef.current?.acceptIncomingTransfer(transferId).catch((error: unknown) => showToast({ id: "accept-error", title: "Could not accept transfer", body: error instanceof Error ? error.message : "Try accepting the offer again." })); }} onDecline={(transferId) => { clientRef.current?.declineIncomingTransfer(transferId).catch(() => {}); }} />
       {clipboardOpen && <ClipboardCenter peers={snap.peers} items={snap.clipboardItems} autoSync={snap.autoClipboardSync} hostClipboardActive={Boolean(snap.localDaemon.clipboardBridge)} receiveEnabled={snap.clipboardReceiveEnabled} initialPeerId={clipboardPeerId} prefill={clipboardPrefill} onToggleAutoSync={(enabled) => clientRef.current?.setAutoClipboardSync(enabled)} onToggleReceive={(enabled) => clientRef.current?.setClipboardReceiveEnabled(enabled)} onMarkCopied={markLocalCopyHandled} onSend={handleSendClipboard} onSendImage={handleSendClipboardImage} onClose={() => setClipboardOpen(false)} />}
       {continuityEnabled && continuityTab && clientRef.current && (

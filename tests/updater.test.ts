@@ -90,10 +90,10 @@ describe('version and asset helpers', () => {
     expect(assetNameFor({ platform: 'win32', arch: 'arm64', executablePath: 'C:/a.exe', appBundle: false })).toBe('AirBridge-windows-arm64.exe');
     expect(assetNameFor({ platform: 'linux', arch: 'ia32', executablePath: '/x', appBundle: false })).toBeNull();
   });
-  it('parses SHA256SUMS', () => {
-    const m = parseChecksums(`${'a'.repeat(64)}  AirBridge-linux-x64\n${'b'.repeat(64)} *AirBridge.apk\ngarbage\n`);
+  it('parses SHA256SUMS for desktop release assets', () => {
+    const m = parseChecksums(`${'a'.repeat(64)}  AirBridge-linux-x64\n${'b'.repeat(64)} *AirBridge-macOS-arm64.zip\ngarbage\n`);
     expect(m.get('AirBridge-linux-x64')).toBe('a'.repeat(64));
-    expect(m.get('AirBridge.apk')).toBe('b'.repeat(64));
+    expect(m.get('AirBridge-macOS-arm64.zip')).toBe('b'.repeat(64));
     expect(m.size).toBe(2);
   });
 });
@@ -101,7 +101,7 @@ describe('version and asset helpers', () => {
 describe('Updater', () => {
   it('stages a verified newer build, then swaps it in atomically and keeps a backup', async () => {
     const exe = installedBinary('0.0.5');
-    release('0.0.6', { 'AirBridge-linux-x64': fakeBinary('0.0.6'), 'AirBridge.apk': 'apk' });
+    release('0.0.6', { 'AirBridge-linux-x64': fakeBinary('0.0.6'), 'AirBridge-macOS-arm64.zip': 'desktop-app' });
     const onInstalled = vi.fn();
     const u = makeUpdater(exe, { onInstalled });
 

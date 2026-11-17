@@ -23,7 +23,9 @@ export type ContinuityFeature =
   | 'contacts.receive' // accepts contact-share cards
   | 'calls.control' // reports call-state and executes call-command
   | 'screen.source' // can share its screen (MediaProjection / getDisplayMedia)
-  | 'screen.view'; // can view a shared screen
+  | 'screen.view' // can view a shared screen
+  | 'screen.audio.capture' // can capture only Android-permitted playback audio
+  | 'screen.audio.play'; // can render encrypted PCM playback audio
 
 export const CONTINUITY_FEATURES: readonly ContinuityFeature[] = [
   'contacts.provide',
@@ -31,9 +33,11 @@ export const CONTINUITY_FEATURES: readonly ContinuityFeature[] = [
   'calls.control',
   'screen.source',
   'screen.view',
+  'screen.audio.capture',
+  'screen.audio.play',
 ];
 
-export const CONTINUITY_PROTOCOL_VERSION = 1;
+export const CONTINUITY_PROTOCOL_VERSION = 2;
 
 export function sanitizeFeatures(value: unknown): ContinuityFeature[] {
   if (!Array.isArray(value)) return [];
@@ -400,7 +404,7 @@ export interface CallInfo {
   callId: string;
   state: CallState;
   direction: CallDirection;
-  /** Caller/callee number when the phone can read it (READ_CALL_LOG on Android). */
+  /** Caller/callee number only when the platform exposes it to the call controller. */
   number?: string;
   /** Contact name resolved on the phone. */
   name?: string;
@@ -463,6 +467,8 @@ export function callPartyLabel(call: Pick<CallInfo, 'name' | 'number'>): string 
 export type ScreenShareState = 'requesting' | 'pending' | 'active' | 'stopped' | 'declined' | 'unsupported' | 'error';
 
 export const SCREEN_CODEC_JPEG = 1;
+/** AVC/H.264 access units from Android's hardware MediaCodec encoder. */
+export const SCREEN_CODEC_H264 = 2;
 export const SCREEN_DEFAULT_MAX_WIDTH = 1280;
 export const SCREEN_MAX_WIDTH_LIMIT = 2560;
 export const SCREEN_DEFAULT_FPS = 15;
@@ -474,9 +480,20 @@ export const SCREEN_MAX_FRAME_BYTES = 3 * 1024 * 1024;
 export const SCREEN_CONSENT_TIMEOUT_MS = 2 * 60_000;
 
 export const FRAME_SCREEN = 0x04;
+/** Encrypted, app-permitted PCM playback audio. It is a distinct media frame so
+ * audio can be dropped independently of video rather than delaying the screen. */
+export const FRAME_SCREEN_AUDIO = 0x05;
 /** type(1) ‖ sessionId(16 ASCII hex) ‖ seq(u32) ‖ codec(u8) ‖ width(u16) ‖ height(u16) */
 export const SCREEN_FRAME_AAD_LENGTH = 1 + 16 + 4 + 1 + 2 + 2; // 26
 export const SCREEN_FRAME_HEADER_LENGTH = SCREEN_FRAME_AAD_LENGTH + 12; // + IV = 38
+/** type(1) ‖ sessionId(16) ‖ seq(u32) ‖ sampleRate(u16) ‖ channels(u8) ‖ frames(u16) ‖ ptsMs(u32) */
+export const SCREEN_AUDIO_AAD_LENGTH = 1 + 16 + 4 + 2 + 1 + 2 + 4; // 30
+export const SCREEN_AUDIO_FRAME_HEADER_LENGTH = SCREEN_AUDIO_AAD_LENGTH + 12; // + IV = 42
+export const SCREEN_AUDIO_PCM_S16LE = 1;
+export const SCREEN_AUDIO_MAX_FRAME_BYTES = 64 * 1024;
+/** plaintext H.264 packet: flags(u8) ‖ presentation timestamp milliseconds(u32) ‖ access unit */
+export const SCREEN_H264_PACKET_HEADER_LENGTH = 5;
+export const SCREEN_H264_FLAG_KEY_FRAME = 0x01;
 
 export interface ScreenFrameHeader {
   sessionId: string;
@@ -488,6 +505,22 @@ export interface ScreenFrameHeader {
 
 export interface DecodedScreenFrame extends ScreenFrameHeader {
   /** Authenticated header bytes (GCM additional data). */
+  aad: Uint8Array;
+  iv: Uint8Array;
+  ciphertext: Uint8Array;
+}
+
+export interface ScreenAudioFrameHeader {
+  sessionId: string;
+  seq: number;
+  sampleRate: number;
+  channels: number;
+  frames: number;
+  /** Monotonic source timestamp, modulo 2^32 milliseconds. */
+  ptsMs: number;
+}
+
+export interface DecodedScreenAudioFrame extends ScreenAudioFrameHeader {
   aad: Uint8Array;
   iv: Uint8Array;
   ciphertext: Uint8Array;
@@ -538,6 +571,97 @@ export function decodeScreenFrame(bytes: Uint8Array): DecodedScreenFrame {
     aad: bytes.subarray(0, SCREEN_FRAME_AAD_LENGTH),
     iv: bytes.slice(SCREEN_FRAME_AAD_LENGTH, SCREEN_FRAME_HEADER_LENGTH),
     ciphertext: bytes.subarray(SCREEN_FRAME_HEADER_LENGTH),
+  };
+}
+
+/** Small encrypted payload carried by a `SCREEN_CODEC_H264` screen frame. */
+export interface ScreenH264Packet {
+  /** Whether this access unit is independently decodable. */
+  keyFrame: boolean;
+  /** Monotonic encoder timestamp, modulo 2^32 milliseconds. */
+  ptsMs: number;
+  data: Uint8Array;
+}
+
+export function encodeScreenH264Packet(packet: ScreenH264Packet): Uint8Array {
+  if (!Number.isInteger(packet.ptsMs) || packet.ptsMs < 0 || packet.ptsMs > 0xffffffff || packet.data.byteLength < 1 || packet.data.byteLength > SCREEN_MAX_FRAME_BYTES - SCREEN_H264_PACKET_HEADER_LENGTH) {
+    throw new Error('Invalid H.264 screen packet');
+  }
+  const out = new Uint8Array(SCREEN_H264_PACKET_HEADER_LENGTH + packet.data.byteLength);
+  out[0] = packet.keyFrame ? SCREEN_H264_FLAG_KEY_FRAME : 0;
+  new DataView(out.buffer).setUint32(1, packet.ptsMs >>> 0, false);
+  out.set(packet.data, SCREEN_H264_PACKET_HEADER_LENGTH);
+  return out;
+}
+
+export function decodeScreenH264Packet(bytes: Uint8Array): ScreenH264Packet {
+  if (bytes.byteLength <= SCREEN_H264_PACKET_HEADER_LENGTH || bytes.byteLength > SCREEN_MAX_FRAME_BYTES) throw new Error('Invalid H.264 screen packet');
+  const flags = bytes[0];
+  if ((flags & ~SCREEN_H264_FLAG_KEY_FRAME) !== 0) throw new Error('Invalid H.264 screen packet flags');
+  return {
+    keyFrame: (flags & SCREEN_H264_FLAG_KEY_FRAME) !== 0,
+    ptsMs: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(1, false),
+    data: bytes.subarray(SCREEN_H264_PACKET_HEADER_LENGTH),
+  };
+}
+
+/** Authenticated header for a short signed-PCM audio packet. */
+export function encodeScreenAudioAad(header: ScreenAudioFrameHeader): Uint8Array {
+  if (!isContinuityId(header.sessionId)) throw new Error('Invalid screen session id');
+  if (!Number.isInteger(header.seq) || header.seq < 0 || header.seq > 0xffffffff) throw new Error('Invalid audio sequence');
+  if (!Number.isInteger(header.sampleRate) || header.sampleRate < 8_000 || header.sampleRate > 48_000) throw new Error('Invalid audio sample rate');
+  if (header.channels !== 1 && header.channels !== 2) throw new Error('Invalid audio channel count');
+  if (!Number.isInteger(header.frames) || header.frames < 1 || header.frames > 4096) throw new Error('Invalid audio frame count');
+  if (!Number.isInteger(header.ptsMs) || header.ptsMs < 0 || header.ptsMs > 0xffffffff) throw new Error('Invalid audio timestamp');
+  const out = new Uint8Array(SCREEN_AUDIO_AAD_LENGTH);
+  const view = new DataView(out.buffer);
+  out[0] = FRAME_SCREEN_AUDIO;
+  for (let i = 0; i < 16; i++) out[1 + i] = header.sessionId.charCodeAt(i);
+  view.setUint32(17, header.seq >>> 0, false);
+  view.setUint16(21, header.sampleRate, false);
+  out[23] = header.channels;
+  view.setUint16(24, header.frames, false);
+  view.setUint32(26, header.ptsMs >>> 0, false);
+  return out;
+}
+
+export function encodeScreenAudioFrame(aad: Uint8Array, iv: Uint8Array, ciphertext: Uint8Array): Uint8Array {
+  if (aad.byteLength !== SCREEN_AUDIO_AAD_LENGTH || aad[0] !== FRAME_SCREEN_AUDIO) throw new Error('Invalid screen audio header');
+  if (iv.byteLength !== 12) throw new Error('Invalid IV length');
+  if (ciphertext.byteLength > SCREEN_AUDIO_MAX_FRAME_BYTES + 16) throw new Error('Screen audio frame too large');
+  const out = new Uint8Array(SCREEN_AUDIO_FRAME_HEADER_LENGTH + ciphertext.byteLength);
+  out.set(aad, 0);
+  out.set(iv, SCREEN_AUDIO_AAD_LENGTH);
+  out.set(ciphertext, SCREEN_AUDIO_FRAME_HEADER_LENGTH);
+  return out;
+}
+
+export function decodeScreenAudioFrame(bytes: Uint8Array): DecodedScreenAudioFrame {
+  if (bytes.byteLength < SCREEN_AUDIO_FRAME_HEADER_LENGTH + 16) throw new Error('Screen audio frame too short');
+  if (bytes[0] !== FRAME_SCREEN_AUDIO) throw new Error('Not a screen audio frame');
+  if (bytes.byteLength > SCREEN_AUDIO_FRAME_HEADER_LENGTH + SCREEN_AUDIO_MAX_FRAME_BYTES + 16) throw new Error('Screen audio frame too large');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let sessionId = '';
+  for (let i = 0; i < 16; i++) sessionId += String.fromCharCode(bytes[1 + i]);
+  if (!isContinuityId(sessionId)) throw new Error('Invalid screen session id');
+  const sampleRate = view.getUint16(21, false);
+  const channels = bytes[23];
+  const frames = view.getUint16(24, false);
+  if (sampleRate < 8_000 || sampleRate > 48_000 || (channels !== 1 && channels !== 2) || frames < 1 || frames > 4096) {
+    throw new Error('Invalid screen audio format');
+  }
+  const ciphertext = bytes.subarray(SCREEN_AUDIO_FRAME_HEADER_LENGTH);
+  if (ciphertext.byteLength !== frames * channels * 2 + 16) throw new Error('Invalid screen audio payload length');
+  return {
+    sessionId,
+    seq: view.getUint32(17, false),
+    sampleRate,
+    channels,
+    frames,
+    ptsMs: view.getUint32(26, false),
+    aad: bytes.subarray(0, SCREEN_AUDIO_AAD_LENGTH),
+    iv: bytes.slice(SCREEN_AUDIO_AAD_LENGTH, SCREEN_AUDIO_FRAME_HEADER_LENGTH),
+    ciphertext,
   };
 }
 

@@ -261,7 +261,8 @@ describe('AirBridge E2E Harness Self-Verification', () => {
     const gradle = await readAppBuildGradle();
     expect(gradle.compileSdk).toBe(35);
     expect(gradle.minSdk).toBe(26);
-    expect(isV1SigningEnabled(gradle, 'ciSideload')).toBe(true);
-    expect(isV2SigningEnabled(gradle, 'ciSideload')).toBe(true);
+    expect(isV1SigningEnabled(gradle, 'release')).toBe(true);
+    expect(isV2SigningEnabled(gradle, 'release')).toBe(true);
+    expect(gradle.rawText).toContain('hasReleaseSigning');
   });
 });

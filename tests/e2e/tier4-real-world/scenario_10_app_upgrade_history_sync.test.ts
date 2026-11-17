@@ -12,14 +12,15 @@ import {
 } from '../harness/index.js';
 import type { HistoricalTransferSummary } from '../../../src/shared/protocol.js';
 
-describe('Tier 4 Scenario 10: Seamless APK Upgrade Continuity & Encrypted History Sync', () => {
-  it('enforces upgradeable applicationId, monotonic versionCode, and v1/v2/v3 signing lineage in Gradle config', async () => {
+describe('Tier 4 Scenario 10: Seamless Play Upgrade Continuity & Encrypted History Sync', () => {
+  it('enforces a stable applicationId, monotonic Play versionCode, and private v1/v2/v3 upload-key signing', async () => {
     const gradle = await readAppBuildGradle();
     expect(gradle.rawText).toContain('applicationId = "com.airbridge.app"');
-    expect(gradle.rawText).toContain('100000 + gitCommitCount');
+    expect(gradle.rawText).toContain('2_300_000 + gitCommitCount');
     expect(gradle.rawText).toContain('enableV3Signing = true');
-    expect(isV1SigningEnabled(gradle, 'ciSideload')).toBe(true);
-    expect(isV2SigningEnabled(gradle, 'ciSideload')).toBe(true);
+    expect(isV1SigningEnabled(gradle, 'release')).toBe(true);
+    expect(isV2SigningEnabled(gradle, 'release')).toBe(true);
+    expect(gradle.rawText).toContain('hasReleaseSigning');
     expect(gradle.compileSdk).toBe(35);
     expect(gradle.targetSdk).toBe(35);
   });

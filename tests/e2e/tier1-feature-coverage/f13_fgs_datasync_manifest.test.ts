@@ -15,6 +15,7 @@ describe('F13: Foreground Service Types & Android 14/15 Compliance', () => {
     expect(hasPermission(manifest, 'FOREGROUND_SERVICE_CONNECTED_DEVICE')).toBe(true);
     expect(hasPermission(manifest, 'FOREGROUND_SERVICE_DATA_SYNC')).toBe(true);
     expect(hasPermission(manifest, 'POST_NOTIFICATIONS')).toBe(true);
+    expect(hasPermission(manifest, 'WRITE_EXTERNAL_STORAGE')).toBe(false);
   });
 
   it('configures ConnectionService with connectedDevice|dataSync types, non-exported, and stopWithTask=false', async () => {
@@ -50,16 +51,17 @@ describe('F13: Foreground Service Types & Android 14/15 Compliance', () => {
     expect(svc).toContain('stopForegroundAndSelf(startId)');
   });
 
-  it('enforces explicit exported/launchMode hygiene across Activities and Accessibility/Tile services', async () => {
+  it('keeps exported components explicit and excludes privileged clipboard-observation services', async () => {
     const manifest = await readAndroidManifest();
     const main = getActivity(manifest, '.MainActivity');
     expect(main).toBeDefined();
     expect(main!.exported).toBe(true);
     expect(main!.actions).toContain('android.intent.action.MAIN');
 
-    const a11y = getService(manifest, '.ClipboardAccessibilityService');
-    expect(a11y).toBeDefined();
-    expect(a11y!.permission).toBe('android.permission.BIND_ACCESSIBILITY_SERVICE');
+    expect(getService(manifest, '.ClipboardAccessibilityService')).toBeUndefined();
+    expect(getService(manifest, '.NotificationSharingService')).toBeUndefined();
+    expect(manifest.rawXml).not.toContain('BIND_ACCESSIBILITY_SERVICE');
+    expect(manifest.rawXml).not.toContain('BIND_NOTIFICATION_LISTENER_SERVICE');
 
     const tile = getService(manifest, '.ClipboardTileService');
     expect(tile).toBeDefined();

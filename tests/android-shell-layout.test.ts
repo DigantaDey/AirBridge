@@ -66,7 +66,7 @@ describe("Android native Compose & background layout", () => {
     expect(service).toContain("OnPrimaryClipChangedListener");
     expect(service).toContain("publishLocalClipboard");
     expect(service).toContain("fun publishClipboardChange");
-    expect(service).toContain("accessibilityClipboardOptIn");
+    expect(service).not.toContain("accessibilityClipboardOptIn");
 
     const app = read("src/client/App.tsx");
     expect(app).toContain("__airbridgeNativeClipboard");
@@ -86,42 +86,19 @@ describe("Android native Compose & background layout", () => {
     expect(helper).not.toContain("WindowInsets.Type.ime()");
   });
 
-  it("requires an explicit, user-enabled Accessibility Service opt-in", () => {
+  it("keeps clipboard send explicit and excludes privileged Accessibility APIs", () => {
     const manifest = read("android/app/src/main/AndroidManifest.xml");
-    expect(manifest).toContain("BIND_ACCESSIBILITY_SERVICE");
-    expect(manifest).toContain(".ClipboardAccessibilityService");
-    expect(manifest).toContain("@xml/accessibility_service_config");
-
-    const config = read("android/app/src/main/res/xml/accessibility_service_config.xml");
-    expect(config).toContain('android:canRetrieveWindowContent="false"');
-    expect(config).toContain('android:description="@string/accessibility_service_description"');
-    expect(config).not.toContain("typeAllMask");
-
-    const strings = read("android/app/src/main/res/values/strings.xml");
-    expect(strings).toContain("AirBridge clipboard bridge");
-    expect(strings).toContain("cannot enable this service itself");
-
-    const prefs = read("android/app/src/main/kotlin/com/airbridge/app/Prefs.kt");
-    expect(prefs).toContain('getBoolean("accessibilityClipboardOptIn", false)');
-
-    const service = read(
-      "android/app/src/main/kotlin/com/airbridge/app/ClipboardAccessibilityService.kt",
-    );
-    expect(service).toContain("accessibilityClipboardOptIn");
-    expect(service).toContain("connectionContinuity");
-    expect(service).toContain("publishClipboardChange");
-    expect(service).not.toContain("getRootInActiveWindow");
-
-    const vm = read("android/app/src/main/kotlin/com/airbridge/app/ui/viewmodels/AirBridgeViewModel.kt");
-    expect(vm).toContain("fun setAccessibilityOptIn(enabled: Boolean)");
-    expect(vm).toContain("ClipboardAccessibilityService.isEnabled");
+    expect(manifest).not.toContain("BIND_ACCESSIBILITY_SERVICE");
+    expect(manifest).not.toContain(".ClipboardAccessibilityService");
+    expect(manifest).not.toContain("BIND_NOTIFICATION_LISTENER_SERVICE");
 
     const settings = read("android/app/src/main/kotlin/com/airbridge/app/ui/screens/SettingsScreen.kt");
-    expect(settings).toContain("onSetAccessibilityOptIn");
-    expect(settings).toContain("onOpenAccessibilitySettings");
-    expect(settings).toContain("Accessibility service is active");
+    expect(settings).toContain("Share or Process text → AirBridge");
+    expect(settings).toContain("Quick Settings tile");
+    expect(settings).toContain("Android may block hidden clipboard reads");
 
-    const activity = read("android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt");
-    expect(activity).toContain("Settings.ACTION_ACCESSIBILITY_SETTINGS");
+    const clipboard = read("android/app/src/main/kotlin/com/airbridge/app/ui/screens/ClipboardScreen.kt");
+    expect(clipboard).toContain("never uses Accessibility");
+    expect(clipboard).toContain("Process text → AirBridge");
   });
 });

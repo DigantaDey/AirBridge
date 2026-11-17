@@ -96,7 +96,7 @@ fun main() {
     channel.callController = CallController { cmd -> commands.add(cmd); CallCommandResult(true) }
     channel.callsReady = true
     channel.screenSourceAvailable = true
-    expect("features.all", channel.features() == listOf("contacts.receive", "contacts.provide", "calls.control", "screen.source"))
+    expect("features.all", channel.features() == listOf("contacts.receive", "contacts.provide", "calls.control", "screen.source", "screen.audio.capture"))
     channel.onPeersChanged(host.peers.values.toList())
     val hellos = host.sent.filter { it.second.optStr("kind") == "continuity-hello" }
     expect("announce.paired-only", hellos.map { it.first } == listOf(mac), "got ${hellos.map { it.first }}")
@@ -175,6 +175,8 @@ fun main() {
     expect("screen.pending-sent", host.last("screen-share-state")!!.second.optStr("state") == "pending")
     expect("screen.no-frames-before-consent", !channel.sendScreenFrame(sid, byteArrayOf(1, 2, 3), 100, 200))
     expect("screen.accept", channel.acceptScreenShare(sid)?.peerId == mac && host.last("screen-share-state")!!.second.optStr("state") == "active")
+    expect("screen.audio-default-off", host.last("screen-share-state")!!.second.optBool("audio") == false &&
+        !channel.sendScreenAudio(sid, ByteArray(960 * 2 * 2), 48_000, 2, 960, 1))
     expect("screen.active", channel.isScreenShareActive(sid) && channel.screenQuality(sid) == 70)
     val jpeg = ByteArray(5000) { (it % 251).toByte() }
     expect("screen.frame1", channel.sendScreenFrame(sid, jpeg, 1080, 2400))
@@ -198,6 +200,23 @@ fun main() {
     host.frameSocketOpen = true
     Thread.sleep(40) // a busy socket still paces the next attempt by one frame interval
     expect("screen.after-busy", channel.sendScreenFrame(sid, jpeg, 1080, 2400) && Continuity.decodeScreenFrame(host.frames.last().second).seq == 3L)
+    Thread.sleep(40)
+    val avc = byteArrayOf(0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1e)
+    expect("screen.avc-frame", channel.sendScreenVideoFrame(sid, avc, 1080, 2400, 1234, keyFrame = true))
+    val avcFrame = Continuity.decodeScreenFrame(host.frames.last().second)
+    val avcPlaintext = AirCrypto.decryptMediaFrame(host.key, avcFrame.aad, avcFrame.iv, avcFrame.ciphertext)
+    expect("screen.avc-header", avcFrame.codec == Continuity.SCREEN_CODEC_H264 && avcFrame.seq == 4L &&
+        avcPlaintext.contentEquals(Continuity.encodeScreenH264Packet(avc, 1234, true)))
+    channel.setScreenAudioAvailable(sid, true)
+    expect("screen.audio-enabled-state", host.last("screen-share-state")!!.second.optBool("audio") == true)
+    val pcm = ByteArray(960 * 2 * 2) { (it and 0xff).toByte() }
+    expect("screen.audio-frame", channel.sendScreenAudio(sid, pcm, 48_000, 2, 960, 1250))
+    val audioFrame = Continuity.decodeScreenAudioFrame(host.frames.last().second)
+    expect("screen.audio-opens", audioFrame.seq == 1L && audioFrame.ptsMs == 1250L &&
+        AirCrypto.decryptMediaFrame(host.key, audioFrame.aad, audioFrame.iv, audioFrame.ciphertext).contentEquals(pcm))
+    channel.setScreenAudioAvailable(sid, false)
+    expect("screen.audio-disabled", host.last("screen-share-state")!!.second.optBool("audio") == false &&
+        !channel.sendScreenAudio(sid, pcm, 48_000, 2, 960, 1270))
     expect("screen.oversize-dropped", !channel.sendScreenFrame(sid, ByteArray(Continuity.SCREEN_MAX_FRAME_BYTES + 1), 10, 10))
     channel.handleControl(mac, obj("kind" to "screen-share-stop", "sessionId" to sid))
     expect("screen.viewer-stop", !channel.isScreenShareActive(sid) && ended.lastOrNull()?.first == sid)

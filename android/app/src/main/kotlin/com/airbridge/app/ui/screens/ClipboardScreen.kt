@@ -21,7 +21,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Send
-import androidx.compose.material.icons.outlined.AccessibilityNew
 import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.Image
@@ -47,7 +46,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.airbridge.app.PeerUiState
 import com.airbridge.app.ui.components.ClipboardItemCard
-import com.airbridge.app.ui.theme.AirBridgeColors
 import com.airbridge.app.ui.viewmodels.AirBridgeAppUiState
 import com.airbridge.engine.ClipboardItem
 
@@ -60,7 +58,6 @@ fun ClipboardScreen(
     onBeamSystemClipboard: () -> Unit,
     onCopyClipboardItem: (ClipboardItem) -> Unit,
     onClearHistory: () -> Unit,
-    onOpenAccessibilitySettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var draft by rememberSaveable { mutableStateOf("") }
@@ -97,10 +94,7 @@ fun ClipboardScreen(
                         onPickImage = onPickImage,
                         onBeamSystemClipboard = onBeamSystemClipboard,
                     )
-                    BackgroundClipboardCard(
-                        accessibilityEnabled = uiState.accessibilityEnabled,
-                        onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-                    )
+                    BackgroundClipboardCard()
                 }
 
                 LazyColumn(
@@ -139,11 +133,7 @@ fun ClipboardScreen(
                     )
                 }
                 item(key = "sync-status") {
-                    BackgroundClipboardCard(
-                        accessibilityEnabled = uiState.accessibilityEnabled,
-                        onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-                        modifier = mediumCardModifier,
-                    )
+                    BackgroundClipboardCard(modifier = mediumCardModifier)
                 }
                 clipboardFeedItems(
                     items = uiState.engine.clipboardItems,
@@ -304,11 +294,7 @@ private fun BeamComposeCard(
 }
 
 @Composable
-private fun BackgroundClipboardCard(
-    accessibilityEnabled: Boolean,
-    onOpenAccessibilitySettings: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
+private fun BackgroundClipboardCard(modifier: Modifier = Modifier) {
     ElevatedCard(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -318,47 +304,13 @@ private fun BackgroundClipboardCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.AccessibilityNew,
-                        contentDescription = null,
-                        tint = if (accessibilityEnabled) {
-                            AirBridgeColors.VerifiedGreen
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                    )
-                    Text(
-                        text = if (accessibilityEnabled) {
-                            "Background clipboard bridge active"
-                        } else {
-                            "Background clipboard sync"
-                        },
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Medium,
-                    )
-                }
-                if (!accessibilityEnabled) {
-                    TextButton(onClick = onOpenAccessibilitySettings) {
-                        Text("Enable")
-                    }
-                }
-            }
             Text(
-                text = if (accessibilityEnabled) {
-                    "Copies made in other apps are synced automatically. You can also use Share → AirBridge, the notification action, or the Quick Settings tile."
-                } else {
-                    "Android 10+ blocks background apps from reading the clipboard. Enable the AirBridge Accessibility bridge for automatic background copy sync, or use Share → AirBridge and the notification Beam action."
-                },
+                text = "Background clipboard sync",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                text = "Android 10+ may block apps from reading another app's clipboard while hidden. AirBridge never uses Accessibility to bypass that privacy rule. For reliable sending, use Share or Process text → AirBridge, the Quick Settings tile, or Paste above.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

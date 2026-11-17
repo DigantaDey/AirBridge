@@ -54,7 +54,9 @@ jobs:
 
   desktop-darwin:
     name: macOS binaries (ad-hoc signed)
-    runs-on: macos-latest
+    # package-mac-app.sh passes an explicit Swift target, so the current Intel
+    # image can build and sign both distributable Mach-O architectures.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -92,23 +94,57 @@ jobs:
             dist-bin/AirBridge-macOS-*.zip
           if-no-files-found: error
 
-  android-apk:
-    name: Android APK (sideload)
+  android-aab:
+    # A public desktop release must never manufacture an unsigned Android
+    # substitute. When the private Play upload key is not configured yet, this
+    # job completes with a visible "deferred" notice and produces no AAB.
+    name: Android App Bundle (Play upload, when configured)
     runs-on: ubuntu-latest
+    outputs:
+      signed_aab_built: ${{ steps.signing.outputs.configured }}
     steps:
+      - name: Configure private Play upload key when available
+        id: signing
+        env:
+          AIRBRIDGE_UPLOAD_KEYSTORE_BASE64: ${{ secrets.AIRBRIDGE_UPLOAD_KEYSTORE_BASE64 }}
+          AIRBRIDGE_KEYSTORE_PASSWORD: ${{ secrets.AIRBRIDGE_KEYSTORE_PASSWORD }}
+          AIRBRIDGE_KEYSTORE_ALIAS: ${{ secrets.AIRBRIDGE_KEYSTORE_ALIAS }}
+          AIRBRIDGE_KEYSTORE_KEY_PASSWORD: ${{ secrets.AIRBRIDGE_KEYSTORE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for key in AIRBRIDGE_UPLOAD_KEYSTORE_BASE64 AIRBRIDGE_KEYSTORE_PASSWORD AIRBRIDGE_KEYSTORE_ALIAS AIRBRIDGE_KEYSTORE_KEY_PASSWORD; do
+            if [ -z "${!key:-}" ]; then missing+=("$key"); fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Play AAB deferred::No signed Android bundle was built; configure the private Actions secrets before the Play submission. Missing: ${missing[*]}"
+            exit 0
+          fi
+          key_path="$RUNNER_TEMP/airbridge-upload.jks"
+          printf '%s' "$AIRBRIDGE_UPLOAD_KEYSTORE_BASE64" | base64 --decode > "$key_path"
+          test -s "$key_path"
+          echo "AIRBRIDGE_KEYSTORE_FILE=$key_path" >> "$GITHUB_ENV"
+          echo "configured=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
+        if: ${{ steps.signing.outputs.configured == 'true' }}
       - uses: actions/setup-node@v4
+        if: ${{ steps.signing.outputs.configured == 'true' }}
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+        if: ${{ steps.signing.outputs.configured == 'true' }}
       - uses: actions/setup-java@v4
+        if: ${{ steps.signing.outputs.configured == 'true' }}
         with:
           distribution: temurin
           java-version: 17
       # Use the runner image's preinstalled Android SDK (third-party setup
       # actions lag image migrations); install exactly what we compile against.
       - name: Ensure Android SDK components
+        if: ${{ steps.signing.outputs.configured == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -126,31 +162,42 @@ jobs:
           yes | "$SDKMGR" --licenses >/dev/null 2>&1 || true
           "$SDKMGR" --install "platforms;android-35" "build-tools;35.0.0" 2>&1 | tail -5
       - uses: gradle/actions/setup-gradle@v4
+        if: ${{ steps.signing.outputs.configured == 'true' }}
         with:
           gradle-version: 8.14.3
-      - name: Assemble release APK (ci sideload key)
+      - name: Build signed release AAB
+        if: ${{ steps.signing.outputs.configured == 'true' }}
         env:
-          AIRBRIDGE_VERSION_CODE: ${{ github.run_number }}
+          AIRBRIDGE_KEYSTORE_PASSWORD: ${{ secrets.AIRBRIDGE_KEYSTORE_PASSWORD }}
+          AIRBRIDGE_KEYSTORE_ALIAS: ${{ secrets.AIRBRIDGE_KEYSTORE_ALIAS }}
+          AIRBRIDGE_KEYSTORE_KEY_PASSWORD: ${{ secrets.AIRBRIDGE_KEYSTORE_KEY_PASSWORD }}
         shell: bash
         run: |
           set -o pipefail
+          export AIRBRIDGE_VERSION_CODE=$((2300000 + GITHUB_RUN_NUMBER))
           gradle -p android :engine:check --no-daemon 2>&1 | tee gradle-build.log && \
-          gradle -p android :app:assembleRelease --no-daemon 2>&1 | tee -a gradle-build.log || {
-            echo "::error title=Android release build failed::$(tail -n 40 gradle-build.log | tr '\n' '|' | cut -c1-3000)"
+          gradle -p android :app:bundleRelease --no-daemon 2>&1 | tee -a gradle-build.log || {
+            echo "::error title=Android App Bundle build failed::$(tail -n 40 gradle-build.log | tr '\n' '|' | cut -c1-3000)"
             exit 1
           }
       - name: Name artifact
-        run: mkdir -p dist-bin && cp android/app/build/outputs/apk/release/app-release.apk dist-bin/AirBridge.apk
+        if: ${{ steps.signing.outputs.configured == 'true' }}
+        run: mkdir -p dist-bin && cp android/app/build/outputs/bundle/release/app-release.aab dist-bin/AirBridge.aab
+      # This is a Play Console upload package, not a direct-download asset.
+      # Keep it short-lived and inside Actions; publishing it on a GitHub Release
+      # invites users to download an AAB their device cannot install.
       - uses: actions/upload-artifact@v4
+        if: ${{ steps.signing.outputs.configured == 'true' }}
         with:
-          name: android-apk
-          path: dist-bin/AirBridge.apk
+          name: android-aab-play-upload
+          path: dist-bin/AirBridge.aab
+          retention-days: 7
           if-no-files-found: error
 
   publish:
     name: Publish GitHub release
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    needs: [desktop-linux-windows, desktop-darwin, android-apk]
+    needs: [desktop-linux-windows, desktop-darwin, android-aab]
     runs-on: ubuntu-latest
     # Keyless signing: Sigstore build-provenance attestations bound to this
     # workflow run (no signing keys or repository secrets to manage or leak).
@@ -164,8 +211,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # Keep the Play AAB in the private, short-lived Actions artifact above.
+      # GitHub Releases contain only desktop assets users can actually install.
       - uses: actions/download-artifact@v4
         with:
+          pattern: desktop-*
           path: dist-bin
           merge-multiple: true
       - name: Resolve release tag
@@ -185,6 +235,23 @@ jobs:
           fi
           echo "Resolved release tag: $tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Record Android release scope
+        id: android-scope
+        env:
+          SIGNED_AAB_BUILT: ${{ needs.android-aab.outputs.signed_aab_built }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$SIGNED_AAB_BUILT" = "true" ]; then
+            note="Android: a signed AAB was built as a private Play-upload artifact; it is not a GitHub download."
+          else
+            note="Android: no Play bundle is included. The private Play upload key is not configured yet, so this public release contains only the validated desktop artifacts."
+          fi
+          {
+            echo "note<<EOF"
+            echo "$note"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
       - name: Checksums
         working-directory: dist-bin
         run: |
@@ -206,12 +273,12 @@ jobs:
         with:
           subject-path: |
             dist-bin/AirBridge-*
-            dist-bin/AirBridge.apk
             dist-bin/SHA256SUMS.txt
       - name: Create or update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
+          RELEASE_SCOPE: ${{ steps.android-scope.outputs.note }}
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -221,5 +288,6 @@ jobs:
               --target "$GITHUB_SHA" \
               --title "AirBridge $TAG" \
               --generate-notes \
+              --notes "${RELEASE_SCOPE}" \
               --latest
           fi

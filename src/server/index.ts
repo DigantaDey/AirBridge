@@ -872,7 +872,7 @@ export async function createAirBridgeServer(
   // ---------------------------------------------------------------------------
   const githubRepo = process.env.AIRBRIDGE_GITHUB_REPO || 'DigantaDey/AirBridge';
   const DOWNLOADABLE_NAME =
-    /^AirBridge-(darwin|macos|linux|windows)-(x64|arm64)(-musl)?(\.exe)?$|^AirBridge\.apk$|^SHA256SUMS\.txt$/;
+    /^AirBridge-(darwin|macos|linux|windows)-(x64|arm64)(-musl)?(\.exe)?$|^SHA256SUMS\.txt$/;
   const artifactDirs = (): string[] => {
     const dirs: string[] = [path.dirname(process.execPath), process.cwd()];
     if (process.env.AIRBRIDGE_ARTIFACTS_DIR) {

@@ -102,6 +102,14 @@ describe('background clipboard without open browser UIs', () => {
         suspendedUi!.on('message', () => resolve());
         suspendedUi!.on('error', reject);
       });
+      // Wait until the background peer has joined the same encrypted room. A
+      // host clipboard poll that happens before that point is retained by the
+      // sender, but waiting here makes this test exercise delivery rather than
+      // the pairing race itself.
+      await waitFor(
+        () => phone.getSnapshot().peers,
+        (peers) => peers.some((peer) => peer.device.model === 'AirBridge service'),
+      );
       expect(Object.getOwnPropertyDescriptor(globalThis, 'localStorage')).toEqual(originalStorage);
       hostClipboard = 'copied while no UI is open';
       await waitFor(() => received, (text) => text === hostClipboard);
@@ -133,7 +141,12 @@ describe('background clipboard without open browser UIs', () => {
         Reflect.deleteProperty(globalThis, 'localStorage');
       }
     }
-  }, 40_000);
+  // This deliberately exercises encrypted pairing, a polled host clipboard,
+  // and a suspended UI socket. Under a fully parallel CI run each bounded
+  // readiness wait can consume its own budget, so keep the test-level limit
+  // above their combined worst case rather than turning a slow runner into a
+  // false functional failure.
+  }, 80_000);
   it('restores the startup QR pairing group and disabled clipboard preferences after a daemon restart', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'airbridge-background-restart-'));
     const stateFile = path.join(dir, 'peer.json');

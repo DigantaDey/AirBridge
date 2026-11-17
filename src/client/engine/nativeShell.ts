@@ -47,13 +47,6 @@ export interface AirBridgeNativeBridge {
   forgetComputer?(): boolean;
   connectionContinuityEnabled?(): boolean;
   setConnectionContinuityEnabled?(enabled: boolean): boolean;
-  /** Explicit, persisted opt-in for Accessibility-assisted hidden clipboard capture. */
-  accessibilityOptInEnabled?(): boolean;
-  setAccessibilityOptInEnabled?(enabled: boolean): boolean;
-  /** Whether the user has enabled the AirBridge service in Android Settings. */
-  accessibilityServiceEnabled?(): boolean;
-  /** Opens Android's Accessibility settings; cannot enable the service itself. */
-  openAccessibilitySettings?(): boolean;
   batteryOptimizationExempt?(): boolean;
   openBatterySettings?(): boolean;
   /** Holds a native foreground service / partial wake lock only while a transfer is active. */
@@ -79,8 +72,6 @@ declare global {
     AirBridgeAndroid?: AirBridgeNativeBridge;
     /** The Android foreground service pushes system-clipboard changes here. */
     __airbridgeNativeClipboard?: (text: string) => void;
-    /** Android reports whether the Accessibility Service is enabled in OS settings. */
-    __airbridgeNativeAccessibilityState?: (enabled: boolean) => void;
     /** Android asks the web UI (or the injected shell shim) to close its topmost sheet before exiting. */
     __airbridgeSystemBack?: () => boolean;
     /** Desktop shells (macOS menu bar) open a panel: contacts, calls, screen or settings. */
@@ -139,24 +130,6 @@ export function getNativeConnectionContinuity(): boolean {
 
 export function setNativeConnectionContinuity(enabled: boolean): boolean {
   try { return nativeBridge()?.setConnectionContinuityEnabled?.(enabled) === true; } catch { return false; }
-}
-
-/** Off by default; the user must opt in and enable the OS service separately. */
-export function getNativeAccessibilityOptIn(): boolean {
-  try { return nativeBridge()?.accessibilityOptInEnabled?.() === true; } catch { return false; }
-}
-
-export function setNativeAccessibilityOptIn(enabled: boolean): boolean {
-  try { return nativeBridge()?.setAccessibilityOptInEnabled?.(enabled) === true; } catch { return false; }
-}
-
-export function isNativeAccessibilityServiceEnabled(): boolean {
-  try { return nativeBridge()?.accessibilityServiceEnabled?.() === true; } catch { return false; }
-}
-
-/** Opens Android Settings; the app cannot grant this permission itself. */
-export function openNativeAccessibilitySettings(): boolean {
-  try { return nativeBridge()?.openAccessibilitySettings?.() === true; } catch { return false; }
 }
 
 export function isNativeBatteryOptimizationExempt(): boolean {

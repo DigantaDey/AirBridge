@@ -71,13 +71,6 @@ const DESKTOP_ASSETS: AssetCard[] = [
     file: "AirBridge-linux-arm64",
     icon: Laptop,
   },
-  {
-    id: "android",
-    title: "Android",
-    subtitle: "8.0+ · sideload APK, updates install over it",
-    file: "AirBridge.apk",
-    icon: Smartphone,
-  },
 ];
 
 function recommendId(): string | null {
@@ -231,6 +224,20 @@ export function DownloadsModal({ onClose }: DownloadsModalProps) {
           })}
         </div>
 
+        <div className="rounded-2xl border border-[var(--ab-border)] bg-black/[0.03] dark:bg-white/[0.03] p-4 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-sm font-semibold text-[var(--ab-text)]">
+              <Smartphone className="w-4 h-4 text-emerald-400" />
+              <span>Android <span className="text-[var(--ab-muted)] font-normal">· 8.0 and later</span></span>
+            </div>
+            {recommended === "android" && <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-sky-400/15 text-sky-400 border border-sky-400/30">This device</span>}
+          </div>
+          <p className="text-xs text-[var(--ab-text-secondary)] leading-relaxed">Install the signed app from Google Play. It pairs with the AirBridge companion on your computer.</p>
+          <a className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/35 hover:bg-emerald-500/25 no-underline cursor-pointer" href="https://play.google.com/store/apps/details?id=com.airbridge.app" target="_blank" rel="noreferrer">
+            <Download className="w-3.5 h-3.5" /> Open Google Play
+          </a>
+        </div>
+
         {/* Universal CLI card — any platform with Node, QR in the terminal */}
         <div className="rounded-2xl border border-[var(--ab-border)] bg-black/[0.03] dark:bg-white/[0.03] p-4 space-y-3">
           <div className="flex items-center justify-between gap-2">
@@ -291,9 +298,9 @@ export function DownloadsModal({ onClose }: DownloadsModalProps) {
               SHA256SUMS.txt
             </a>
             . macOS binaries are ad-hoc signed by CI (no Gatekeeper fee); the Windows installer uses
-            curl so the EXE carries no Mark-of-the-Web (no SmartScreen sheet); Android APKs are
-            signed with a stable sideload key so updates install over the previous version. Pairing
-            codes are short-lived session secrets — rotate from the Pair panel after sharing.
+            curl so the EXE carries no Mark-of-the-Web (no SmartScreen sheet). Android distribution is
+            handled through Google Play App Signing. Pairing codes are short-lived session secrets — rotate
+            from the Pair panel after sharing.
           </p>
         </div>
       </div>

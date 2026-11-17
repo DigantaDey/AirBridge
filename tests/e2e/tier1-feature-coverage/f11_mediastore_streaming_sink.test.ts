@@ -20,6 +20,14 @@ describe('F11: Direct-to-MediaStore Streaming Sink & Journal Recovery', () => {
     expect(nativeFiles).toContain('DirectoryFileSink');
   });
 
+  it('uses app-specific external storage rather than deprecated legacy shared-storage APIs on Android 8/9', async () => {
+    const nativeFiles = await readRepoFile(
+      'android/app/src/main/kotlin/com/airbridge/app/NativeFiles.kt',
+    );
+    expect(nativeFiles).toContain('context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)');
+    expect(nativeFiles).not.toContain('getExternalStoragePublicDirectory');
+  });
+
   it('persists compact .meta sidecars and 4-byte append-only journals for crash/restart resumption', async () => {
     const nativeFiles = await readRepoFile(
       'android/app/src/main/kotlin/com/airbridge/app/NativeFiles.kt',

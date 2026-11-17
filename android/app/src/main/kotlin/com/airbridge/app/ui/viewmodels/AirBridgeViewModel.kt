@@ -10,7 +10,6 @@ import android.net.Uri
 import android.os.PowerManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.airbridge.app.ClipboardAccessibilityService
 import com.airbridge.app.ClipboardImageProvider
 import com.airbridge.app.ClipboardText
 import com.airbridge.app.ConnectionService
@@ -43,10 +42,7 @@ data class AirBridgeAppUiState(
     val themeMode: String = "dark",
     val autoClipboard: Boolean = true,
     val receiveClipboard: Boolean = true,
-    val notificationSharing: Boolean = true,
     val connectionContinuity: Boolean = true,
-    val accessibilityOptIn: Boolean = false,
-    val accessibilityEnabled: Boolean = false,
     val batteryExempt: Boolean = false,
     val hasCamera: Boolean = true,
     val nearbyHosts: List<NearbyHost> = emptyList(),
@@ -69,10 +65,7 @@ private data class LocalPrefsSnapshot(
     val themeMode: String,
     val autoClipboard: Boolean,
     val receiveClipboard: Boolean,
-    val notificationSharing: Boolean,
     val connectionContinuity: Boolean,
-    val accessibilityOptIn: Boolean,
-    val accessibilityEnabled: Boolean,
     val batteryExempt: Boolean,
 )
 
@@ -133,10 +126,7 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             themeMode = local.themeMode,
             autoClipboard = if (engine.ready) engine.autoClipboard else local.autoClipboard,
             receiveClipboard = if (engine.ready) engine.receiveClipboard else local.receiveClipboard,
-            notificationSharing = local.notificationSharing,
             connectionContinuity = local.connectionContinuity,
-            accessibilityOptIn = local.accessibilityOptIn,
-            accessibilityEnabled = local.accessibilityEnabled,
             batteryExempt = local.batteryExempt,
             hasCamera = hasCamera,
             nearbyHosts = nearby,
@@ -185,10 +175,7 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             themeMode = prefs.themeMode,
             autoClipboard = prefs.autoClipboard,
             receiveClipboard = prefs.receiveClipboard,
-            notificationSharing = prefs.notificationSharing,
             connectionContinuity = prefs.connectionContinuity,
-            accessibilityOptIn = prefs.accessibilityClipboardOptIn,
-            accessibilityEnabled = runCatching { ClipboardAccessibilityService.isEnabled(appContext) }.getOrDefault(false),
             batteryExempt = runCatching { power.isIgnoringBatteryOptimizations(appContext.packageName) }.getOrDefault(false),
         )
     }
@@ -568,21 +555,11 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
         _local.value = readLocalSnapshot()
     }
 
-    fun setNotificationSharing(enabled: Boolean) {
-        prefs.notificationSharing = enabled
-        _local.value = readLocalSnapshot()
-    }
-
     fun setConnectionContinuity(enabled: Boolean) {
         prefs.connectionContinuity = enabled
         if (enabled && prefs.target.isNotEmpty()) {
             startConnectionService(ConnectionService.ACTION_START)
         }
-        _local.value = readLocalSnapshot()
-    }
-
-    fun setAccessibilityOptIn(enabled: Boolean) {
-        prefs.accessibilityClipboardOptIn = enabled
         _local.value = readLocalSnapshot()
     }
 

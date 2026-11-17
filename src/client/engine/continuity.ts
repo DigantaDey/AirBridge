@@ -19,13 +19,16 @@ import {
   MAX_CONTACTS_PER_RESPONSE,
   MAX_CONTACT_QUERY,
   MAX_VCARD_LENGTH,
+  SCREEN_CODEC_H264,
   SCREEN_CODEC_JPEG,
   SCREEN_CONSENT_TIMEOUT_MS,
   SCREEN_MAX_FRAME_BYTES,
   SCREEN_MAX_INFLIGHT,
   buildVCards,
   clampScreenParams,
+  decodeScreenAudioFrame,
   decodeScreenFrame,
+  decodeScreenH264Packet,
   dialableNumber,
   encodeScreenFrame,
   encodeScreenFrameAad,
@@ -80,6 +83,8 @@ export interface ScreenShareView {
   frames: number;
   fps: number;
   kbps: number;
+  /** Playback audio is available only when Android and the source app permit capture. */
+  audioAvailable?: boolean;
   quality?: number;
   reason?: string;
   startedAt: number;
@@ -119,6 +124,31 @@ export interface ScreenFrame {
   width: number;
   height: number;
   mimeType: 'image/jpeg';
+  data: Uint8Array;
+}
+
+/** A short encrypted PCM packet. The viewer schedules it with a tiny jitter buffer. */
+export interface ScreenVideoFrame {
+  sessionId: string;
+  peerId: string;
+  seq: number;
+  width: number;
+  height: number;
+  /** AVC/H.264 Annex-B access unit from the Android MediaCodec encoder. */
+  codec: 'h264';
+  keyFrame: boolean;
+  ptsMs: number;
+  data: Uint8Array;
+}
+
+export interface ScreenAudioFrame {
+  sessionId: string;
+  peerId: string;
+  seq: number;
+  sampleRate: number;
+  channels: 1 | 2;
+  frames: number;
+  ptsMs: number;
   data: Uint8Array;
 }
 
@@ -207,6 +237,8 @@ interface SourceSession {
 interface ViewerSession {
   view: ScreenShareView;
   lastSeq: number;
+  lastAudioSeq: number;
+  lastAudioPtsMs?: number;
   lastFrame?: ScreenFrame;
   windowStart: number;
   windowFrames: number;
@@ -231,6 +263,8 @@ export class ContinuityManager {
   private readonly contactRequests = new Map<string, Pending<ContactsQueryResult>>();
   private readonly callCommands = new Map<string, Pending<CallCommandResult>>();
   private readonly frameListeners = new Map<string, Set<(frame: ScreenFrame) => void>>();
+  private readonly videoListeners = new Map<string, Set<(frame: ScreenVideoFrame) => void>>();
+  private readonly audioListeners = new Map<string, Set<(frame: ScreenAudioFrame) => void>>();
   private readonly lingerTimers = new Set<ReturnType<typeof setTimeout>>();
   private knownPeers = new Map<string, string>();
   private statsTimer: ReturnType<typeof setTimeout> | null = null;
@@ -243,7 +277,10 @@ export class ContinuityManager {
   // -------------------------------------------------------------------------
 
   features(): ContinuityFeature[] {
-    const out: ContinuityFeature[] = ['contacts.receive', 'screen.view'];
+    // Desktop viewers can render the lightweight signed-PCM stream directly
+    // with Web Audio. The Android source still decides whether the OS and the
+    // app allow capture; this advertisement never requests protected audio.
+    const out: ContinuityFeature[] = ['contacts.receive', 'screen.view', 'screen.audio.play'];
     if (this.options.contactProvider) out.push('contacts.provide');
     if (this.options.callController) out.push('calls.control');
     const screen = this.options.screenSourceAvailable;
@@ -649,7 +686,7 @@ export class ContinuityManager {
         sessionId, peerId, peerName: this.peerName(peerId), role: 'viewer', state: 'requesting',
         width: 0, height: 0, maxWidth, maxFps, frames: 0, fps: 0, kbps: 0, startedAt: now, updatedAt: now,
       },
-      lastSeq: 0, windowStart: now, windowFrames: 0, windowBytes: 0,
+      lastSeq: 0, lastAudioSeq: 0, windowStart: now, windowFrames: 0, windowBytes: 0,
     };
     session.timer = setTimeout(() => {
       if (session.view.state === 'requesting' || session.view.state === 'pending') {
@@ -679,6 +716,75 @@ export class ContinuityManager {
     };
   }
 
+  subscribeScreenVideo(sessionId: string, listener: (frame: ScreenVideoFrame) => void): () => void {
+    let set = this.videoListeners.get(sessionId);
+    if (!set) {
+      set = new Set();
+      this.videoListeners.set(sessionId, set);
+    }
+    set.add(listener);
+    return () => {
+      set!.delete(listener);
+      if (set!.size === 0) this.videoListeners.delete(sessionId);
+    };
+  }
+
+  subscribeScreenAudio(sessionId: string, listener: (frame: ScreenAudioFrame) => void): () => void {
+    let set = this.audioListeners.get(sessionId);
+    if (!set) {
+      set = new Set();
+      this.audioListeners.set(sessionId, set);
+    }
+    set.add(listener);
+    return () => {
+      set!.delete(listener);
+      if (set!.size === 0) this.audioListeners.delete(sessionId);
+    };
+  }
+
+  async handleScreenAudioFrame(fromPeerId: string, bytes: Uint8Array): Promise<void> {
+    if (this.destroyed) return;
+    let frame;
+    try {
+      frame = decodeScreenAudioFrame(bytes);
+    } catch {
+      return;
+    }
+    const session = this.viewers.get(frame.sessionId);
+    if (!session || session.view.peerId !== fromPeerId || !['pending', 'active'].includes(session.view.state)) return;
+    // Audio is independent from video, but it must still move forward on the
+    // source's modulo-u32 clock. This drops queued/replayed old packets rather
+    // than allowing a delayed relay packet to create audible A/V drift.
+    if (frame.seq <= session.lastAudioSeq || (session.lastAudioPtsMs !== undefined && (((frame.ptsMs - session.lastAudioPtsMs + 0x100000000) % 0x100000000) === 0 || ((frame.ptsMs - session.lastAudioPtsMs + 0x100000000) % 0x100000000) > 0x80000000))) return;
+    const key = await this.host.sessionKey(fromPeerId);
+    if (!key) return;
+    let data: Uint8Array;
+    try {
+      data = await decryptMediaFrame(key, frame.aad, frame.iv, frame.ciphertext);
+    } catch {
+      return;
+    }
+    const audioPtsDelta = session.lastAudioPtsMs === undefined ? 1 : (frame.ptsMs - session.lastAudioPtsMs + 0x100000000) % 0x100000000;
+    if (frame.seq <= session.lastAudioSeq || !this.viewers.has(frame.sessionId) || data.byteLength !== frame.frames * frame.channels * 2 || audioPtsDelta === 0 || audioPtsDelta > 0x80000000) return;
+    session.lastAudioSeq = frame.seq;
+    session.lastAudioPtsMs = frame.ptsMs;
+    session.view.audioAvailable = true;
+    const out: ScreenAudioFrame = {
+      sessionId: frame.sessionId,
+      peerId: fromPeerId,
+      seq: frame.seq,
+      sampleRate: frame.sampleRate,
+      channels: frame.channels as 1 | 2,
+      frames: frame.frames,
+      ptsMs: frame.ptsMs,
+      data,
+    };
+    for (const listener of this.audioListeners.get(frame.sessionId) ?? []) {
+      try { listener(out); } catch { /* a broken audio sink must not stop the share */ }
+    }
+    this.scheduleStatsEmit();
+  }
+
   async handleScreenFrame(fromPeerId: string, bytes: Uint8Array): Promise<void> {
     if (this.destroyed) return;
     let frame;
@@ -690,7 +796,7 @@ export class ContinuityManager {
     const session = this.viewers.get(frame.sessionId);
     if (!session || session.view.peerId !== fromPeerId) return;
     if (!['requesting', 'pending', 'active'].includes(session.view.state)) return;
-    if (frame.codec !== SCREEN_CODEC_JPEG || frame.seq <= session.lastSeq) return;
+    if ((frame.codec !== SCREEN_CODEC_JPEG && frame.codec !== SCREEN_CODEC_H264) || frame.seq <= session.lastSeq) return;
     const key = await this.host.sessionKey(fromPeerId);
     if (!key) return;
     let data: Uint8Array;
@@ -698,6 +804,10 @@ export class ContinuityManager {
       data = await decryptMediaFrame(key, frame.aad, frame.iv, frame.ciphertext);
     } catch {
       return; // forged, spliced or corrupted
+    }
+    let h264Packet: ReturnType<typeof decodeScreenH264Packet> | undefined;
+    if (frame.codec === SCREEN_CODEC_H264) {
+      try { h264Packet = decodeScreenH264Packet(data); } catch { return; }
     }
     // Decrypts finish out of order; never show an older frame after a newer one.
     if (frame.seq <= session.lastSeq || !this.viewers.has(frame.sessionId)) return;
@@ -720,14 +830,26 @@ export class ContinuityManager {
       session.windowFrames = 0;
       session.windowBytes = 0;
     }
-    const out: ScreenFrame = {
-      sessionId: frame.sessionId, peerId: fromPeerId, seq: frame.seq,
-      width: frame.width, height: frame.height, mimeType: 'image/jpeg', data,
-    };
-    session.lastFrame = out;
     this.send(fromPeerId, { kind: 'screen-share-ack', sessionId: frame.sessionId, seq: frame.seq });
-    for (const listener of this.frameListeners.get(frame.sessionId) ?? []) {
-      try { listener(out); } catch { /* a broken view must not stop the stream */ }
+    if (frame.codec === SCREEN_CODEC_JPEG) {
+      const out: ScreenFrame = {
+        sessionId: frame.sessionId, peerId: fromPeerId, seq: frame.seq,
+        width: frame.width, height: frame.height, mimeType: 'image/jpeg', data,
+      };
+      session.lastFrame = out;
+      for (const listener of this.frameListeners.get(frame.sessionId) ?? []) {
+        try { listener(out); } catch { /* a broken view must not stop the stream */ }
+      }
+    } else {
+      const packet = h264Packet!;
+      const out: ScreenVideoFrame = {
+        sessionId: frame.sessionId, peerId: fromPeerId, seq: frame.seq,
+        width: frame.width, height: frame.height, codec: 'h264',
+        keyFrame: packet.keyFrame, ptsMs: packet.ptsMs, data: packet.data,
+      };
+      for (const listener of this.videoListeners.get(frame.sessionId) ?? []) {
+        try { listener(out); } catch { /* a broken decoder must not stop the stream */ }
+      }
     }
     if (becameActive) this.host.emit();
     else this.scheduleStatsEmit();
@@ -753,6 +875,7 @@ export class ContinuityManager {
         session.view.state = 'active';
         if (typeof payload.width === 'number' && payload.width > 0) session.view.width = payload.width;
         if (typeof payload.height === 'number' && payload.height > 0) session.view.height = payload.height;
+        if (typeof payload.audio === 'boolean') session.view.audioAvailable = payload.audio;
         if (session.timer) clearTimeout(session.timer);
         break;
       case 'stopped':
@@ -778,6 +901,8 @@ export class ContinuityManager {
       if (this.viewers.get(session.view.sessionId) === session) {
         this.viewers.delete(session.view.sessionId);
         this.frameListeners.delete(session.view.sessionId);
+        this.videoListeners.delete(session.view.sessionId);
+        this.audioListeners.delete(session.view.sessionId);
         this.host.emit();
       }
     }, STOPPED_SHARE_LINGER_MS);
