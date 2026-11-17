@@ -15,7 +15,7 @@ internal object HotspotHandoffGuidance {
         "AirBridge couldn't scan for its private Bluetooth service${code?.let { " (error $it)" } ?: ""}. No Bluetooth pairing or device-name matching is needed; use Show Wi-Fi details below instead."
 
     fun computerNotFound(): String =
-        "No AirBridge computer was found over Bluetooth. Keep AirBridge open on a compatible Mac with Bluetooth on, or use Show Wi-Fi details below to join this phone's hotspot manually. The phone's Bluetooth name is irrelevant: AirBridge discovers its private service, not a matching device name."
+        "No AirBridge computer was found over Bluetooth. Keep AirBridge open on a compatible Mac with Bluetooth on, or use Show Wi-Fi details below to join this phone's hotspot manually. The phone's Bluetooth name is irrelevant: AirBridge discovers its private service, so no manual Bluetooth pairing or device-name matching is needed."
 
     fun manualConnectionSteps(): String =
         "This is the temporary Wi-Fi network name (SSID), not a Bluetooth name. On the computer, open Wi-Fi settings and join it using the password above. Then tap Reconnect now on this phone or scan the computer's current QR code; the hotspot may give the computer a new address."
