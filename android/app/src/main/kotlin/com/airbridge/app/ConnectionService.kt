@@ -297,18 +297,8 @@ class ConnectionService : Service() {
             speed.uploading -> "AirBridge upload in progress"
             else -> "AirBridge download in progress"
         }
-        val prefs = Prefs(this)
-        val accessibilityOptIn = prefs.accessibilityClipboardOptIn
-        val accessibilityEnabled = accessibilityOptIn &&
-            ClipboardAccessibilityService.isEnabled(this)
-        val clipboardLine = when {
-            accessibilityEnabled ->
-                "Native connection active. Android may block clipboard reads; use Share → AirBridge when needed."
-            accessibilityOptIn ->
-                "Accessibility opt-in is on. Enable the AirBridge service in Android Settings."
-            else ->
-                "Native connection active. Incoming clipboard works here; Android may restrict copying from other apps."
-        }
+        val clipboardLine =
+            "Native connection active. Incoming clipboard works here; Android may restrict copies from other apps. Use Share → AirBridge when needed."
         val text = when {
             !transferActive && nativeState != ConnectionState.CONNECTED -> "Waiting for your paired computer on the same network."
             !transferActive -> clipboardLine
@@ -566,46 +556,7 @@ class ConnectionService : Service() {
         const val ACTION_START = "com.airbridge.app.connection.START"
         const val ACTION_STOP = "com.airbridge.app.connection.STOP"
         private const val CHANNEL_ID = "airbridge_connection"
-        private const val SHARED_NOTIF_CHANNEL_ID = "airbridge_shared_notifications"
         private const val NOTIFICATION_ID = 3411
-
-        fun postSharedNotification(context: Context, title: String, body: String, appName: String?) {
-            if (!Prefs(context).notificationSharing) return
-            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val channel = NotificationChannel(
-                    SHARED_NOTIF_CHANNEL_ID,
-                    "AirBridge Shared Notifications",
-                    NotificationManager.IMPORTANCE_DEFAULT,
-                ).apply {
-                    description = "Displays notifications mirrored from paired AirBridge devices"
-                }
-                nm.createNotificationChannel(channel)
-            }
-            val notifTitle = if (!appName.isNullOrBlank()) "$appName: $title" else title
-            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Notification.Builder(context, SHARED_NOTIF_CHANNEL_ID)
-            } else {
-                @Suppress("DEPRECATION")
-                Notification.Builder(context)
-            }
-            val open = PendingIntent.getActivity(
-                context,
-                0,
-                Intent(context, MainActivity::class.java).setPackage(context.packageName),
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-            )
-            val notification = builder
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle(notifTitle)
-                .setContentText(body)
-                .setStyle(Notification.BigTextStyle().bigText(body))
-                .setContentIntent(open)
-                .setAutoCancel(true)
-                .build()
-
-            nm.notify((System.currentTimeMillis() and 0x7FFFFFFF).toInt(), notification)
-        }
 
         @Volatile
         private var instance: ConnectionService? = null
@@ -634,10 +585,9 @@ class ConnectionService : Service() {
         }
 
         /**
-         * Shared by the foreground-service listener and the optional
-         * Accessibility Service. A short window suppresses an incoming-beam
-         * echo and duplicate notifications for the same clipboard change; a
-         * later re-copy of that text is still forwarded.
+         * Shared by foreground clipboard events and explicit Share / Paste
+         * actions. A short window suppresses an incoming-beam echo and a
+         * duplicate event; a later re-copy of that text is still forwarded.
          */
         @Synchronized
         fun publishClipboardChange(context: Context, text: String, explicit: Boolean = false): Boolean {

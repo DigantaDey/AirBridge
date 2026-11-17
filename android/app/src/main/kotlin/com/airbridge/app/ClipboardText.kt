@@ -18,7 +18,7 @@ object ClipboardText {
             val text = clip.getItemAt(0)?.text ?: return null
             text.takeIf { it.isNotBlank() && it.length <= Limits.MAX_CLIPBOARD_TEXT }?.toString()
         } catch (_: Throwable) {
-            // A foreground service/Accessibility is NOT a background-read permission.
+            // A foreground service is NOT a background-read permission.
             null
         }
     }

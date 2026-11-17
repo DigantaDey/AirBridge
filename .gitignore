@@ -31,4 +31,9 @@ android/app/build/
 android/engine/build/
 build/verify/
 
+# Play upload signing material is local only.
+android/keystore.properties
+android/*.jks
+android/*.keystore
+
 .cache/

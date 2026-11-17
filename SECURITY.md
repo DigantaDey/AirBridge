@@ -75,7 +75,7 @@ ECDH session. Summary of the audit (and fixes) behind the current code:
   excludes clips marked sensitive and never scrapes window content. Explicit
   Share/selected-text actions work when the OS denies hidden clipboard reads.
 
-## Additional reliability and resource hardening (2.2.1)
+## Additional reliability and resource hardening (2.3.0)
 
 - Bind completed receive receipts and active controls to the original public
   key and consent-bearing manifest (including relative paths). Peer-reported
@@ -123,5 +123,6 @@ ECDH session. Summary of the audit (and fixes) behind the current code:
   compatibility, not publisher authenticity. Obtain APKs/checksums from this
   repository's official releases, or distribute with your own private key.
 - Android's background clipboard privacy rules, force-stop and OEM battery
-  management cannot be bypassed by Accessibility or a foreground service.
-  Process-death resume and automatic image capture are not guaranteed.
+  management cannot be bypassed by a foreground service. AirBridge intentionally
+  does not declare an Accessibility Service. Process-death resume and automatic
+  image capture are not guaranteed.

@@ -31,9 +31,9 @@ describe('F21: Phone continuity (Android)', () => {
     expect(continuity).toContain('endCall()');
     expect(hasPermission(manifest, 'CALL_PHONE')).toBe(true);
     expect(continuity).toContain('placeCall(');
-    // Caller number on API 29+ (optional: calls still work without it).
-    expect(hasPermission(manifest, 'READ_CALL_LOG')).toBe(true);
-    expect(continuity).toContain('callerIdGranted');
+    // Call history is not needed for remote controls and is intentionally absent.
+    expect(hasPermission(manifest, 'READ_CALL_LOG')).toBe(false);
+    expect(continuity).not.toContain('callerIdGranted');
 
     // Contact cards from the computer go through the system editor.
     expect(hasPermission(manifest, 'WRITE_CONTACTS')).toBe(false);
@@ -42,6 +42,19 @@ describe('F21: Phone continuity (Android)', () => {
 
     // Telephony is optional so tablets can still install (contacts + screen work there).
     expect(manifest.rawXml).toMatch(/android:name="android\.hardware\.telephony"\s+android:required="false"/);
+  });
+
+  it('starts sensitive remote capabilities disabled and revokes a live screen share when disabled', async () => {
+    const prefs = await readRepoFile(`${APP}/Prefs.kt`);
+    const continuity = await readRepoFile(`${APP}/PhoneContinuity.kt`);
+    expect(prefs).toContain('getBoolean("contactsOnComputer", false)');
+    expect(prefs).toContain('getBoolean("callsFromComputer", false)');
+    expect(prefs).toContain('getBoolean("screenSharing", false)');
+    expect(continuity).toContain('ch.contactsReady = prefs.contactsOnComputer');
+    expect(continuity).toContain('ch.callsReady = callsOk');
+    expect(continuity).toContain('ch.screenSourceAvailable = screenSharingEnabled');
+    expect(continuity).toContain('ch.declineScreenShare(request.sessionId, "Screen sharing was disabled on the phone")');
+    expect(continuity).toContain('ch.stopScreenShare(sessionId, "Screen sharing was disabled on the phone")');
   });
 
   it('runs screen capture in a private mediaProjection foreground service', async () => {

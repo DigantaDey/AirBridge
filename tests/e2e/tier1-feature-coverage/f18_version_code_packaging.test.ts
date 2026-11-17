@@ -14,14 +14,13 @@ describe('F18: Monotonic VersionCode & Android Package Consistency', () => {
     expect(gradle.targetSdk).toBe(35);
   });
 
-  it('derives a monotonic versionCode >= 100000 from AIRBRIDGE_VERSION_CODE or git commit count', async () => {
+  it('derives a monotonic Play versionCode from AIRBRIDGE_VERSION_CODE or git commit count', async () => {
     const gradle = await readAppBuildGradle();
     expect(gradle.rawText).toContain('AIRBRIDGE_VERSION_CODE');
-    expect(gradle.rawText).toContain('100000 + ciRunNumber');
-    expect(gradle.rawText).toContain('100000 + gitCommitCount');
+    expect(gradle.rawText).toContain('2_300_000 + gitCommitCount');
   });
 
-  it('aligns Android applicationId (com.airbridge.app) and versionName (2.2.1) with package.json', async () => {
+  it('aligns Android applicationId (com.airbridge.app) and versionName with package.json', async () => {
     const gradle = await readAppBuildGradle();
     const pkgRaw = await readRepoFile('package.json');
     const pkg = JSON.parse(pkgRaw) as { version: string };

@@ -6,41 +6,32 @@ import {
   repoFileExists,
 } from '../harness/index.js';
 
-describe('F17: Consistent APK Signing Schemes (v1/v2/v3) for Clean Updates', () => {
-  it('enables v1 and v2 signing schemes on the shared ciSideload signing config', async () => {
+describe('F17: Play upload-key signing is fail-closed', () => {
+  it('enables v1, v2 and v3 signing on the private release config', async () => {
     const gradle = await readAppBuildGradle();
-    expect(isV1SigningEnabled(gradle, 'ciSideload')).toBe(true);
-    expect(isV2SigningEnabled(gradle, 'ciSideload')).toBe(true);
-  });
-
-  it('enables v3 key-rotation/upgrade signature scheme on both ciSideload and release configs', async () => {
-    const gradle = await readAppBuildGradle();
+    expect(isV1SigningEnabled(gradle, 'release')).toBe(true);
+    expect(isV2SigningEnabled(gradle, 'release')).toBe(true);
     expect(gradle.rawText).toContain('enableV3Signing = true');
-    expect(isV1SigningEnabled(gradle, 'release') || gradle.rawText.includes('getByName("ciSideload")')).toBe(
-      true,
-    );
-    expect(isV2SigningEnabled(gradle, 'release') || gradle.rawText.includes('getByName("ciSideload")')).toBe(
-      true,
-    );
   });
 
-  it('falls back release builds to ciSideload when AIRBRIDGE_RELEASE_* secrets are unset', async () => {
+  it('loads release credentials only from ignored local properties or environment', async () => {
     const gradle = await readAppBuildGradle();
-    expect(gradle.rawText).toContain(
-      'signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("ciSideload")',
-    );
+    expect(gradle.rawText).toContain('keystore.properties');
+    expect(gradle.rawText).toContain('AIRBRIDGE_KEYSTORE_FILE');
+    expect(gradle.rawText).toContain('hasReleaseSigning');
+    expect(gradle.rawText).toContain('Release signing is not configured');
+    expect(gradle.rawText).not.toContain('ciSideload');
   });
 
-  it('commits the deterministic android/ci.keystore alongside Gradle signing config', async () => {
-    expect(await repoFileExists('android/ci.keystore')).toBe(true);
-    const gradle = await readAppBuildGradle();
-    expect(gradle.rawText).toContain('ci.keystore');
+  it('does not retain a committed signing key and provides a safe local template', async () => {
+    expect(await repoFileExists('android/ci.keystore')).toBe(false);
+    expect(await repoFileExists('android/keystore.properties.example')).toBe(true);
   });
 
-  it('keeps debug and release build types signed with matching certificate lineage when built locally', async () => {
+  it('enables code/resource shrinking for the Play release bundle', async () => {
     const gradle = await readAppBuildGradle();
-    const debugMatches = gradle.rawText.match(/debug\s*\{[\s\S]*?signingConfig = signingConfigs\.getByName\("ciSideload"\)/);
-    expect(debugMatches).not.toBeNull();
+    expect(gradle.rawText).toContain('isMinifyEnabled = true');
+    expect(gradle.rawText).toContain('isShrinkResources = true');
   });
 
   it('declares verification script android/scripts/verify.sh for automated APK & engine checks', async () => {

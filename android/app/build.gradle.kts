@@ -1,8 +1,29 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+/**
+ * A Play upload key is deliberately local/secret-only. The previous committed
+ * sideload keystore could prove package continuity but could not prove who
+ * published an APK. `bundleRelease` now refuses to run without a real private
+ * upload key; see android/keystore.properties.example and docs/PLAY_STORE_RELEASE.md.
+ */
+val signingProperties = Properties().apply {
+    val localFile = rootProject.file("keystore.properties")
+    if (localFile.isFile) localFile.inputStream().use(::load)
+}
+fun signingValue(name: String): String? = System.getenv(name)
+    ?: signingProperties.getProperty(name)?.trim()?.takeIf { it.isNotEmpty() }
+
+val releaseKeystore = signingValue("AIRBRIDGE_KEYSTORE_FILE")
+val releaseStorePassword = signingValue("AIRBRIDGE_KEYSTORE_PASSWORD")
+val releaseKeyAlias = signingValue("AIRBRIDGE_KEYSTORE_ALIAS")
+val releaseKeyPassword = signingValue("AIRBRIDGE_KEYSTORE_KEY_PASSWORD")
+val hasReleaseSigning = listOf(releaseKeystore, releaseStorePassword, releaseKeyAlias, releaseKeyPassword).all { !it.isNullOrBlank() }
 
 android {
     namespace = "com.airbridge.app"
@@ -13,42 +34,26 @@ android {
         minSdk = 26
         targetSdk = 35
 
-        val ciRunNumber = System.getenv("AIRBRIDGE_VERSION_CODE")?.toIntOrNull()
+        val configuredVersionCode = System.getenv("AIRBRIDGE_VERSION_CODE")?.toIntOrNull()
         val gitCommitCount = runCatching {
             providers.exec {
                 commandLine("git", "rev-list", "--count", "HEAD")
             }.standardOutput.asText.get().trim().toIntOrNull()
-        }.getOrNull() ?: 100
+        }.getOrNull() ?: 0
 
-        versionCode = when {
-            ciRunNumber != null -> 100000 + ciRunNumber
-            else -> 100000 + gitCommitCount
-        }
-        versionName = "0.0.5"
+        // A stable production floor prevents a local Play bundle from going
+        // backwards from the old CI-generated sideload version codes.
+        versionCode = configuredVersionCode ?: 2_300_000 + gitCommitCount
+        versionName = "2.3.0"
     }
 
     signingConfigs {
-        // Committed sideload key: keeps package signatures stable across CI
-        // runs and local debug builds so users and developers can install updates
-        // without signature collisions (INSTALL_FAILED_UPDATE_INCOMPATIBLE).
-        create("ciSideload") {
-            storeFile = rootProject.layout.projectDirectory.file("ci.keystore").asFile
-            storePassword = "airbridge-ci"
-            keyAlias = "airbridge"
-            keyPassword = "airbridge-ci"
-            enableV1Signing = true
-            enableV2Signing = true
-            enableV3Signing = true
-        }
-
-        // Production release signing config overridden via environment variables
-        val envStore = System.getenv("AIRBRIDGE_KEYSTORE_FILE")
-        if (envStore != null) {
+        if (hasReleaseSigning) {
             create("release") {
-                storeFile = file(envStore)
-                storePassword = System.getenv("AIRBRIDGE_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("AIRBRIDGE_KEYSTORE_ALIAS")
-                keyPassword = System.getenv("AIRBRIDGE_KEYSTORE_KEY_PASSWORD")
+                storeFile = file(requireNotNull(releaseKeystore))
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
                 enableV1Signing = true
                 enableV2Signing = true
                 enableV3Signing = true
@@ -58,16 +63,23 @@ android {
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("ciSideload")
+            // Android Studio's standard debug key is intentionally used only
+            // for local development. It is never a release fallback.
         }
         release {
-            isMinifyEnabled = false
-            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("ciSideload")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -77,6 +89,21 @@ android {
         jvmTarget = "17"
     }
     sourceSets["main"].kotlin.srcDir("src/main/kotlin")
+}
+
+// Make an accidental unsigned/public-key Play artifact impossible. Debug and
+// engine checks remain runnable without any release secret.
+tasks.configureEach {
+    val releasePackagingTask = name.startsWith("assembleRelease") || name.startsWith("bundleRelease")
+    if (releasePackagingTask) {
+        doFirst {
+            check(hasReleaseSigning) {
+                "Release signing is not configured. Create android/keystore.properties from " +
+                    "android/keystore.properties.example, or set the four AIRBRIDGE_KEYSTORE_* variables. " +
+                    "Never use android/ci.keystore for a Play upload."
+            }
+        }
+    }
 }
 
 dependencies {

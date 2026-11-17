@@ -92,8 +92,8 @@ jobs:
             dist-bin/AirBridge-macOS-*.zip
           if-no-files-found: error
 
-  android-apk:
-    name: Android APK (sideload)
+  android-aab:
+    name: Android App Bundle (Play upload)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -128,29 +128,52 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.14.3
-      - name: Assemble release APK (ci sideload key)
+      - name: Configure private Play upload key
         env:
-          AIRBRIDGE_VERSION_CODE: ${{ github.run_number }}
+          AIRBRIDGE_UPLOAD_KEYSTORE_BASE64: ${{ secrets.AIRBRIDGE_UPLOAD_KEYSTORE_BASE64 }}
+          AIRBRIDGE_KEYSTORE_PASSWORD: ${{ secrets.AIRBRIDGE_KEYSTORE_PASSWORD }}
+          AIRBRIDGE_KEYSTORE_ALIAS: ${{ secrets.AIRBRIDGE_KEYSTORE_ALIAS }}
+          AIRBRIDGE_KEYSTORE_KEY_PASSWORD: ${{ secrets.AIRBRIDGE_KEYSTORE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in AIRBRIDGE_UPLOAD_KEYSTORE_BASE64 AIRBRIDGE_KEYSTORE_PASSWORD AIRBRIDGE_KEYSTORE_ALIAS AIRBRIDGE_KEYSTORE_KEY_PASSWORD; do
+            test -n "${!key:-}" || { echo "::error title=Play upload key missing::$key must be configured as a GitHub Actions secret"; exit 1; }
+          done
+          key_path="$RUNNER_TEMP/airbridge-upload.jks"
+          printf '%s' "$AIRBRIDGE_UPLOAD_KEYSTORE_BASE64" | base64 --decode > "$key_path"
+          test -s "$key_path"
+          echo "AIRBRIDGE_KEYSTORE_FILE=$key_path" >> "$GITHUB_ENV"
+      - name: Build signed release AAB
+        env:
+          AIRBRIDGE_KEYSTORE_PASSWORD: ${{ secrets.AIRBRIDGE_KEYSTORE_PASSWORD }}
+          AIRBRIDGE_KEYSTORE_ALIAS: ${{ secrets.AIRBRIDGE_KEYSTORE_ALIAS }}
+          AIRBRIDGE_KEYSTORE_KEY_PASSWORD: ${{ secrets.AIRBRIDGE_KEYSTORE_KEY_PASSWORD }}
         shell: bash
         run: |
           set -o pipefail
+          export AIRBRIDGE_VERSION_CODE=$((2300000 + GITHUB_RUN_NUMBER))
           gradle -p android :engine:check --no-daemon 2>&1 | tee gradle-build.log && \
-          gradle -p android :app:assembleRelease --no-daemon 2>&1 | tee -a gradle-build.log || {
-            echo "::error title=Android release build failed::$(tail -n 40 gradle-build.log | tr '\n' '|' | cut -c1-3000)"
+          gradle -p android :app:bundleRelease --no-daemon 2>&1 | tee -a gradle-build.log || {
+            echo "::error title=Android App Bundle build failed::$(tail -n 40 gradle-build.log | tr '\n' '|' | cut -c1-3000)"
             exit 1
           }
       - name: Name artifact
-        run: mkdir -p dist-bin && cp android/app/build/outputs/apk/release/app-release.apk dist-bin/AirBridge.apk
+        run: mkdir -p dist-bin && cp android/app/build/outputs/bundle/release/app-release.aab dist-bin/AirBridge.aab
+      # This is a Play Console upload package, not a direct-download asset.
+      # Keep it short-lived and inside Actions; publishing it on a GitHub Release
+      # invites users to download an AAB their device cannot install.
       - uses: actions/upload-artifact@v4
         with:
-          name: android-apk
-          path: dist-bin/AirBridge.apk
+          name: android-aab-play-upload
+          path: dist-bin/AirBridge.aab
+          retention-days: 7
           if-no-files-found: error
 
   publish:
     name: Publish GitHub release
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    needs: [desktop-linux-windows, desktop-darwin, android-apk]
+    needs: [desktop-linux-windows, desktop-darwin, android-aab]
     runs-on: ubuntu-latest
     # Keyless signing: Sigstore build-provenance attestations bound to this
     # workflow run (no signing keys or repository secrets to manage or leak).
@@ -164,8 +187,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # Keep the Play AAB in the private, short-lived Actions artifact above.
+      # GitHub Releases contain only desktop assets users can actually install.
       - uses: actions/download-artifact@v4
         with:
+          pattern: desktop-*
           path: dist-bin
           merge-multiple: true
       - name: Resolve release tag
@@ -206,7 +232,6 @@ jobs:
         with:
           subject-path: |
             dist-bin/AirBridge-*
-            dist-bin/AirBridge.apk
             dist-bin/SHA256SUMS.txt
       - name: Create or update release
         env:

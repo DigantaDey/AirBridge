@@ -640,7 +640,7 @@ cat <<DONE
 
 AirBridge is ready.
   • UI:        http://localhost:${PORT}
-  • Android:   sideload AirBridge.apk from https://github.com/${REPO}/releases/latest
+  • Android:   install AirBridge from Google Play (package: com.airbridge.app)
   • Verify:    sha256sum -c SHA256SUMS.txt  (downloaded alongside releases)
   • Uninstall: rm "$bin"
 DONE

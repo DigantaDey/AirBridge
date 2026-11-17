@@ -87,7 +87,10 @@ describe('F07: Native Settings Screen & Storage Config', () => {
     expect(prefs).toContain('autoClipboard');
     expect(prefs).toContain('receiveClipboard');
     expect(prefs).toContain('connectionContinuity');
-    expect(prefs).toContain('accessibilityClipboardOptIn');
+    expect(prefs).toContain('contactsOnComputer');
+    expect(prefs).toContain('callsFromComputer');
+    expect(prefs).toContain('screenSharing');
+    expect(prefs).not.toContain('accessibilityClipboardOptIn');
   });
 
   it('propagates update-profile changes live across connected peers', async () => {

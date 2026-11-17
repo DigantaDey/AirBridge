@@ -360,12 +360,20 @@ class ScreenShareConsentActivity : Activity() {
             finish()
             return
         }
+        if (!Prefs(this).screenSharing) {
+            channel.declineScreenShare(sessionId, "Screen sharing is disabled on the phone")
+            ContinuityNotifications.cancel(this, ContinuityNotifications.screenRequestId(sessionId))
+            runCatching { Toast.makeText(this, "Enable Screen sharing in AirBridge settings first", Toast.LENGTH_SHORT).show() }
+            finish()
+            return
+        }
         if (savedInstanceState?.getBoolean(STATE_ASKED) == true) return
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("Share your screen with ${request.peerName}?")
             .setMessage(
                 "${request.peerName} will see everything on this phone's screen, including notifications, " +
-                    "until you stop sharing. The stream is end-to-end encrypted and never leaves your devices.",
+                    "until you stop sharing. This is a visual screen share: app audio is not sent. " +
+                    "DRM-protected video may appear blank by design. The stream is end-to-end encrypted and never leaves your devices.",
             )
             .setPositiveButton("Continue") { _, _ ->
                 val mpm = getSystemService(MediaProjectionManager::class.java)

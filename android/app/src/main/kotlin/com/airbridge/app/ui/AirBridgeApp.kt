@@ -99,10 +99,8 @@ fun AirBridgeApp(
     onPickClipboardImage: () -> Unit,
     onOpenDownloads: (String?) -> Unit,
     onRequestBatteryExemption: () -> Unit,
-    onOpenAccessibilitySettings: () -> Unit,
-    onSetNotificationSharing: (Boolean) -> Unit = {},
-    onOpenNotificationListenerSettings: () -> Unit = {},
     onOpenAppSettings: () -> Unit,
+    onOpenPrivacyPolicy: () -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -164,7 +162,6 @@ fun AirBridgeApp(
             onStopHotspotHandoff = { viewModel.stopHotspotHandoff() },
             onOpenDownloads = onOpenDownloads,
             onRequestBatteryExemption = onRequestBatteryExemption,
-            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
             onOpenAppSettings = onOpenAppSettings,
             onBeamText = { text, onSent -> viewModel.beamText(text, onSent) },
             onPickClipboardImage = onPickClipboardImage,
@@ -176,10 +173,7 @@ fun AirBridgeApp(
             onSetThemeMode = { viewModel.setThemeMode(it) },
             onSetAutoClipboard = { viewModel.setAutoClipboard(it) },
             onSetReceiveClipboard = { viewModel.setReceiveClipboard(it) },
-            onSetNotificationSharing = { viewModel.setNotificationSharing(it) },
             onSetConnectionContinuity = { viewModel.setConnectionContinuity(it) },
-            onSetAccessibilityOptIn = { viewModel.setAccessibilityOptIn(it) },
-            onOpenNotificationListenerSettings = onOpenNotificationListenerSettings,
             onForgetComputer = { viewModel.forgetComputer() },
         )
 
@@ -300,8 +294,8 @@ fun AirBridgeContent(
     onStopHotspotHandoff: () -> Unit = {},
     onOpenDownloads: (String?) -> Unit,
     onRequestBatteryExemption: () -> Unit,
-    onOpenAccessibilitySettings: () -> Unit,
     onOpenAppSettings: () -> Unit,
+    onOpenPrivacyPolicy: () -> Unit,
     onBeamText: (String, () -> Unit) -> Unit,
     onPickClipboardImage: () -> Unit,
     onBeamSystemClipboard: () -> Unit,
@@ -312,10 +306,7 @@ fun AirBridgeContent(
     onSetThemeMode: (String) -> Unit,
     onSetAutoClipboard: (Boolean) -> Unit,
     onSetReceiveClipboard: (Boolean) -> Unit,
-    onSetNotificationSharing: (Boolean) -> Unit = {},
     onSetConnectionContinuity: (Boolean) -> Unit,
-    onSetAccessibilityOptIn: (Boolean) -> Unit,
-    onOpenNotificationListenerSettings: () -> Unit = {},
     onForgetComputer: () -> Unit,
 ) {
     if (uiState.scannerOpen) {
@@ -437,7 +428,6 @@ fun AirBridgeContent(
                             onStopHotspotHandoff = onStopHotspotHandoff,
                             onOpenDownloads = onOpenDownloads,
                             onRequestBatteryExemption = onRequestBatteryExemption,
-                            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                             modifier = bodyMod,
                         )
 
@@ -449,7 +439,6 @@ fun AirBridgeContent(
                             onBeamSystemClipboard = onBeamSystemClipboard,
                             onCopyClipboardItem = onCopyClipboardItem,
                             onClearHistory = onClearClipboardHistory,
-                            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                             modifier = bodyMod,
                         )
 
@@ -460,13 +449,10 @@ fun AirBridgeContent(
                             onSetThemeMode = onSetThemeMode,
                             onSetAutoClipboard = onSetAutoClipboard,
                             onSetReceiveClipboard = onSetReceiveClipboard,
-                            onSetNotificationSharing = onSetNotificationSharing,
                             onSetConnectionContinuity = onSetConnectionContinuity,
-                            onSetAccessibilityOptIn = onSetAccessibilityOptIn,
                             onRequestBatteryExemption = onRequestBatteryExemption,
-                            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-                            onOpenNotificationListenerSettings = onOpenNotificationListenerSettings,
                             onOpenAppSettings = onOpenAppSettings,
+                            onOpenPrivacyPolicy = onOpenPrivacyPolicy,
                             onOpenPairingSheet = onOpenPairingSheet,
                             onForgetComputer = onForgetComputer,
                             modifier = bodyMod,
@@ -577,8 +563,8 @@ private fun AirBridgeConnectPreview() {
             onReconnect = {},
             onOpenDownloads = {},
             onRequestBatteryExemption = {},
-            onOpenAccessibilitySettings = {},
             onOpenAppSettings = {},
+            onOpenPrivacyPolicy = {},
             onBeamText = { _, _ -> },
             onPickClipboardImage = {},
             onBeamSystemClipboard = {},
@@ -590,7 +576,6 @@ private fun AirBridgeConnectPreview() {
             onSetAutoClipboard = {},
             onSetReceiveClipboard = {},
             onSetConnectionContinuity = {},
-            onSetAccessibilityOptIn = {},
             onForgetComputer = {},
         )
     }
@@ -606,7 +591,6 @@ private fun AirBridgeTabletPairedPreview() {
                 configuredTarget = "https://192.168.1.14:3000",
                 deviceName = "Pixel Tablet",
                 batteryExempt = true,
-                accessibilityEnabled = true,
                 selectedPeerId = "peer-1",
                 engine = NativeEngineUiState(
                     ready = true,
@@ -653,8 +637,8 @@ private fun AirBridgeTabletPairedPreview() {
             onReconnect = {},
             onOpenDownloads = {},
             onRequestBatteryExemption = {},
-            onOpenAccessibilitySettings = {},
             onOpenAppSettings = {},
+            onOpenPrivacyPolicy = {},
             onBeamText = { _, _ -> },
             onPickClipboardImage = {},
             onBeamSystemClipboard = {},
@@ -666,7 +650,6 @@ private fun AirBridgeTabletPairedPreview() {
             onSetAutoClipboard = {},
             onSetReceiveClipboard = {},
             onSetConnectionContinuity = {},
-            onSetAccessibilityOptIn = {},
             onForgetComputer = {},
         )
     }

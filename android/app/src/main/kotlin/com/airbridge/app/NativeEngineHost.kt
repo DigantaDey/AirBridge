@@ -350,12 +350,6 @@ class NativeEngineHost(
 
                         override fun onLocalClipboardBeam(item: ClipboardItem) = addClip(item)
 
-                        override fun onNotification(item: NotificationItem) {
-                            if (prefs.notificationSharing) {
-                                ConnectionService.postSharedNotification(context, item.title, item.body, item.appName)
-                            }
-                        }
-
                         override fun onHandoffStatus(id: String, state: com.airbridge.engine.Handoff.State, reason: String) {
                             if (closed) return
                             handoff.onSessionStatus(id, state, reason)
@@ -400,13 +394,6 @@ class NativeEngineHost(
             }
         }
         refresh()
-    }
-
-    fun broadcastNotificationBeam(title: String, body: String, appName: String? = null, packageName: String? = null) {
-        if (closed || !prefs.notificationSharing) return
-        worker.execute {
-            engine?.broadcastNotificationBeam(title, body, appName, packageName)
-        }
     }
 
     fun publishLocalClipboard(text: String, explicit: Boolean = false) {

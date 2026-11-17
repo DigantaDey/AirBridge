@@ -264,11 +264,13 @@ class AndroidFileSinkFactory(private val context: Context) : FileSinkFactory {
                 throw e
             }
         }
-        @Suppress("DEPRECATION")
-        val publicDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "AirBridge")
-        val dir = if ((publicDir.isDirectory || publicDir.mkdirs()) && publicDir.canWrite()) publicDir
-            else File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir, "AirBridge")
-        if (!dir.isDirectory && !dir.mkdirs()) throw IOException("Cannot create Downloads folder")
+        // Android 8/9 cannot use scoped MediaStore Downloads. Keep the file in
+        // AirBridge's app-specific external Downloads directory instead of
+        // writing the shared public Downloads folder through deprecated legacy
+        // storage APIs. No storage permission is required and uninstall removes
+        // these files, so the UI must expose the resulting location clearly.
+        val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir, "AirBridge")
+        if (!dir.isDirectory && !dir.mkdirs()) throw IOException("Cannot create AirBridge downloads folder")
         val target = uniqueFile(dir, name)
         try {
             part.inputStream().use { input -> target.outputStream().use { input.copyTo(it, 512 * 1024) } }

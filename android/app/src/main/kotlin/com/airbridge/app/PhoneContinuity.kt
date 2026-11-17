@@ -43,14 +43,14 @@ object ContinuityPermissions {
 
     /**
      * READ_PHONE_STATE: ringing/off-hook/idle. ANSWER_PHONE_CALLS: answer,
-     * reject and hang up. CALL_PHONE: place calls. READ_CALL_LOG (optional):
-     * Android only reveals the caller's number with it (API 29+).
+     * reject and hang up. CALL_PHONE: place calls. AirBridge intentionally
+     * does not request the restricted READ_CALL_LOG permission: caller history
+     * and caller numbers are not needed for remote call controls.
      */
     val CALLS: Array<String> = arrayOf(
         Manifest.permission.READ_PHONE_STATE,
         Manifest.permission.ANSWER_PHONE_CALLS,
         Manifest.permission.CALL_PHONE,
-        Manifest.permission.READ_CALL_LOG,
     )
 
     private fun granted(context: Context, permission: String) =
@@ -58,10 +58,7 @@ object ContinuityPermissions {
 
     fun contactsGranted(context: Context) = granted(context, Manifest.permission.READ_CONTACTS)
 
-    /** The caller-ID permission is optional; the other three are required. */
-    fun callsGranted(context: Context) = CALLS.filter { it != Manifest.permission.READ_CALL_LOG }.all { granted(context, it) }
-
-    fun callerIdGranted(context: Context) = granted(context, Manifest.permission.READ_CALL_LOG)
+    fun callsGranted(context: Context) = CALLS.all { granted(context, it) }
 
     fun hasTelephony(context: Context) = context.packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)
 
@@ -231,7 +228,8 @@ class CallMonitor(
             val cur = current
             when (state) {
                 TelephonyManager.CALL_STATE_RINGING -> when {
-                    // Second callback with the caller's number (READ_CALL_LOG).
+                    // A device may expose a number for an active call on older
+                    // Android releases. We do not request call-log access for it.
                     prev == state && cur != null && cur.number == null && number != null ->
                         cur.copy(number = number, name = contacts.lookupName(number), updatedAt = now)
                     prev == state -> null
@@ -341,8 +339,22 @@ class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
         ch.contactsReady = prefs.contactsOnComputer && ContinuityPermissions.contactsGranted(context)
         val callsOk = prefs.callsFromComputer && ContinuityPermissions.hasTelephony(context) && ContinuityPermissions.callsGranted(context)
         ch.callsReady = callsOk
-        ch.screenSourceAvailable = prefs.screenSharing && ContinuityPermissions.screenCaptureSupported(context)
+        val screenSharingEnabled = prefs.screenSharing && ContinuityPermissions.screenCaptureSupported(context)
+        ch.screenSourceAvailable = screenSharingEnabled
         if (callsOk) calls.start() else calls.stop()
+        if (!screenSharingEnabled) {
+            // A switch-off is a real revocation, not just a change to the next
+            // feature advertisement: reject queued requests and terminate any
+            // already running capture immediately.
+            ch.pendingScreenRequests().forEach { request ->
+                ch.declineScreenShare(request.sessionId, "Screen sharing was disabled on the phone")
+                ContinuityNotifications.cancel(context, ContinuityNotifications.screenRequestId(request.sessionId))
+            }
+            ScreenShareService.activeSessionId?.let { sessionId ->
+                ch.stopScreenShare(sessionId, "Screen sharing was disabled on the phone")
+                ScreenShareService.stopSession(context, sessionId)
+            }
+        }
         val features = ch.features()
         val changed = synchronized(this) { (features != lastFeatures).also { lastFeatures = features } }
         if (announce && changed) ch.announce()

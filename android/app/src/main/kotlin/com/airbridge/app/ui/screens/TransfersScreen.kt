@@ -84,7 +84,6 @@ fun TransfersScreen(
     onReconnect: () -> Unit,
     onOpenDownloads: (String?) -> Unit,
     onRequestBatteryExemption: () -> Unit,
-    onOpenAccessibilitySettings: () -> Unit,
     modifier: Modifier = Modifier,
     onStartHotspotHandoff: () -> Unit = {},
     onStopHotspotHandoff: () -> Unit = {},
@@ -121,7 +120,6 @@ fun TransfersScreen(
                     BackgroundHealthCard(
                         uiState = uiState,
                         onRequestBatteryExemption = onRequestBatteryExemption,
-                        onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                     )
                     HotspotHandoffCard(
                         state = uiState.engine.handoff,
@@ -176,12 +174,11 @@ fun TransfersScreen(
                         modifier = mediumCardModifier,
                     )
                 }
-                if (!uiState.batteryExempt || (uiState.accessibilityOptIn && !uiState.accessibilityEnabled)) {
+                if (!uiState.batteryExempt) {
                     item(key = "health") {
                         BackgroundHealthCard(
                             uiState = uiState,
                             onRequestBatteryExemption = onRequestBatteryExemption,
-                            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                             modifier = mediumCardModifier,
                         )
                     }
@@ -461,10 +458,9 @@ private fun ConnectionStatusCard(
 private fun BackgroundHealthCard(
     uiState: AirBridgeAppUiState,
     onRequestBatteryExemption: () -> Unit,
-    onOpenAccessibilitySettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    if (uiState.batteryExempt && (!uiState.accessibilityOptIn || uiState.accessibilityEnabled)) return
+    if (uiState.batteryExempt) return
     ElevatedCard(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
@@ -500,22 +496,6 @@ private fun BackgroundHealthCard(
                     }
                     TextButton(onClick = onRequestBatteryExemption) {
                         Text("Allow")
-                    }
-                }
-            }
-            if (uiState.accessibilityOptIn && !uiState.accessibilityEnabled) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text(
-                        text = "Turn on the AirBridge Accessibility bridge in Settings for background clipboard capture.",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.weight(1f),
-                    )
-                    TextButton(onClick = onOpenAccessibilitySettings) {
-                        Text("Settings")
                     }
                 }
             }

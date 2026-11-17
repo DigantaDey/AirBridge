@@ -400,7 +400,7 @@ export interface CallInfo {
   callId: string;
   state: CallState;
   direction: CallDirection;
-  /** Caller/callee number when the phone can read it (READ_CALL_LOG on Android). */
+  /** Caller/callee number only when the platform exposes it to the call controller. */
   number?: string;
   /** Contact name resolved on the phone. */
   name?: string;

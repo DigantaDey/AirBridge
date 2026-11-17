@@ -151,11 +151,8 @@ class MainActivity : ComponentActivity() {
                 },
                 onOpenDownloads = ::openDownloads,
                 onRequestBatteryExemption = ::requestBatteryExemption,
-                onOpenAccessibilitySettings = ::openAccessibilitySettings,
-                onOpenNotificationListenerSettings = {
-                    runCatching { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
-                },
                 onOpenAppSettings = ::openAppSettings,
+                onOpenPrivacyPolicy = ::openPrivacyPolicy,
             )
         }
     }
@@ -275,22 +272,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun openAccessibilitySettings() {
-        viewModel.setAccessibilityOptIn(true)
-        val launched = runCatching {
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            true
-        }.getOrDefault(false)
-        if (!launched) {
-            viewModel.notifyMessage("Could not open Android Accessibility Settings")
-        }
-    }
-
     private fun openAppSettings() {
         val intent = Intent(
             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
             Uri.parse("package:$packageName"),
         )
         runCatching { startActivity(intent) }
+    }
+
+    private fun openPrivacyPolicy() {
+        val policy = Intent(Intent.ACTION_VIEW, Uri.parse("https://airbridge.fyi/privacy.html"))
+        val opened = runCatching { startActivity(policy); true }.getOrDefault(false)
+        if (!opened) viewModel.notifyMessage("Could not open the privacy policy")
     }
 }

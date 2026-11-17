@@ -1,6 +1,6 @@
 # Android validation and remaining device checks
 
-## Architecture being validated (2.2.1)
+## Architecture being validated (2.3.0)
 
 `ConnectionService` owns a single `NativeEngineHost` / Kotlin `AirBridgeEngine`.
 The bundled WebView UI attaches a metadata subscriber; suspending, destroying
@@ -104,7 +104,8 @@ APK, not to the JVM loopback test.
       desktop from a focused Android app and using Share / selected text →
       AirBridge with automatic clipboard disabled. Preserve text whitespace.
 - [ ] On Android 10+, confirm denied background clipboard reads do not crash
-      the service; Accessibility is optional and does not scrape window content.
+      the service. Verify Share / Process Text → AirBridge, the Quick Settings
+      tile and the in-app Paste action still send intentionally selected text.
       Sensitive password-manager clips must not be auto-shared.
 - [ ] Restart desktop with the same TLS CA, renew its leaf, then change its CA:
       same-CA reconnection succeeds; changed-CA connection fails until explicit
@@ -116,8 +117,8 @@ APK, not to the JVM loopback test.
 ## Clipboard constraints
 
 A foreground service grants execution continuity, **not** permission to read
-another foreground app's clipboard on Android 10+. Granting Accessibility does
-not universally remove that restriction. AirBridge attempts permitted events,
-never reads text fields or window contents, and offers explicit Share/Text
-Processing actions as the supported fallback. The app cannot truthfully
-promise unrestricted automatic clipboard capture on every Android release.
+another foreground app's clipboard on Android 10+. AirBridge does not declare
+an Accessibility Service to work around that restriction. It offers explicit
+Share/Text Processing actions, a Quick Settings tile and an in-app Paste action
+as the supported fallback. The app cannot truthfully promise unrestricted
+automatic clipboard capture on every Android release.

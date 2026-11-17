@@ -62,38 +62,24 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("connectionContinuity", true)
         set(value) = sp.edit().putBoolean("connectionContinuity", value).apply()
 
-    var notificationSharing: Boolean
-        get() = sp.getBoolean("notificationSharing", true)
-        set(value) = sp.edit().putBoolean("notificationSharing", value).apply()
-
     /**
-     * Phone continuity toggles. Each feature is only advertised to the computer
-     * when its toggle is on AND Android granted the matching permission.
-     * Screen sharing additionally asks for consent on every session.
+     * Sensitive continuity features start disabled. They are advertised only
+     * after the person explicitly enables the feature and Android has granted
+     * its matching permission. Turning a switch off revokes the remote
+     * capability immediately; screen sharing additionally needs per-session
+     * MediaProjection consent.
      */
     var contactsOnComputer: Boolean
-        get() = sp.getBoolean("contactsOnComputer", true)
+        get() = sp.getBoolean("contactsOnComputer", false)
         set(value) = sp.edit().putBoolean("contactsOnComputer", value).apply()
 
     var callsFromComputer: Boolean
-        get() = sp.getBoolean("callsFromComputer", true)
+        get() = sp.getBoolean("callsFromComputer", false)
         set(value) = sp.edit().putBoolean("callsFromComputer", value).apply()
 
     var screenSharing: Boolean
-        get() = sp.getBoolean("screenSharing", true)
+        get() = sp.getBoolean("screenSharing", false)
         set(value) = sp.edit().putBoolean("screenSharing", value).apply()
-
-    /**
-     * Accessibility-assisted hidden clipboard capture is OFF by default. The
-     * user must explicitly opt in, then enable the AirBridge service in
-     * Android's Accessibility settings; the app cannot enable it silently.
-     */
-    val hasAccessibilityClipboardOptInChoice: Boolean
-        get() = sp.contains("accessibilityClipboardOptIn")
-
-    var accessibilityClipboardOptIn: Boolean
-        get() = sp.getBoolean("accessibilityClipboardOptIn", false)
-        set(value) = sp.edit().putBoolean("accessibilityClipboardOptIn", value).apply()
 
     /** Last working loopback port; 0 until the relay has run once. */
     var relayPort: Int

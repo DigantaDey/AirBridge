@@ -1,9 +1,8 @@
 # Distribution
 
-How AirBridge ships to every machine you own — **without ever paying Apple or
-Microsoft**, and with Android distributed as a normal sideload APK (a one-time
-Google Play developer account, ~$25, is optional and only needed if you also
-want the Play Store).
+How AirBridge ships to every machine you own — with signed desktop artifacts
+and an Android App Bundle prepared for **Google Play App Signing**. See the
+[Play Store release gate](PLAY_STORE_RELEASE.md) before producing an AAB.
 
 ## What ships where
 
@@ -16,7 +15,7 @@ want the Play Store).
 | Windows ARM64 | `AirBridge-windows-arm64.exe` | Linux CI runner | none |
 | Linux x64 (glibc / static) | `AirBridge-linux-x64`, `…-musl` | Linux CI runner | none |
 | Linux ARM64 (glibc / static) | `AirBridge-linux-arm64`, `…-arm64-musl` | Linux CI runner | none |
-| Android 8.0+ (API 26) | `AirBridge.apk` | Android CI job (Gradle) | committed sideload key (`android/ci.keystore`) |
+| Android 8.0+ (API 26) | `app-release.aab` | `:app:bundleRelease` | private Play upload key + Play App Signing |
 | any OS with Node | `npm run build:desktop` | local / CI | same rules apply |
 
 Every release also carries `SHA256SUMS.txt` and keyless **Sigstore
@@ -55,20 +54,11 @@ desktop self-updater enforces the checksums before installing anything; see
 * No gatekeepers at all: tarball + `install.sh`, AppImage, or Flathub when the
   desktop build is ready. The `-musl` binaries run on any distro.
 
-### Android — sideload APK, Play optional
-* Sideload: download `AirBridge.apk` from the release → install (approve
-  "install unknown apps" for your browser/file manager once). Updates install
-  over the previous version because CI signs with the **same committed
-  sideload key** (`android/ci.keystore`, override via
-  `AIRBRIDGE_KEYSTORE_*` env vars for your own key).
-* Play Store distribution is a separate packaging/policy task: produce an AAB,
-  use a private production signing key, and review foreground-service,
-  Accessibility, camera and clipboard disclosures. This repository does not
-  claim Play policy approval.
-* **The committed sideload key is public**, so its signature does not prove an
-  APK came from the maintainer. Download only from the project's release page
-  and compare the release checksum. Use your own private key for controlled
-  distribution (changing keys breaks in-place upgrades).
+### Android — Google Play App Bundle
+* The Android release is an **AAB**, signed locally or in CI with a private upload key and uploaded to Google Play. Google Play App Signing manages the installation signing key and delivery splits.
+* `:app:bundleRelease` fails closed if `android/keystore.properties` or the four `AIRBRIDGE_KEYSTORE_*` variables are missing. The old committed sideload key was removed because it could not establish publisher authenticity.
+* The Play submission requires a current privacy-policy URL, Data safety answers and foreground-service declarations. AirBridge’s detailed manual steps, permissions and review checklist live in [PLAY_STORE_RELEASE.md](PLAY_STORE_RELEASE.md).
+* Current Android scope deliberately excludes Accessibility and notification-listener services, and does not request `READ_CALL_LOG`. Clipboard sends from other apps use Android Share / Process Text, the Quick Settings tile or the in-app Paste action.
 
 ## In-app Download center
 
@@ -83,7 +73,7 @@ The web UI served by every build has a **Downloads** panel (`GET /api/downloads`
   `SHA256SUMS.txt`.
 
 Security properties of the endpoint: exact-name whitelist only
-(`AirBridge-<os>-<arch>[-musl][.exe]`, `AirBridge.apk`, `SHA256SUMS.txt`),
+(`AirBridge-<os>-<arch>[-musl][.exe]`, `SHA256SUMS.txt`),
 basename-only resolution inside fixed search dirs (no traversal, no listing),
 `Content-Disposition: attachment`, `Cache-Control: no-store`, and its own
 `default-src 'none'` CSP. The app itself ships a strict global CSP +
@@ -115,7 +105,7 @@ single-file binaries print the same thing from a terminal:
 | macOS | `install.sh` → prebuilt `~/Applications/AirBridge.app` (checksum + signature verified) and `~/.local/bin/AirBridge` → symlink to its embedded service; older releases: local `swiftc` build or browser launcher | `--autostart` → `~/Library/LaunchAgents/com.airbridge.app.plist` (the app, `--background`, restarted after crashes); without the native app `com.airbridge.daemon.plist` (`KeepAlive.SuccessfulExit=false`) |
 | Linux | `install.sh` → `~/.local/bin/AirBridge` | `--autostart` → systemd user unit `airbridge.service` (`Restart=on-failure`), else `~/.config/autostart/airbridge.desktop` |
 | Windows | `install.ps1` → `%LOCALAPPDATA%\AirBridge` | `-Autostart` → `HKCU\…\Run` |
-| Android | sideload APK with bundled UI + native engine | foreground connection service after pairing; active transfers do not depend on the screen; no boot auto-start |
+| Android | Google Play-signed app with bundled UI + native engine | foreground connection service after pairing; active transfers do not depend on the screen; no boot auto-start |
 
 Nothing writes outside the user's home/profile; no `sudo`, no UAC, no admin.
 
@@ -135,12 +125,16 @@ A release **must** exist: `install.sh` and `install.ps1` resolve
      `--only windows --skip-client` (bun cross-compiles from Linux);
    * **darwin** job: `--only darwin` then `codesign --force -s -`, then
      `scripts/package-mac-app.sh` for both architectures (prebuilt app zips);
-   * **android** job: Node 22 + `npm ci`, then `gradle :engine:check :app:assembleRelease`
-     (versionCode = run number). `preBuild` embeds the UI in the APK; engine
-     checks cover vectors, pairing, disk integrity and transport regressions;
-   * **publish** job: downloads all artifacts, writes `SHA256SUMS.txt`,
-     attests build provenance (Sigstore, keyless), `gh release create` with
-     every binary, app zip + APK.
+   * **android** job: Node 22 + `npm ci`, a private upload key stored in GitHub
+     Actions secrets, then `gradle :engine:check :app:bundleRelease`. The job
+     fails early if a signing secret is absent. `preBuild` embeds the UI in the
+     Android bundle; engine checks cover vectors, pairing, disk integrity and
+     transport regressions;
+   * **publish** job: downloads the desktop artifacts, writes
+     `SHA256SUMS.txt`, attests build provenance (Sigstore, keyless), and
+     publishes desktop binaries. The Play AAB remains a short-lived private
+     Actions artifact; download it only to upload it to Play Console, never as
+     a directly installable GitHub Release asset.
 3. Users run `install.sh` / `install.ps1` or grab files from the release page.
 
 ## Asset names (must stay in sync)
@@ -151,7 +145,7 @@ A release **must** exist: `install.sh` and `install.ps1` resolve
 | `install.sh` | requests `AirBridge-<os>-<arch>`, `-musl` only on Linux, then falls back to the GitHub API manifest; macOS also `AirBridge-macOS-<arch>.zip` |
 | `src/server/updater.ts` (`assetNameFor`) | same names; the macOS app updates from `AirBridge-macOS-<arch>.zip` |
 | `install.ps1` | requests `AirBridge-windows-<arch>.exe` |
-| `src/client/components/DownloadsModal.tsx` | same names as the release assets |
+| `src/client/components/DownloadsModal.tsx` | desktop release assets; Android goes to Google Play |
 
 macOS builds were previously emitted as `AirBridge-macos-*` while every
 installer asked for `AirBridge-darwin-*` — that mismatch, not just the missing
@@ -165,7 +159,7 @@ npm run build:desktop              # all 8 desktop targets (network needed)
 bash android/scripts/verify.sh     # optional SDK-jar preflight, NOT an APK build
 gradle -p android :engine:check :app:assembleDebug
 npx tsx scripts/test-native-interop.ts  # after engine:check writes its classpath
-gradle -p android :engine:check :app:assembleRelease  # signed APK
+gradle -p android :engine:check :app:bundleRelease  # signed Play AAB (private upload key required)
 ```
 
 
