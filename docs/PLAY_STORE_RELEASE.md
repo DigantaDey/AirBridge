@@ -1,6 +1,6 @@
 # Google Play release gate
 
-This is the release checklist for the **Android App Bundle (AAB)**. It is written for the Play-safe AirBridge 2.4.7 product, not the former sideload workflow.
+This is the release checklist for the **Android App Bundle (AAB)**. It is written for the Play-safe AirBridge 2.4.8 product, not the former sideload workflow.
 
 > This checklist reduces review risk; it cannot guarantee approval. Policies and Play Console questions change, so validate every declaration against the current Console before submitting.
 
