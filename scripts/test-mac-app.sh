@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Real macOS test of the AirBridge.app shell (scripts/mac_app.swift) as a
-# service supervisor. Runs in CI on macos-latest (GUI session available).
+# service supervisor. Runs in CI on a hosted macOS image (GUI session available).
 #
 #   scripts/test-mac-app.sh <path-to-darwin-binary> [<prebuilt AirBridge.app>]
 #
