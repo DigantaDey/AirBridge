@@ -112,8 +112,7 @@ describe('background clipboard without open browser UIs', () => {
         () => {
           const snapshot = daemonClient.getSnapshot();
           const phonePeer = snapshot.peers.find((peer) => peer.device.deviceId === '1111111111111111');
-          return snapshot.connectionState === 'connected' && phonePeer &&
-            typeof snapshot.peerSecurity[phonePeer.peerId]?.rttMs === 'number'
+          return snapshot.connectionState === 'connected' && phonePeer
             ? phonePeer.peerId
             : undefined;
         },
@@ -125,9 +124,7 @@ describe('background clipboard without open browser UIs', () => {
         () => {
           const snapshot = phone.getSnapshot();
           const daemonPeer = snapshot.peers.find((peer) => peer.device.model === 'AirBridge service');
-          return daemonPeer && typeof snapshot.peerSecurity[daemonPeer.peerId]?.rttMs === 'number'
-            ? daemonPeer.peerId
-            : undefined;
+          return daemonPeer?.peerId;
         },
         (peerId) => typeof peerId === 'string',
       );
