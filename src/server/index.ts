@@ -39,6 +39,9 @@ import { registerCliBeamRoutes, type CliBeamSession } from './cliSendSession.js'
 import { startBackgroundClipboardPeer, type BackgroundClipboardPeer } from './backgroundClipboard.js';
 import { REVERSE_CONNECT_PORT, isValidPairCode, normalizePairCode, type HostFirewallStatus, type LanEndpoint } from '../shared/protocol.js';
 import { firewallKey, readMacFirewall } from './macFirewall.js';
+import { addShellSubscriber, shellSubscriberCount } from './shellEvents.js';
+import { buildDiagnostics } from './diagnostics.js';
+import type { Updater } from './updater.js';
 import {
   ReverseConnector,
   browseReversePhones,
@@ -94,6 +97,8 @@ export interface AirBridgeServerOptions {
   clientAssets?: Record<string, string>;
   /** App version reported by /api/downloads (desktop entries pass pkg.version). */
   version?: string;
+  /** Self-updater (packaged desktop builds only); enables /api/update. */
+  updater?: Updater | null;
   /**
    * How often to re-read network interfaces (ms). When the computer joins a
    * hotspot or gets a new DHCP lease, the TLS leaf is re-issued to cover the
@@ -496,6 +501,71 @@ export async function createAirBridgeServer(
       localDaemon: isLocalMachinePeer(req.socket) ? getDaemonStatus(daemonCfg) : { ...getDaemonStatus(daemonCfg), downloadDir: undefined },
     });
   });
+
+  // --- This-machine-only control plane (desktop UI + macOS app) -------------
+  const serverStartedAt = Date.now();
+  const serviceVersion = options.version ?? process.env.AIRBRIDGE_VERSION ?? 'dev';
+  const localOnly = (req: Request, res: Response): boolean => {
+    if (isLocalMachineRequest(req)) return true;
+    res.status(403).json({ error: 'Only available on this computer.' });
+    return false;
+  };
+
+  // Event stream for the native shell (notifications, relaunch after update).
+  app.get('/api/local/events', (req, res) => {
+    if (!localOnly(req, res)) return;
+    // A custom header cannot be sent cross-origin without a CORS preflight
+    // (never granted), so web pages cannot subscribe.
+    if (req.headers['x-airbridge-shell'] !== '1') { res.status(400).json({ error: 'Shell clients only.' }); return; }
+    const caps = String(req.query.capabilities ?? 'notification')
+      .split(',').map((c) => c.trim()).filter((c) => /^[a-z-]{1,32}$/.test(c)).slice(0, 8);
+    addShellSubscriber(res, caps, { type: 'hello', version: serviceVersion, pid: process.pid });
+  });
+
+  app.get('/api/diagnostics', (req, res) => {
+    if (!localOnly(req, res)) return;
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(buildDiagnostics({
+      version: serviceVersion,
+      port: activePort,
+      protocol,
+      startedAt: serverStartedAt,
+      lanEndpoints: advertisedEndpoints(),
+      uncoveredLanAddresses: currentCandidates().map((c) => c.address).filter((address) => !tlsCovers(address)),
+      tls: tls
+        ? {
+            source: tls.source,
+            caFingerprintSha256: tls.caFingerprintSha256,
+            leafFingerprintSha256: tls.leafFingerprintSha256,
+            hosts: tls.hosts,
+            pinPresent: Boolean(tls.pinSha256),
+          }
+        : null,
+      hostFirewall,
+      mdnsActive: mdns ? mdns.active : null,
+      reverseConnect: reverseConnector ? reverseConnector.describe() : 'disabled',
+      connectedDevices: hub.describeClients(),
+      shellSubscribers: shellSubscriberCount(),
+      update: options.updater ? options.updater.getStatus() : { supported: false },
+    }));
+  });
+
+  const updater = options.updater ?? null;
+  app.get('/api/update', (req, res) => {
+    if (!localOnly(req, res)) return;
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(updater ? updater.getStatus() : { supported: false, reason: 'Updates are managed by your package manager or source checkout.', current: serviceVersion });
+  });
+  app.post('/api/update/check', asyncRoute(async (req, res) => {
+    if (!localOnly(req, res)) return;
+    if (!updater) { res.status(404).json({ supported: false }); return; }
+    res.json(await updater.checkAndStage());
+  }));
+  app.post('/api/update/install', asyncRoute(async (req, res) => {
+    if (!localOnly(req, res)) return;
+    if (!updater) { res.status(404).json({ supported: false }); return; }
+    res.json(await updater.install());
+  }));
 
   // Reject remote callers before any raw body parser can allocate a large
   // buffer, not after an unauthorized upload has already occupied memory.

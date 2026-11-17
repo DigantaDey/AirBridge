@@ -215,6 +215,66 @@ install_from_source() {
   return 0
 }
 
+# Prebuilt AirBridge.app from the release (Swift shell + embedded service,
+# ad-hoc signed in CI): no Xcode/swiftc needed, and the in-app updater can
+# replace it as a whole. Returns 1 when the release has no app bundle.
+install_prebuilt_macos_app() {
+  local app="$1" zip_asset="AirBridge-macOS-${a}.zip" zip_url want got stage
+  [ "${AIRBRIDGE_PREBUILT_APP:-1}" = "1" ] || return 1
+  [ "$mode" = "binary" ] || return 1
+  if [ -n "${AIRBRIDGE_VERSION:-}" ]; then
+    zip_url="$base/download/${AIRBRIDGE_VERSION}/${zip_asset}"
+  else
+    zip_url="$base/latest/download/${zip_asset}"
+  fi
+  echo "▸ downloading ${zip_asset}"
+  if ! fetch "$zip_url" "$tmp" || [ ! -s "$tmp" ]; then
+    echo "▸ no prebuilt app in this release; building the app locally"
+    return 1
+  fi
+  # The app is only accepted with a matching published checksum.
+  if ! fetch "$sums_url" "$sums" || [ ! -s "$sums" ]; then
+    echo "⚠ no SHA256SUMS.txt for the prebuilt app; building the app locally instead" >&2
+    return 1
+  fi
+  want="$(awk -v n="$zip_asset" '$2 == n || $2 == "*"n { print $1 }' "$sums" | head -n 1)"
+  got="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+  if [ -z "$want" ] || [ "$want" != "$got" ]; then
+    echo "✖ checksum mismatch for ${zip_asset}; not installing it" >&2
+    return 1
+  fi
+  echo "▸ checksum verified (sha256 ${got:0:16}…)"
+  stage="$(mktemp -d "${TMPDIR:-/tmp}/airbridge-app.XXXXXX")"
+  if ! ditto -x -k "$tmp" "$stage" || [ ! -x "$stage/AirBridge.app/Contents/MacOS/AirBridge" ] \
+     || ! grep -q 'com.airbridge.launcher' "$stage/AirBridge.app/Contents/Info.plist" \
+     || ! codesign --verify --deep --strict "$stage/AirBridge.app" 2>/dev/null \
+     || ! "$stage/AirBridge.app/Contents/Resources/airbridge-server" --version >/dev/null 2>&1; then
+    echo "⚠ the prebuilt app failed verification; building the app locally instead" >&2
+    rm -rf "$stage"
+    return 1
+  fi
+  # The old bundle is kept until the new one is in place.
+  mkdir -p "$(dirname "$app")"
+  if [ -e "$app" ]; then mv "$app" "$stage/AirBridge.app.old"; fi
+  if ! mv "$stage/AirBridge.app" "$app"; then
+    if [ -e "$stage/AirBridge.app.old" ]; then mv "$stage/AirBridge.app.old" "$app"; fi
+    rm -rf "$stage"
+    return 1
+  fi
+  rm -rf "$stage"
+  # Per-user settings live outside the signed bundle (editing it breaks the seal).
+  mkdir -p "$HOME/.airbridge"
+  if [ "$PORT" != "3000" ]; then printf '%s\n' "$PORT" > "$HOME/.airbridge/port"; else rm -f "$HOME/.airbridge/port"; fi
+  # One copy of the service: the CLI runs the app's embedded binary, so app
+  # updates update the CLI too.
+  ln -sfn "$app/Contents/Resources/airbridge-server" "$bin"
+  if [ -x /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister ]; then
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app" || true
+  fi
+  echo "▸ app installed: $app (prebuilt, signature verified; updates itself from the menu bar)"
+  return 0
+}
+
 # Install a tiny Launch Services app that starts the same server as the CLI.
 # The installer is often piped to bash, so everything needed to create the
 # launcher is included here; the artwork is fetched separately and is optional.
@@ -225,6 +285,12 @@ install_macos_app() {
     echo "✖ $app already exists and is not an AirBridge launcher; not replacing it." >&2
     return 1
   fi
+  if install_prebuilt_macos_app "$app"; then
+    return 0
+  fi
+  # Fallback (older releases, source installs): assemble the app locally. An
+  # earlier prebuilt bundle is sealed; start from a clean directory.
+  if [ -f "$contents/Resources/airbridge-server" ]; then rm -rf "$app"; fi
   mkdir -p "$contents/MacOS" "$contents/Resources"
   cat > "$contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -256,7 +322,7 @@ PLIST
 
   if [ "${AIRBRIDGE_NATIVE_APP:-1}" = "1" ] && command -v swiftc >/dev/null 2>&1 && [ -s "$swift_src" ]; then
     echo "▸ compiling native macOS Swift App GUI"
-    if swiftc -O -suppress-warnings "$swift_src" -o "$contents/MacOS/AirBridge" -framework AppKit -framework WebKit 2>/dev/null; then
+    if swiftc -O -suppress-warnings "$swift_src" -o "$contents/MacOS/AirBridge" -framework AppKit -framework WebKit -framework UserNotifications 2>/dev/null; then
       codesign --force -s - "$contents/MacOS/AirBridge" 2>/dev/null || true
       rm -f "$swift_src"
       icon_url="https://raw.githubusercontent.com/${REPO}/main/macos/AirBridge.icns"
@@ -381,6 +447,9 @@ stop_running_daemon() {
 
 stop_running_daemon
 chmod +x "$bin.tmp"
+# A previous prebuilt-app install made $bin a symlink into the app bundle;
+# replace the link itself, never the file inside the signed bundle.
+if [ -L "$bin" ]; then rm -f "$bin"; fi
 mv "$bin.tmp" "$bin"
 
 # macOS: release binaries are ad-hoc signed on macOS CI; this re-sign covers
@@ -418,41 +487,92 @@ case ":$PATH:" in
   *) echo "  add to PATH:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac
 
+xml_escape() { sed -e 's/\&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
 if [ "$AUTOSTART" = "1" ]; then
+  mkdir -p "$HOME/.airbridge"
   if [ "$os" = "Linux" ]; then
-    mkdir -p "$HOME/.config/autostart"
-    cat > "$HOME/.config/autostart/airbridge.desktop" <<DESKTOP
+    # Preferred: a systemd user service (restarts on failure and after updates).
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+      unit_dir="$HOME/.config/systemd/user"
+      mkdir -p "$unit_dir"
+      cat > "$unit_dir/airbridge.service" <<UNIT
+[Unit]
+Description=AirBridge (end-to-end encrypted file and clipboard sharing)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+ExecStart="$bin" --no-browser --port $PORT
+Environment=PORT=$PORT
+Environment=AIRBRIDGE_SUPERVISED=systemd
+# Exit 75 = "restart me" (update installed); crashes restart too, throttled.
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+UNIT
+      rm -f "$HOME/.config/autostart/airbridge.desktop"
+      systemctl --user daemon-reload || true
+      if systemctl --user enable --now airbridge.service >/dev/null 2>&1; then
+        LAUNCH=0 # systemd started it
+      fi
+      echo "▸ autostart registered (systemd user service: systemctl --user status airbridge)"
+    else
+      mkdir -p "$HOME/.config/autostart"
+      cat > "$HOME/.config/autostart/airbridge.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=AirBridge
 Exec=$bin --no-browser
 X-GNOME-Autostart-enabled=true
 DESKTOP
-    echo "▸ autostart registered (~/.config/autostart/airbridge.desktop)"
+      echo "▸ autostart registered (~/.config/autostart/airbridge.desktop)"
+    fi
   else
-    plist="$HOME/Library/LaunchAgents/com.airbridge.daemon.plist"
-    mkdir -p "$(dirname "$plist")" "$HOME/.airbridge"
-    xml_escape() { sed -e 's/\&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+    domain="gui/$(id -u)"
+    app_exe="$HOME/Applications/AirBridge.app/Contents/MacOS/AirBridge"
+    if [ -x "$app_exe" ] && [ "$(head -c 2 "$app_exe")" != "#!" ]; then
+      # Native app: start it at login (menu bar; it supervises the service).
+      # Same agent as the app's "Open at Login" menu item.
+      launchctl bootout "$domain/com.airbridge.daemon" 2>/dev/null || true
+      rm -f "$HOME/Library/LaunchAgents/com.airbridge.daemon.plist"
+      label="com.airbridge.app"
+      args="<string>$(printf %s "$app_exe" | xml_escape)</string><string>--background</string>"
+      env_xml=""
+    else
+      label="com.airbridge.daemon"
+      args="<string>$(printf %s "$bin" | xml_escape)</string><string>--no-browser</string><string>--port</string><string>$PORT</string>"
+      env_xml="<key>EnvironmentVariables</key><dict><key>PORT</key><string>$PORT</string><key>AIRBRIDGE_SUPERVISED</key><string>launchd</string></dict>"
+    fi
+    plist="$HOME/Library/LaunchAgents/$label.plist"
+    mkdir -p "$(dirname "$plist")"
     cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.airbridge.daemon</string>
+  <key>Label</key><string>$label</string>
   <key>ProgramArguments</key>
-  <array><string>$(printf %s "$bin" | xml_escape)</string><string>--no-browser</string><string>--port</string><string>$PORT</string></array>
-  <key>EnvironmentVariables</key><dict><key>PORT</key><string>$PORT</string></dict>
+  <array>$args</array>
+  $env_xml
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><false/>
+  <!-- Restart after a crash or an update (exit 75), not after Quit (exit 0). -->
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key><string>$(printf %s "$HOME/.airbridge/daemon.log" | xml_escape)</string>
   <key>StandardErrorPath</key><string>$(printf %s "$HOME/.airbridge/daemon.log" | xml_escape)</string>
 </dict>
 </plist>
 PLIST
-    launchctl bootout "gui/$(id -u)/com.airbridge.daemon" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null \
+    launchctl bootout "$domain/$label" 2>/dev/null || true
+    launchctl bootstrap "$domain" "$plist" 2>/dev/null \
       || launchctl load "$plist" 2>/dev/null || true
-    echo "▸ autostart registered (~/Library/LaunchAgents/com.airbridge.daemon.plist)"
+    echo "▸ autostart registered (~/Library/LaunchAgents/$label.plist)"
   fi
 fi
 
@@ -476,5 +596,6 @@ DONE
 if [ "$os" = "Darwin" ]; then
   echo '  • Mac app:   ~/Applications/AirBridge.app (Launchpad or Finder)'
   echo '  • Remove:    delete AirBridge.app from Applications; remove the binary above'
-  echo '               (if enabled, also remove the com.airbridge.daemon LaunchAgent)'
+  echo '               (if enabled, also remove ~/Library/LaunchAgents/com.airbridge.app.plist'
+  echo '               or com.airbridge.daemon.plist)'
 fi

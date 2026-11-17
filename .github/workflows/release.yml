@@ -75,10 +75,21 @@ jobs:
             codesign --force -s - "$f"
             codesign --verify --verbose=2 "$f"
           done
+      # Prebuilt AirBridge.app (Swift shell + embedded service), so users need
+      # neither Xcode nor swiftc. The in-app updater installs these zips.
+      - name: Package AirBridge.app (arm64 + x64)
+        run: |
+          set -euo pipefail
+          bash scripts/package-mac-app.sh arm64 dist-bin/AirBridge-darwin-arm64 dist-mac
+          bash scripts/package-mac-app.sh x64 dist-bin/AirBridge-darwin-x64 dist-mac
+          cp dist-mac/AirBridge-macOS-*.zip dist-bin/
+          ls -l dist-bin
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-darwin
-          path: dist-bin/AirBridge-darwin-*
+          path: |
+            dist-bin/AirBridge-darwin-*
+            dist-bin/AirBridge-macOS-*.zip
           if-no-files-found: error
 
   android-apk:
@@ -141,6 +152,12 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     needs: [desktop-linux-windows, desktop-darwin, android-apk]
     runs-on: ubuntu-latest
+    # Keyless signing: Sigstore build-provenance attestations bound to this
+    # workflow run (no signing keys or repository secrets to manage or leak).
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -172,6 +189,13 @@ jobs:
           find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%f\n' | sort \
             | xargs -r sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
+      - name: Attest build provenance (Sigstore)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist-bin/AirBridge-*
+            dist-bin/AirBridge.apk
+            dist-bin/SHA256SUMS.txt
       - name: Create or update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

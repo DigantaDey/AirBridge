@@ -43,7 +43,7 @@ Installing AirBridge requires **no paid developer accounts, app store logins, or
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.sh | bash
 ```
-> *On macOS, this creates `AirBridge.app` in `~/Applications` and places the executable in `~/.local/bin`.*
+> *On macOS, this installs the prebuilt `AirBridge.app` (menu bar app with native notifications) in `~/Applications` and links the `AirBridge` command in `~/.local/bin`. Add `--autostart` to start at login. Desktop builds update themselves (checksum-verified, one-click restart, automatic rollback) — see [docs/desktop-runtime.md](docs/desktop-runtime.md).*
 
 ### Windows (PowerShell)
 ```powershell
@@ -141,6 +141,8 @@ AirBridge daemons and CLI sessions can be customized via environment flags:
 | `AIRBRIDGE_HTTPS` | `1` | Enforces TLS/HTTPS (set to `0` behind reverse proxies) |
 | `AIRBRIDGE_TLS_CERT` / `AIRBRIDGE_TLS_KEY` | `null` | Path to custom PEM certificate and private key |
 | `AIRBRIDGE_BACKGROUND_CLIPBOARD` | `1` | Enables/disables the headless encrypted background clipboard peer |
+| `AIRBRIDGE_AUTO_UPDATE` | `1` | Set `0` to disable the desktop self-updater (checks GitHub releases, verifies SHA-256, installs only on request) |
+| `AIRBRIDGE_REVERSE_CONNECT` | `1` | Set `0` to stop the computer from dialling a phone that cannot reach it |
 
 ### Command Line Interface (CLI)
 

@@ -45,6 +45,7 @@ import {
 import { createAirBridgeClient, type AirBridgeClient } from "./engine/nativeClient.js";
 import { isStaleUi, reloadForServerVersion } from "./engine/buildInfo.js";
 import { canRestartLocalService, isThisComputerPage, requestLocalServiceRestart } from "./engine/desktopShell.js";
+import { ServiceStatusBar, useDiagnosticsCopy } from "./components/ServiceStatusBar.js";
 import { ClipboardList, Clock, Download, FolderOpen, Settings } from "lucide-react";
 
 interface ToastNotice {
@@ -654,6 +655,17 @@ export function App() {
   const [downloadsOpen, setDownloadsOpen] = useState(false);
   const [recentOpen, setRecentOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const diagnosticsPage = useMemo(
+    () => ({
+      connectionState: snap.connectionState,
+      connectionError: snap.connectionError || null,
+      peers: snap.peers.length,
+      nativeShell: isNativeShell(),
+      macApp: canRestartLocalService(),
+    }),
+    [snap.connectionState, snap.connectionError, snap.peers.length],
+  );
+  const diagnostics = useDiagnosticsCopy(diagnosticsPage);
   const [connectionContinuity, setConnectionContinuity] = useState(getNativeConnectionContinuity);
   const [accessibilityOptIn, setAccessibilityOptIn] = useState(getNativeAccessibilityOptIn);
   const [accessibilityServiceEnabled, setAccessibilityServiceEnabled] = useState(isNativeAccessibilityServiceEnabled);
@@ -889,10 +901,14 @@ export function App() {
                 ) : (
                   <button className="text-button" onClick={() => window.location.reload()}>Try again</button>
                 )}
+                <button className="text-button" onClick={() => void diagnostics.copy()}>{diagnostics.label}</button>
               </>
             )}
           </div>
         )}
+        {isThisComputerPage() && snap.connectionState === "connected" ? (
+          <ServiceStatusBar page={diagnosticsPage} connected />
+        ) : null}
         <section className="devices-section">
           <div className="section-title"><h2>Devices</h2><button className="text-button" onClick={() => setPairingOpen(true)}>Pair a device</button></div>
           {(() => {

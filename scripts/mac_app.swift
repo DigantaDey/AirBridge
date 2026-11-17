@@ -1,6 +1,7 @@
 import AppKit
 import WebKit
 import Foundation
+import UserNotifications
 
 /**
  * AirBridge Native macOS Application (AppKit + WebKit + NSStatusItem)
@@ -18,7 +19,15 @@ import Foundation
  *      * logs the service output to ~/.airbridge/server.log.
  *  - The page can ask for a restart ("Restart AirBridge" button) through the
  *    `airbridgeShell` script message handler.
- *  - Zero Apple Developer fee ($0), ad-hoc codesigned
+ *  - Native notifications (UNUserNotificationCenter) for events the service
+ *    streams over loopback (/api/local/events); if macOS denies permission
+ *    the service falls back to osascript by itself.
+ *  - Menu: Check for Updates (verified background download, one-click
+ *    install + relaunch), Copy Diagnostics, Show Log, Open at Login (a
+ *    launchd agent that restarts the app if it crashes).
+ *  - Prebuilt bundle (release CI): the service ships inside the app at
+ *    Contents/Resources/airbridge-server. Zero Apple Developer fee ($0):
+ *    ad-hoc codesigned, no notarization.
  */
 
 struct ServerHealth {
@@ -29,7 +38,14 @@ struct ServerHealth {
 final class ServiceSupervisor {
     let port: String
     let binaryPath: String
-    private(set) var installedVersion: String?
+    /// The app bundle when the service ships inside it (self-updates replace the bundle).
+    let appBundlePath: String?
+    private var _installedVersion: String?
+    /// Written on the supervisor queue, read from the main thread (menu, diagnostics).
+    private(set) var installedVersion: String? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _installedVersion }
+        set { stateLock.lock(); _installedVersion = newValue; stateLock.unlock() }
+    }
     private var process: Process?
     private let stateLock = NSLock()
     private var _quitting = false
@@ -61,9 +77,19 @@ final class ServiceSupervisor {
     /// Called on the main queue when the service is unreachable.
     var onServiceDown: (() -> Void)?
 
-    init(port: String, binaryPath: String) {
+    /// Exit status the service uses for "restart me" (after an update / rollback).
+    static let restartExitStatus: Int32 = 75
+
+    init(port: String, binaryPath: String, appBundlePath: String? = nil) {
         self.port = port
         self.binaryPath = binaryPath
+        self.appBundlePath = appBundlePath
+    }
+
+    /// Stop supervising without stopping the service (the app is being relaunched after an update).
+    func detach() {
+        quitting = true
+        queue.async { self.timer?.cancel() }
     }
 
     var healthURL: URL { URL(string: "http://localhost:\(port)/api/health")! }
@@ -207,12 +233,17 @@ final class ServiceSupervisor {
         let now = Date()
         if now < nextStartAllowed { return }
         startedAt = now
+        // The binary may have been replaced by an update since the last start.
+        installedVersion = readInstalledVersion()
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binaryPath)
         proc.arguments = ["--no-browser", "--port", port]
         var env = ProcessInfo.processInfo.environment
         env["PORT"] = port
+        // Tells the service its restarts are handled here (exit 75 = restart me).
+        env["AIRBRIDGE_SUPERVISED"] = "app"
+        if let bundle = appBundlePath { env["AIRBRIDGE_APP_BUNDLE"] = bundle } else { env.removeValue(forKey: "AIRBRIDGE_APP_BUNDLE") }
         proc.environment = env
         if let handle = logHandle() {
             proc.standardOutput = handle
@@ -226,7 +257,11 @@ final class ServiceSupervisor {
                 self.log("service pid \(p.processIdentifier) exited (status \(p.terminationStatus)) after \(Int(ranFor)) s")
                 // A process we replaced on purpose: its successor owns the state.
                 guard self.process === p else { return }
-                if ranFor < 30 {
+                if p.terminationStatus == ServiceSupervisor.restartExitStatus {
+                    self.log("service asked to be restarted (update installed or rolled back)")
+                    self.earlyExits = 0
+                    self.nextStartAllowed = .distantPast
+                } else if ranFor < 30 {
                     self.earlyExits += 1
                     let delay = min(60.0, pow(2.0, Double(self.earlyExits)))
                     self.nextStartAllowed = Date().addingTimeInterval(delay)
@@ -367,12 +402,169 @@ final class ServiceSupervisor {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, WKScriptMessageHandler {
+// MARK: - Service → app event stream (Server-Sent Events over loopback)
+
+/// Subscribes to /api/local/events and reconnects with backoff. Events arrive
+/// on the main queue as (type, JSON object).
+final class ShellEventStream: NSObject, URLSessionDataDelegate {
+    private let url: URL
+    private var session: URLSession!
+    private var task: URLSessionDataTask?
+    private var buffer = Data()
+    private var retryDelay: TimeInterval = 1
+    private var stopped = false
+    var onEvent: ((String, [String: Any]) -> Void)?
+
+    init(port: String, capabilities: [String]) {
+        var components = URLComponents(string: "http://localhost:\(port)/api/local/events")!
+        components.queryItems = [URLQueryItem(name: "capabilities", value: capabilities.joined(separator: ","))]
+        url = components.url!
+        super.init()
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 45 // heartbeats arrive every 15 s
+        config.timeoutIntervalForResource = .infinity
+        session = URLSession(configuration: config, delegate: self, delegateQueue: OperationQueue())
+    }
+
+    func start() {
+        stopped = false
+        connect()
+    }
+
+    func stop() {
+        stopped = true
+        task?.cancel()
+        session.invalidateAndCancel()
+    }
+
+    private func connect() {
+        guard !stopped else { return }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 45)
+        request.setValue("1", forHTTPHeaderField: "X-AirBridge-Shell")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        buffer = Data()
+        task = session.dataTask(with: request)
+        task?.resume()
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        let ok = (response as? HTTPURLResponse)?.statusCode == 200
+        if ok { retryDelay = 1 }
+        completionHandler(ok ? .allow : .cancel)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        buffer.append(data)
+        let separator = Data("\n\n".utf8)
+        while let range = buffer.range(of: separator) {
+            let block = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
+            buffer.removeSubrange(buffer.startIndex..<range.upperBound)
+            guard let text = String(data: block, encoding: .utf8) else { continue }
+            var type = "message"
+            var payload = ""
+            for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+                if line.hasPrefix("event: ") { type = String(line.dropFirst(7)) }
+                else if line.hasPrefix("data: ") { payload += String(line.dropFirst(6)) }
+            }
+            guard !payload.isEmpty, let json = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { continue }
+            DispatchQueue.main.async { self.onEvent?(type, json) }
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard !stopped else { return }
+        let delay = retryDelay
+        retryDelay = min(10, retryDelay * 2)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.connect() }
+    }
+}
+
+// MARK: - Local service API (loopback only)
+
+enum LocalAPI {
+    static func request(port: String, path: String, method: String = "GET", timeout: TimeInterval = 120, completion: @escaping (Int, [String: Any]?) -> Void) {
+        guard let url = URL(string: "http://localhost:\(port)\(path)") else { completion(0, nil); return }
+        var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: timeout)
+        req.httpMethod = method
+        URLSession.shared.dataTask(with: req) { data, response, _ in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            DispatchQueue.main.async { completion(status, json) }
+        }.resume()
+    }
+
+    static func raw(port: String, path: String, completion: @escaping (Data?) -> Void) {
+        guard let url = URL(string: "http://localhost:\(port)\(path)") else { completion(nil); return }
+        URLSession.shared.dataTask(with: URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 15)) { data, response, _ in
+            let ok = (response as? HTTPURLResponse)?.statusCode == 200
+            DispatchQueue.main.async { completion(ok ? data : nil) }
+        }.resume()
+    }
+}
+
+// MARK: - Open at Login (launchd agent; no signed helper / SMAppService needed)
+
+enum LoginItem {
+    static let label = "com.airbridge.app"
+    static var plistURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/\(label).plist")
+    }
+    static var isEnabled: Bool { FileManager.default.fileExists(atPath: plistURL.path) }
+
+    @discardableResult
+    static func setEnabled(_ enabled: Bool, executable: String) -> Bool {
+        let domain = "gui/\(getuid())"
+        _ = run("/bin/launchctl", ["bootout", "\(domain)/\(label)"])
+        if !enabled {
+            try? FileManager.default.removeItem(at: plistURL)
+            return true
+        }
+        // Start at login, hidden; restart after a crash (non-zero exit) but not
+        // after Quit (exit 0). launchd throttles a crash loop to one start / 10 s.
+        let plist: [String: Any] = [
+            "Label": label,
+            "ProgramArguments": [executable, "--background"],
+            "RunAtLoad": true,
+            "KeepAlive": ["SuccessfulExit": false],
+            "ThrottleInterval": 10,
+            "ProcessType": "Interactive",
+            "LimitLoadToSessionType": "Aqua",
+        ]
+        do {
+            try FileManager.default.createDirectory(at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            try data.write(to: plistURL, options: .atomic)
+        } catch {
+            return false
+        }
+        // Loading runs it now; the second instance hands over to this one and exits 0.
+        return run("/bin/launchctl", ["bootstrap", domain, plistURL.path]) == 0 || isEnabled
+    }
+
+    private static func run(_ path: String, _ args: [String]) -> Int32 {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return -1 }
+        p.waitUntilExit()
+        return p.terminationStatus
+    }
+}
+
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, WKScriptMessageHandler, UNUserNotificationCenterDelegate {
     var window: NSWindow!
     var webView: WKWebView!
     var statusItem: NSStatusItem!
     var supervisor: ServiceSupervisor!
+    var events: ShellEventStream?
     var pageLoaded = false
+    var loginMenuItem: NSMenuItem?
+    var updateMenuItem: NSMenuItem?
+    /// Launched at login (or relaunched while hidden): no window until asked.
+    let launchedInBackground = CommandLine.arguments.contains("--background")
+    var relaunching = false
 
     private static func resource(_ name: String) -> String? {
         guard let dir = Bundle.main.resourcePath else { return nil }
@@ -382,11 +574,42 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
         return value.isEmpty ? nil : value
     }
 
+    private static func configuredPort() -> String {
+        if let env = ProcessInfo.processInfo.environment["PORT"], !env.isEmpty { return env }
+        // Prebuilt (signed) bundles are never modified after install: per-user settings live in ~/.airbridge.
+        let file = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".airbridge/port")
+        if let text = try? String(contentsOf: file, encoding: .utf8) {
+            let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let n = Int(value), n > 0, n < 65536 { return value }
+        }
+        return resource("port") ?? "3000"
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // install.sh writes the port and binary path into the bundle.
-        let port = ProcessInfo.processInfo.environment["PORT"] ?? AppDelegate.resource("port") ?? "3000"
+        // One app per user: a login-item start while the app already runs just exits.
+        if let id = Bundle.main.bundleIdentifier {
+            // Launch Services can briefly list an instance that was just killed: check the process.
+            let others = NSRunningApplication.runningApplications(withBundleIdentifier: id).filter {
+                $0.processIdentifier != getpid() && !$0.isTerminated && kill($0.processIdentifier, 0) == 0
+            }
+            if let other = others.first {
+                if !launchedInBackground { other.activate(options: [.activateIgnoringOtherApps]) }
+                exit(0)
+            }
+        }
+
+        let port = AppDelegate.configuredPort()
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let binaryPath = AppDelegate.resource("binary-path") ?? "\(home)/.local/bin/AirBridge"
+        // Release bundles ship the service inside the app; installer-built ones point at ~/.local/bin.
+        var binaryPath = AppDelegate.resource("binary-path") ?? "\(home)/.local/bin/AirBridge"
+        var appBundlePath: String? = nil
+        if let res = Bundle.main.resourcePath {
+            let embedded = (res as NSString).appendingPathComponent("airbridge-server")
+            if FileManager.default.isExecutableFile(atPath: embedded) {
+                binaryPath = embedded
+                appBundlePath = Bundle.main.bundlePath
+            }
+        }
 
         // 1. Status Bar Menu Item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -397,6 +620,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
             let menu = NSMenu()
             menu.addItem(NSMenuItem(title: "Open AirBridge", action: #selector(showWindow), keyEquivalent: "o"))
             menu.addItem(NSMenuItem(title: "Restart AirBridge Service", action: #selector(restartService), keyEquivalent: "r"))
+            menu.addItem(NSMenuItem.separator())
+            let update = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "u")
+            menu.addItem(update)
+            updateMenuItem = update
+            let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
+            login.state = LoginItem.isEnabled ? .on : .off
+            menu.addItem(login)
+            loginMenuItem = login
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(NSMenuItem(title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: "d"))
+            menu.addItem(NSMenuItem(title: "Show Service Log", action: #selector(showLog), keyEquivalent: "l"))
             menu.addItem(NSMenuItem.separator())
             menu.addItem(NSMenuItem(title: "Quit AirBridge", action: #selector(terminateApp), keyEquivalent: "q"))
             statusItem.menu = menu
@@ -431,12 +665,180 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
         window.contentView?.addSubview(webView)
 
         // 4. Supervise the service; (re)load the UI whenever it (re)starts.
-        supervisor = ServiceSupervisor(port: port, binaryPath: binaryPath)
+        supervisor = ServiceSupervisor(port: port, binaryPath: binaryPath, appBundlePath: appBundlePath)
         supervisor.onServiceReady = { [weak self] in self?.loadUI() }
         supervisor.start()
 
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        // 5. Native notifications + lifecycle events from the service.
+        setUpEventStream(port: port)
+
+        if !launchedInBackground {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    // MARK: Event stream / notifications
+
+    private var canUseUserNotifications: Bool {
+        Bundle.main.bundleIdentifier != nil && Bundle.main.bundlePath.hasSuffix(".app")
+    }
+
+    private func setUpEventStream(port: String) {
+        let startStream: (Bool) -> Void = { [weak self] notificationsAllowed in
+            guard let self = self else { return }
+            // Without permission the service keeps using osascript for notifications.
+            let caps = notificationsAllowed ? ["notification", "lifecycle"] : ["lifecycle"]
+            let stream = ShellEventStream(port: port, capabilities: caps)
+            stream.onEvent = { [weak self] type, json in self?.handleServiceEvent(type, json) }
+            stream.start()
+            self.events = stream
+            self.supervisor.log("event stream started (\(caps.joined(separator: ",")))")
+        }
+        guard canUseUserNotifications else { startStream(false); return }
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error = error { self.supervisor.log("notifications unavailable: \(error.localizedDescription)") }
+            DispatchQueue.main.async { startStream(granted) }
+        }
+    }
+
+    private func handleServiceEvent(_ type: String, _ json: [String: Any]) {
+        switch type {
+        case "notification":
+            postNotification(title: json["title"] as? String ?? "AirBridge", body: json["body"] as? String ?? "", appName: json["appName"] as? String)
+        case "update-installed":
+            let version = json["version"] as? String ?? ""
+            if json["relaunch"] as? Bool == true { relaunchAfterUpdate(version: version) }
+        default:
+            break
+        }
+    }
+
+    private func postNotification(title: String, body: String, appName: String?) {
+        guard canUseUserNotifications else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        if let app = appName, !app.isEmpty, app != "AirBridge" { content.subtitle = app }
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error { self.supervisor.log("notification failed: \(error.localizedDescription)") }
+        }
+    }
+
+    // Show banners while AirBridge is frontmost too.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        if #available(macOS 11.0, *) { completionHandler([.banner, .sound]) } else { completionHandler([.alert, .sound]) }
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        DispatchQueue.main.async { self.showWindow() }
+        completionHandler()
+    }
+
+    /// The service replaced this app bundle with a verified newer one: start it and quit.
+    private func relaunchAfterUpdate(version: String) {
+        guard !relaunching else { return }
+        relaunching = true
+        supervisor.log("update \(version) installed; relaunching the app")
+        supervisor.detach()
+        events?.stop()
+        let bundle = Bundle.main.bundlePath
+        let hidden = !window.isVisible
+        let script = "while kill -0 \(getpid()) 2>/dev/null; do sleep 0.2; done; sleep 0.5; /usr/bin/open -n \"$0\" \(hidden ? "--args --background" : "")"
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", script, bundle]
+        try? p.run()
+        NSApp.terminate(nil)
+    }
+
+    // MARK: Menu actions
+
+    @objc func checkForUpdates() {
+        updateMenuItem?.isEnabled = false
+        updateMenuItem?.title = "Checking for Updates…"
+        LocalAPI.request(port: supervisor.port, path: "/api/update/check", method: "POST", timeout: 600) { [weak self] status, json in
+            guard let self = self else { return }
+            self.updateMenuItem?.isEnabled = true
+            self.updateMenuItem?.title = "Check for Updates…"
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "AirBridge"
+            guard status == 200, let json = json else {
+                alert.informativeText = status == 404
+                    ? "This copy of AirBridge is updated by re-running the installer."
+                    : "Could not check for updates. Is AirBridge running?"
+                alert.runModal()
+                return
+            }
+            let current = json["current"] as? String ?? "?"
+            let latest = json["latest"] as? String ?? current
+            let state = json["state"] as? String ?? ""
+            if state == "ready" {
+                alert.messageText = "AirBridge \(latest) is ready to install"
+                alert.informativeText = "You have \(current). The update was downloaded and verified (SHA-256). AirBridge restarts for a few seconds."
+                alert.addButton(withTitle: "Install and Restart")
+                alert.addButton(withTitle: "Later")
+                if alert.runModal() == .alertFirstButtonReturn {
+                    LocalAPI.request(port: self.supervisor.port, path: "/api/update/install", method: "POST") { status, json in
+                        if status != 200 || (json?["state"] as? String) == "error" {
+                            let failed = NSAlert()
+                            failed.messageText = "The update could not be installed"
+                            failed.informativeText = json?["error"] as? String ?? "Unknown error"
+                            failed.runModal()
+                        }
+                    }
+                }
+            } else if state == "up-to-date" {
+                alert.informativeText = "AirBridge \(current) is the latest version."
+                alert.runModal()
+            } else {
+                alert.informativeText = (json["error"] as? String).map { "Update check failed: \($0)" } ?? (json["reason"] as? String ?? "No update available.")
+                alert.runModal()
+            }
+        }
+    }
+
+    @objc func toggleLoginItem() {
+        let enable = !LoginItem.isEnabled
+        let exe = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        if LoginItem.setEnabled(enable, executable: exe) {
+            loginMenuItem?.state = enable ? .on : .off
+        }
+    }
+
+    @objc func copyDiagnostics() {
+        LocalAPI.raw(port: supervisor.port, path: "/api/diagnostics") { [weak self] data in
+            guard let self = self else { return }
+            var text = "AirBridge diagnostics (macOS app)\n"
+            text += "app: \(Bundle.main.bundlePath) pid \(getpid())\n"
+            text += "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)\n"
+            text += "service binary: \(self.supervisor.binaryPath) (\(self.supervisor.installedVersion ?? "unknown version"))\n"
+            text += "open at login: \(LoginItem.isEnabled)\n"
+            if let data = data, let json = String(data: data, encoding: .utf8) {
+                text += "```json\n\(json)\n```\n"
+            } else {
+                text += "service: not reachable on port \(self.supervisor.port)\n"
+                let log = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".airbridge/server.log")
+                if let tail = try? String(contentsOf: log, encoding: .utf8) {
+                    text += "--- server.log (tail)\n" + tail.split(separator: "\n").suffix(80).joined(separator: "\n") + "\n"
+                }
+            }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            self.postNotification(title: "Diagnostics copied", body: "Paste them into your support request or GitHub issue.", appName: nil)
+        }
+    }
+
+    @objc func showLog() {
+        let log = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".airbridge/server.log")
+        if !NSWorkspace.shared.open(log) {
+            NSWorkspace.shared.activateFileViewerSelecting([log])
+        }
     }
 
     func loadUI() {
@@ -460,7 +862,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        supervisor?.stop()
+        events?.stop()
+        // After an update the service restarts itself from the new build.
+        if !relaunching { supervisor?.stop() }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {

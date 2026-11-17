@@ -1,77 +1,61 @@
 // @vitest-environment node
 /**
- * Regression: posting a macOS notification compiled a Swift helper with a
- * *synchronous* swiftc call (5–30 s). That froze the service, /api/health
- * stopped answering, and the macOS app restarted the service in a loop.
+ * macOS notifications go to the AirBridge app over the loopback shell channel
+ * (UNUserNotificationCenter there), else osascript. Nothing is compiled at
+ * runtime — a synchronous swiftc helper build once froze the service long
+ * enough for its supervisor to restart it in a loop.
  */
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { postMacOsNotification } from '../src/server/macNotification.js';
+import { addShellSubscriber, resetShellSubscribersForTests } from '../src/server/shellEvents.js';
 
-let dir: string;
-let originalPath: string | undefined;
-
-beforeAll(() => {
-  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'airbridge-notifier-'));
-  const fakeBin = path.join(dir, 'fakebin');
-  fs.mkdirSync(fakeBin);
-  // swiftc that takes 3 s, then "compiles" a notifier that records its arguments.
-  fs.writeFileSync(path.join(fakeBin, 'swiftc'), `#!/bin/bash
-sleep 3
-out=""
-while [ $# -gt 0 ]; do if [ "$1" = -o ]; then out="$2"; fi; shift; done
-printf '#!/bin/bash\\necho "$*" >> "${dir}/notified"\\n' > "$out"
-`, { mode: 0o755 });
-  fs.writeFileSync(path.join(fakeBin, 'osascript'), `#!/bin/bash\necho fallback >> "${dir}/fallback"\n`, { mode: 0o755 });
-  originalPath = process.env.PATH;
-  process.env.PATH = `${fakeBin}:${process.env.PATH}`;
-  process.env.AIRBRIDGE_NOTIFIER_DIR = path.join(dir, 'bin');
-});
-
-afterAll(() => {
-  process.env.PATH = originalPath;
-  delete process.env.AIRBRIDGE_NOTIFIER_DIR;
-  fs.rmSync(dir, { recursive: true, force: true });
-});
-
-async function eventually(check: () => boolean, ms: number): Promise<boolean> {
-  const until = Date.now() + ms;
-  while (Date.now() < until) {
-    if (check()) return true;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  return check();
+function fakeResponse() {
+  const chunks: string[] = [];
+  const listeners: Record<string, () => void> = {};
+  const res = {
+    status: () => res,
+    setHeader: () => res,
+    flushHeaders: () => {},
+    write: (c: string) => { chunks.push(c); return true; },
+    on: (ev: string, fn: () => void) => { listeners[ev] = fn; return res; },
+  };
+  return { res: res as never, chunks, close: () => listeners.close?.() };
 }
 
-describe('macOS notifications never block the service', () => {
-  it('builds the Swift notifier in the background and uses osascript meanwhile', async () => {
-    const { postMacOsNotification, resetMacNotifierForTests } = await import('../src/server/macNotification.js');
-    resetMacNotifierForTests();
+afterEach(() => resetShellSubscribersForTests());
 
-    const started = Date.now();
-    let lag = Infinity;
-    const tick = new Promise<void>((resolve) => setTimeout(() => { lag = Date.now() - started; resolve(); }, 0));
-    postMacOsNotification('Hello', 'From phone', 'Messages', 'darwin');
-    const callTook = Date.now() - started;
-    await tick;
+describe('macOS notifications', () => {
+  it('are delivered to the AirBridge app when it is subscribed', () => {
+    const app = fakeResponse();
+    addShellSubscriber(app.res, ['notification'], { type: 'hello', version: '1.0.0', pid: 1 });
+    const fallback = vi.fn();
+    expect(postMacOsNotification('Hello', 'From phone', 'Messages', 'darwin', fallback)).toBe('shell');
+    expect(fallback).not.toHaveBeenCalled();
+    const event = app.chunks.find((c) => c.startsWith('event: notification'))!;
+    expect(JSON.parse(event.split('data: ')[1]!)).toEqual({ type: 'notification', title: 'Hello', body: 'From phone', appName: 'Messages' });
+  });
 
-    expect(callTook).toBeLessThan(500);
-    expect(lag).toBeLessThan(500);
-    // While compiling: the notification still shows via osascript.
-    expect(await eventually(() => fs.existsSync(path.join(dir, 'fallback')), 2_000)).toBe(true);
+  it('fall back to osascript when no app is listening (or it disconnected)', () => {
+    const app = fakeResponse();
+    addShellSubscriber(app.res, ['notification'], { type: 'hello', version: '1.0.0', pid: 1 });
+    app.close();
+    const fallback = vi.fn();
+    expect(postMacOsNotification('Hello', 'Body', 'Messages', 'darwin', fallback)).toBe('osascript');
+    expect(fallback).toHaveBeenCalledWith('Messages: Hello', 'Body');
+  });
 
-    // The helper appears atomically once swiftc finishes, then is used.
-    const notifier = path.join(dir, 'bin', 'AirBridgeNotifier');
-    expect(await eventually(() => fs.existsSync(notifier), 8_000)).toBe(true);
-    expect(fs.readdirSync(path.join(dir, 'bin')).filter((f) => f.includes('tmp') || f.endsWith('.swift'))).toEqual([]);
-    postMacOsNotification('Second', 'Body', 'Messages', 'darwin');
-    expect(await eventually(() => fs.existsSync(path.join(dir, 'notified')), 3_000)).toBe(true);
-    expect(fs.readFileSync(path.join(dir, 'notified'), 'utf8')).toContain('Second Body Messages');
-  }, 20_000);
+  it('skip shells that did not ask for notifications, and other platforms', () => {
+    const lifecycleOnly = fakeResponse();
+    addShellSubscriber(lifecycleOnly.res, ['lifecycle'], { type: 'hello', version: '1.0.0', pid: 1 });
+    const fallback = vi.fn();
+    expect(postMacOsNotification('T', 'B', undefined, 'darwin', fallback)).toBe('osascript');
+    expect(postMacOsNotification('T', 'B', undefined, 'linux', fallback)).toBe('skipped');
+    expect(postMacOsNotification('  ', ' ', undefined, 'darwin', fallback)).toBe('skipped');
+  });
 
-  it('does nothing on other platforms', async () => {
-    const { postMacOsNotification } = await import('../src/server/macNotification.js');
-    expect(() => postMacOsNotification('x', 'y', undefined, 'linux')).not.toThrow();
+  it('never compiles or spawns helpers synchronously', () => {
+    const source = fs.readFileSync('src/server/macNotification.ts', 'utf8');
+    expect(source).not.toMatch(/execFileSync|spawnSync|execSync|swiftc/);
   });
 });

@@ -26,10 +26,16 @@ import {
   type AirBridgeServerOptions,
 } from '../src/server/index.ts';
 import { createCliBeamSession } from '../src/server/cliSendSession.ts';
+import { installLogCapture, startEventLoopMonitor } from '../src/server/diagnostics.ts';
+import { Updater, appBundleForExecutable, confirmUpdateHealthy, isScriptRuntime, resolvePendingUpdate } from '../src/server/updater.ts';
+import { emitShellEvent } from '../src/server/shellEvents.ts';
 import clientAssets from './clientAssets.json';
 import pkg from '../package.json';
 
 const APP_LABEL = 'com.airbridge.daemon';
+/** EX_TEMPFAIL: "restart me" for the macOS app, launchd and systemd supervisors. */
+const RESTART_EXIT_STATUS = 75;
+
 const VERSION = pkg.version;
 
 type StartupAction = 'install' | 'uninstall';
@@ -344,10 +350,37 @@ async function main(): Promise<void> {
 
   // Default: daemon / app mode
   installDaemonSafetyNets();
+  const stateDir = path.join(os.homedir(), '.airbridge');
+  fs.mkdirSync(stateDir, { recursive: true });
+  // A just-installed update that keeps failing to come up is rolled back here.
+  const pending = resolvePendingUpdate(stateDir, VERSION);
+  if (pending === 'rolled-back') {
+    process.exit(RESTART_EXIT_STATUS); // the supervisor (or the user) starts the restored build
+  }
+  // Only the compiled single-file release binary self-updates: the committed
+  // clientAssets.json stub has a single placeholder page, and under node/bun/tsx
+  // process.execPath is the runtime itself (which must never be replaced).
+  const isPackagedBinary = Object.keys(clientAssets as object).length > 1 && !isScriptRuntime(process.execPath);
+  let restartAfterUpdate: (() => void) | null = null;
+  const updater = isPackagedBinary && process.env.AIRBRIDGE_AUTO_UPDATE !== '0'
+    ? new Updater({
+        currentVersion: VERSION,
+        stateDir,
+        executablePath: process.execPath,
+        appBundlePath: appBundleForExecutable(process.execPath),
+        onInstalled: (info) => {
+          // Let the macOS app relaunch from the new bundle (it must not stop
+          // the service on its way out).
+          emitShellEvent({ type: 'update-installed', version: info.version, relaunch: info.appBundle }, 'lifecycle');
+          setTimeout(() => restartAfterUpdate?.(), 500);
+        },
+      })
+    : null;
   const server = await createAirBridgeServer({
     port: opts.port,
     mode: 'production',
     version: VERSION,
+    updater,
     clientAssets: clientAssets as Record<string, string>,
     ...tlsOptions,
     daemonConfig: {
@@ -393,6 +426,27 @@ async function main(): Promise<void> {
   if (!opts.noBrowser) {
     setTimeout(() => openInBrowser(localUrl), 400);
   }
+
+  if (pending === 'pending') {
+    // Healthy for a minute: the update is confirmed and the backup kept for manual rollback.
+    setTimeout(() => confirmUpdateHealthy(stateDir), 60_000).unref();
+  }
+  restartAfterUpdate = () => {
+    void server.close().catch(() => {}).finally(() => {
+      // The macOS app, launchd (KeepAlive SuccessfulExit=false) and systemd
+      // (Restart=on-failure) restart the service on this "restart me" status.
+      if (process.env.AIRBRIDGE_SUPERVISED) process.exit(RESTART_EXIT_STATUS);
+      // Unsupervised: start the new build ourselves with the same arguments.
+      const child = spawn(process.execPath, process.argv.slice(2), {
+        detached: true,
+        stdio: 'ignore',
+        env: process.env,
+      });
+      child.unref();
+      process.exit(0);
+    });
+  };
+  updater?.start();
 }
 
 /**
@@ -422,16 +476,8 @@ function installDaemonSafetyNets(): void {
   process.stdout.on?.('error', () => {});
   process.stderr.on?.('error', () => {});
 
-  let last = Date.now();
-  const timer = setInterval(() => {
-    const now = Date.now();
-    const lag = now - last - 1_000;
-    last = now;
-    if (lag > 2_000) {
-      console.error(`[airbridge] ${new Date(now).toISOString()} event loop was blocked for ${(lag / 1000).toFixed(1)}s`);
-    }
-  }, 1_000);
-  timer.unref();
+  installLogCapture();
+  startEventLoopMonitor(2_000);
 }
 
 main().catch((err) => {

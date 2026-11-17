@@ -2,16 +2,22 @@
 # Real macOS test of the AirBridge.app shell (scripts/mac_app.swift) as a
 # service supervisor. Runs in CI on macos-latest (GUI session available).
 #
-#   scripts/test-mac-app.sh <path-to-darwin-binary>
+#   scripts/test-mac-app.sh <path-to-darwin-binary> [<prebuilt AirBridge.app>]
 #
 #  1. starts the installed service and serves the UI
 #  2. restarts the service when it is killed
 #  3. replaces a stale (older / version-less) AirBridge server on the port
 #  4. never touches a non-AirBridge program on the port
 #  5. stops the service it started when the app quits
+#  6. a busy (blocked) service is not restarted; 7. crash loops back off
+#  8. prebuilt bundle (scripts/package-mac-app.sh) runs its embedded service,
+#     subscribes to the service event stream, and self-update targets the bundle
+#  9. a second launch (e.g. login item) hands over and exits
+# 10. exit status 75 ("restart me", after an update) restarts at once
 set -euo pipefail
 cd "$(dirname "$0")/.."
 BIN="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+PKG="${2:-}"
 PORT="${AIRBRIDGE_TEST_PORT:-3456}"
 WANT="$(node -p 'require("./package.json").version')"
 WORK="$(mktemp -d)"
@@ -30,6 +36,7 @@ fail() { echo "FAIL: $*"; [ -n "${GITHUB_ACTIONS:-}" ] && echo "::error title=ma
 ok() { echo "  ok: $*"; [ -n "${GITHUB_ACTIONS:-}" ] && echo "::notice title=mac-app supervisor::$*" || true; }
 
 health() { curl --noproxy '*' -fsS --max-time 2 "http://localhost:$PORT/api/health" 2>/dev/null || true; }
+jget() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{let v=JSON.parse(s);for(const k of process.argv[1].split("."))v=v?.[k];process.stdout.write(v===undefined||v===null?"":String(v))}catch{}})' "$1"; }
 field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const v=j[process.argv[1]];process.stdout.write(v===undefined?"":String(v))}catch{}})' "$1"; }
 wait_for() { # wait_for <seconds> <description> <command...>
   local secs="$1" what="$2"; shift 2
@@ -57,7 +64,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 printf '%s\n' "$BIN" > "$APP/Contents/Resources/binary-path"
 printf '%s\n' "$PORT" > "$APP/Contents/Resources/port"
-swiftc -O scripts/mac_app.swift -o "$EXE" -framework AppKit -framework WebKit
+swiftc -O scripts/mac_app.swift -o "$EXE" -framework AppKit -framework WebKit -framework UserNotifications
 codesign --force -s - "$EXE"
 "$BIN" --version | grep -q "$WANT" || fail "binary reports $("$BIN" --version), want $WANT"
 
@@ -180,5 +187,62 @@ STARTS=$(tail -n +"$((BEFORE + 1))" "$LOG" | grep -c "started AirBridge" || true
 [ "$STARTS" -le 4 ] || fail "crash loop not backed off: $STARTS starts in 20 s"
 tail -n +"$((BEFORE + 1))" "$LOG" | grep -q "simulated start-up failure" || fail "service output not captured in server.log"
 ok "crashing service retried with backoff ($STARTS starts in 20 s), output kept in server.log"
+
+echo "▸ 10. exit status 75 (restart after update) restarts immediately, without crash backoff"
+wait_for 10 "port free" port_free
+cat > "$WORK/airbridge-update" <<SH
+#!/bin/bash
+if [ "\$1" = --version ]; then echo "airbridge $WANT"; exit 0; fi
+# First start: behave like a service that just installed an update.
+if [ ! -f "$WORK/updated" ]; then touch "$WORK/updated"; sleep 1; exit 75; fi
+exec node "$WORK/airbridge-busy-server.mjs" "\$3" "$WANT"
+SH
+# Reuse the busy server without its blocking phase.
+sed -i '' 's/^setTimeout(() => Atomics.wait.*$//' "$WORK/airbridge-busy-server.mjs"
+chmod +x "$WORK/airbridge-update"
+printf '%s\n' "$WORK/airbridge-update" > "$APP/Contents/Resources/binary-path"
+BEFORE=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+launch
+wait_for 8 "service back up after exit 75" version_is "$WANT"
+tail -n +"$((BEFORE + 1))" "$LOG" | grep -q "asked to be restarted" || fail "exit 75 not recognised"
+tail -n +"$((BEFORE + 1))" "$LOG" | grep -q "next start in" && fail "exit 75 was treated as a crash (backoff)"
+ok "exit 75 → restarted at once"
+stop_app
+for pid in $(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true); do kill -TERM "$pid" 2>/dev/null || true; done
+wait_for 10 "port free" port_free
+
+if [ -n "$PKG" ]; then
+  PKG_EXE="$PKG/Contents/MacOS/AirBridge"
+  echo "▸ 8. prebuilt bundle runs its embedded service"
+  codesign --verify --deep --strict "$PKG" || fail "prebuilt bundle signature invalid"
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PKG/Contents/Info.plist")" = "$WANT" ] || fail "bundle version is not $WANT"
+  mkdir -p "$HOME/.airbridge"
+  PORT_FILE="$HOME/.airbridge/port"
+  [ -f "$PORT_FILE" ] && cp "$PORT_FILE" "$WORK/port.bak"
+  printf '%s\n' "$PORT" > "$PORT_FILE"   # prebuilt bundles read the port from ~/.airbridge, never from inside the signed bundle
+  "$PKG_EXE" >/dev/null 2>&1 & APP_PID=$!
+  wait_for 30 "embedded service up" version_is "$WANT"
+  SPID="$(health | field pid)"
+  ps -p "$SPID" -o command= | grep -q "Contents/Resources/airbridge-server" || fail "service is not the embedded binary: $(ps -p "$SPID" -o command=)"
+  wait_for 20 "app subscribed to the service event stream" bash -c "[ \"\$(curl -fsS http://localhost:$PORT/api/diagnostics | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>process.stdout.write(String(JSON.parse(s).shell.subscribers)))')\" -ge 1 ]"
+  DIAG="$(curl -fsS "http://localhost:$PORT/api/diagnostics")"
+  [ "$(printf %s "$DIAG" | jget app.appBundle)" = "true" ] || fail "service does not know it runs inside the app bundle"
+  [ "$(printf %s "$DIAG" | jget update.supported)" = "true" ] || fail "self-update unsupported in the prebuilt app: $(printf %s "$DIAG" | jget update.reason)"
+  [ "$(printf %s "$DIAG" | jget update.asset)" = "AirBridge-macOS-arm64.zip" ] || fail "update asset is $(printf %s "$DIAG" | jget update.asset)"
+  ok "embedded service $WANT (pid $SPID), event stream subscribed, updates target AirBridge-macOS-arm64.zip"
+
+  echo "▸ 9. a second launch hands over and exits"
+  START=$(date +%s)
+  "$PKG_EXE" --background >/dev/null 2>&1 || fail "second instance exited with an error"
+  [ $(( $(date +%s) - START )) -le 10 ] || fail "second instance did not exit promptly"
+  kill -0 "$APP_PID" 2>/dev/null || fail "first instance died"
+  [ "$(health | field pid)" = "$SPID" ] || fail "service was restarted by the second launch"
+  ok "second instance exited; first instance and service untouched"
+
+  kill -TERM "$APP_PID"
+  wait_for 15 "embedded service stopped with the app" bash -c "! kill -0 $SPID 2>/dev/null"
+  APP_PID=""
+  if [ -f "$WORK/port.bak" ]; then cp "$WORK/port.bak" "$PORT_FILE"; else rm -f "$PORT_FILE"; fi
+fi
 
 echo "MAC APP SUPERVISOR: ALL PASS"

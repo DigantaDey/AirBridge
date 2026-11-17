@@ -270,6 +270,20 @@ export class SignalingHub {
     return { connectedPeers: this.clients.size };
   }
 
+  /** Diagnostics: connected devices without secrets (no pair codes or keys). */
+  public describeClients(): { name: string; formFactor: string; platform: string; model: string; remoteAddress: string; loopback: boolean; connectedSeconds: number }[] {
+    const now = Date.now();
+    return [...this.clients.values()].map((c) => ({
+      name: c.device.name,
+      formFactor: c.device.formFactor,
+      model: c.device.model,
+      platform: c.device.platform,
+      remoteAddress: c.remoteAddress,
+      loopback: c.isLoopback,
+      connectedSeconds: Math.round((now - c.connectedAt) / 1000),
+    }));
+  }
+
   public close(): void {
     clearInterval(this.pingTimer);
     this.clipboardMonitor?.close();
