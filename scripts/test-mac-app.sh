@@ -229,8 +229,13 @@ if [ -n "$PKG" ]; then
   DIAG="$(curl -fsS "http://localhost:$PORT/api/diagnostics")"
   [ "$(printf %s "$DIAG" | jget app.appBundle)" = "true" ] || fail "service does not know it runs inside the app bundle"
   [ "$(printf %s "$DIAG" | jget update.supported)" = "true" ] || fail "self-update unsupported in the prebuilt app: $(printf %s "$DIAG" | jget update.reason)"
-  [ "$(printf %s "$DIAG" | jget update.asset)" = "AirBridge-macOS-arm64.zip" ] || fail "update asset is $(printf %s "$DIAG" | jget update.asset)"
-  ok "embedded service $WANT (pid $SPID), event stream subscribed, updates target AirBridge-macOS-arm64.zip"
+  case "$PKG" in
+    *AirBridge-macOS-arm64.app) UPDATE_ASSET="AirBridge-macOS-arm64.zip" ;;
+    *AirBridge-macOS-x64.app) UPDATE_ASSET="AirBridge-macOS-x64.zip" ;;
+    *) fail "cannot determine the expected update asset from $PKG" ;;
+  esac
+  [ "$(printf %s "$DIAG" | jget update.asset)" = "$UPDATE_ASSET" ] || fail "update asset is $(printf %s "$DIAG" | jget update.asset), want $UPDATE_ASSET"
+  ok "embedded service $WANT (pid $SPID), event stream subscribed, updates target $UPDATE_ASSET"
 
   echo "▸ 9. a second launch hands over and exits"
   START=$(date +%s)

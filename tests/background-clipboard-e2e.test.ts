@@ -102,6 +102,14 @@ describe('background clipboard without open browser UIs', () => {
         suspendedUi!.on('message', () => resolve());
         suspendedUi!.on('error', reject);
       });
+      // Wait until the background peer has joined the same encrypted room. A
+      // host clipboard poll that happens before that point is retained by the
+      // sender, but waiting here makes this test exercise delivery rather than
+      // the pairing race itself.
+      await waitFor(
+        () => phone.getSnapshot().peers,
+        (peers) => peers.some((peer) => peer.device.model === 'AirBridge service'),
+      );
       expect(Object.getOwnPropertyDescriptor(globalThis, 'localStorage')).toEqual(originalStorage);
       hostClipboard = 'copied while no UI is open';
       await waitFor(() => received, (text) => text === hostClipboard);
