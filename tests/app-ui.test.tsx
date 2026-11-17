@@ -580,7 +580,7 @@ describe("AirBridge app UI", () => {
     const { container } = await renderApp();
     const header = container.querySelector(".utility-header")!;
     // Version like any desktop app (UI bundle version, falling back to the service's).
-    expect(header.querySelector(".version-badge")?.textContent).toBe("v2.4.6");
+    expect(header.querySelector(".version-badge")?.textContent).toBe("v2.4.7");
     for (const label of ["Contacts", "Calls", "Screen"]) {
       expect(Array.from(header.querySelectorAll("button")).some((b) => b.textContent?.includes(label))).toBe(true);
     }
