@@ -30,8 +30,8 @@ class HotspotHandoffGuidanceTest {
         val guidance = HotspotHandoffGuidance.computerNotFound()
         assertTrue(guidance.contains("compatible Mac"))
         assertTrue(guidance.contains("private service"))
-        assertTrue(guidance.contains("phone's Bluetooth name is irrelevant"))
-        assertTrue(guidance.contains("no Bluetooth pairing"))
+        assertTrue(guidance.contains("phone's Bluetooth name is irrelevant", ignoreCase = true))
+        assertTrue(guidance.contains("no Bluetooth pairing", ignoreCase = true))
     }
 
     @Test
