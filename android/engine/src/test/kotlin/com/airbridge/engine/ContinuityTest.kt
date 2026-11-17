@@ -1,7 +1,9 @@
 package com.airbridge.engine
 
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
 import javax.crypto.spec.SecretKeySpec
 import kotlin.system.exitProcess
 
@@ -29,6 +31,7 @@ private class FakeContinuityHost : ContinuityChannel.Host {
     val authorized = mutableSetOf<String>()
     var frameSocketOpen = true
     val key = SecretKeySpec(ByteArray(32) { 0x22 }, "AES")
+    var contactTask: ((() -> Unit) -> Unit) = { task -> task() }
 
     override fun sendControl(peerId: String, payload: JsonValue.Obj) { sent.add(peerId to payload) }
     override fun sendFrame(peerId: String, innerFrame: ByteArray): Boolean {
@@ -42,6 +45,7 @@ private class FakeContinuityHost : ContinuityChannel.Host {
     override fun isPaired(peerId: String) = peers[peerId]?.discoveryScope == "paired"
     override fun peerIds() = peers.keys.toList()
     override fun execute(task: () -> Unit) = task()
+    override fun executeContactQuery(task: () -> Unit) = contactTask(task)
     override fun schedule(delayMs: Long, task: () -> Unit) { scheduled.add(delayMs to task) }
     override fun listeners(): Iterable<EngineListener> = listeners
 
@@ -152,6 +156,34 @@ fun main() {
     channel.contactProvider = ContactProvider { _, _ -> throw IllegalStateException("db locked") }
     channel.handleControl(mac, obj("kind" to "contacts-request", "requestId" to "0123456789abcde3"))
     expect("contacts.failed", host.last("contacts-response")!!.second.let { it.optStr("error") == "failed" && it.optStr("message") == "db locked" })
+
+    // A slow address-book query must not occupy the low-latency call-control lane.
+    val queryStarted = CountDownLatch(1)
+    val releaseQuery = CountDownLatch(1)
+    val queryFinished = CountDownLatch(1)
+    host.contactTask = { task -> Thread(task, "test-contact-query").apply { isDaemon = true; start() } }
+    channel.contactProvider = ContactProvider { _, _ ->
+        queryStarted.countDown()
+        releaseQuery.await(2, TimeUnit.SECONDS)
+        queryFinished.countDown()
+        emptyList()
+    }
+    channel.handleControl(mac, obj("kind" to "contacts-request", "requestId" to "0123456789abcde5"))
+    val enteredQuery = queryStarted.await(2, TimeUnit.SECONDS)
+    channel.handleControl(mac, obj("kind" to "call-command", "commandId" to "7777777777777777", "action" to "answer", "callId" to "0123456789abcdef"))
+    val callHandledWhileQueryBlocked = host.last("call-command-result")?.second?.let {
+        it.optStr("commandId") == "7777777777777777" && it.optBool("ok") == true
+    } == true
+    releaseQuery.countDown()
+    val finishedAfterRelease = queryFinished.await(2, TimeUnit.SECONDS)
+    host.contactTask = { task -> task() }
+    channel.contactProvider = ContactProvider { q, limit ->
+        listOf(
+            ContactCard("Ada Lovelace", listOf(ContactPhone("+44 20 7946 0958", "mobile"))),
+            ContactCard("Alan Turing", listOf(ContactPhone("+44 161 496 0000", "work")), organization = "Bletchley"),
+        ).filter { Continuity.contactMatches(it, q) }.take(limit)
+    }
+    expect("contacts.query-isolated-from-call-control", enteredQuery && callHandledWhileQueryBlocked && finishedAfterRelease)
 
     // ---- contact cards --------------------------------------------------------
     val vcard = VCard.build(ContactCard("Dr. Who", listOf(ContactPhone("+44 7700 900123", "mobile"))))

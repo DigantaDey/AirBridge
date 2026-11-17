@@ -364,6 +364,11 @@ class AirBridgeEngine(private val config: EngineConfig) {
     private val continuityExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "airbridge-continuity").apply { isDaemon = true }
     }
+    // Provider calls may traverse a large Android address book. Keep that I/O
+    // off the low-latency control lane used by answer / hangup and call states.
+    private val contactQueryExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "airbridge-contact-query").apply { isDaemon = true }
+    }
 
     /** Contacts, calls and screen sharing with paired computers (Continuity.kt). */
     val continuity: ContinuityChannel = ContinuityChannel(object : ContinuityChannel.Host {
@@ -386,6 +391,10 @@ class AirBridgeEngine(private val config: EngineConfig) {
         override fun execute(task: () -> Unit) {
             if (stopped.get()) return
             try { continuityExecutor.execute(task) } catch (_: java.util.concurrent.RejectedExecutionException) {}
+        }
+        override fun executeContactQuery(task: () -> Unit) {
+            if (stopped.get()) return
+            try { contactQueryExecutor.execute(task) } catch (_: java.util.concurrent.RejectedExecutionException) {}
         }
         override fun schedule(delayMs: Long, task: () -> Unit) {
             if (stopped.get()) return
@@ -507,6 +516,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
         synchronized(recvBudgetLock) { recvBudgetLock.notifyAll() }
         continuity.stopAll()
         continuityExecutor.shutdownNow()
+        contactQueryExecutor.shutdownNow()
         sendExecutor.shutdownNow()
         cryptoExecutor.shutdownNow()
         recvWriteExecutor.shutdownNow()

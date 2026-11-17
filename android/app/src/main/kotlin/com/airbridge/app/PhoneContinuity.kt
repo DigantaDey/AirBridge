@@ -183,6 +183,9 @@ class CallMonitor(
     private val telecom = context.getSystemService(TelecomManager::class.java)
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "airbridge-calls").apply { isDaemon = true } }
+    // ContactsProvider can be slow on large address books. Never delay the
+    // initial ring event, state transitions, or remote answer/hangup on a lookup.
+    private val identityWorker = Executors.newSingleThreadExecutor { r -> Thread(r, "airbridge-caller-lookup").apply { isDaemon = true } }
     private val lock = Any()
     private var listener: PhoneStateListener? = null
     private var lastState = TelephonyManager.CALL_STATE_IDLE
@@ -220,6 +223,7 @@ class CallMonitor(
     fun shutdown() {
         stop()
         worker.shutdown()
+        identityWorker.shutdownNow()
     }
 
     private fun endedCopy(c: CallInfo) = c.copy(state = "ended", actions = emptyList(), updatedAt = System.currentTimeMillis())
@@ -233,15 +237,14 @@ class CallMonitor(
             val cur = current
             when (state) {
                 TelephonyManager.CALL_STATE_RINGING -> when {
-                    // A device may expose a number for an active call on older
-                    // Android releases. We do not request call-log access for it.
+                    // Some Android releases deliver the number after the first
+                    // ringing callback. Publish it immediately; resolve its name asynchronously.
                     prev == state && cur != null && cur.number == null && number != null ->
-                        cur.copy(number = number, name = contacts.lookupName(number), updatedAt = now)
+                        cur.copy(number = number, updatedAt = now)
                     prev == state -> null
                     else -> CallInfo(
                         callId = AirCrypto.randomHex16(), state = "ringing", direction = "incoming",
-                        number = number, name = number?.let { contacts.lookupName(it) },
-                        updatedAt = now, actions = listOf("answer", "reject"),
+                        number = number, updatedAt = now, actions = listOf("answer", "reject"),
                     )
                 }
                 TelephonyManager.CALL_STATE_OFFHOOK -> when {
@@ -265,7 +268,30 @@ class CallMonitor(
                 if (next != null) current = if (next.state == "ended") null else next
             }
         }
+        // Deliver the ring/state transition before consulting ContactsProvider.
         publish?.let(onChange)
+        publish?.takeIf { it.name == null && it.number != null }?.let { resolveCallerName(it.callId, it.number!!) }
+    }
+
+    private fun resolveCallerName(callId: String, number: String) {
+        runCatching {
+            identityWorker.execute {
+                val name = contacts.lookupName(number)?.takeIf { it.isNotBlank() } ?: return@execute
+                val updated = synchronized(lock) {
+                    val active = current?.takeIf { it.callId == callId && it.number == number && it.name == null }
+                    if (active != null) {
+                        active.copy(name = name, updatedAt = System.currentTimeMillis()).also { current = it }
+                    } else {
+                        val pending = pendingDial?.first?.takeIf { it.callId == callId && it.number == number && it.name == null }
+                            ?: return@synchronized null
+                        val next = pending.copy(name = name, updatedAt = System.currentTimeMillis())
+                        pendingDial = next to (pendingDial?.second ?: System.currentTimeMillis())
+                        next
+                    }
+                }
+                updated?.let(onChange)
+            }
+        }
     }
 
     private fun hangupActions() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) listOf("hangup") else emptyList()
@@ -297,14 +323,15 @@ class CallMonitor(
                 "dial" -> {
                     val number = command.number ?: return CallCommandResult(false, "Invalid phone number.")
                     if (currentCall() != null) return CallCommandResult(false, "Finish the current call on the phone first.")
+                    val now = System.currentTimeMillis()
                     val call = CallInfo(
                         callId = AirCrypto.randomHex16(), state = "dialing", direction = "outgoing",
-                        number = number, name = contacts.lookupName(number),
-                        updatedAt = System.currentTimeMillis(), actions = hangupActions(),
+                        number = number, updatedAt = now, actions = hangupActions(),
                     )
-                    synchronized(lock) { pendingDial = call to System.currentTimeMillis() }
+                    synchronized(lock) { pendingDial = call to now }
                     tm.placeCall(Uri.fromParts("tel", number, null), Bundle())
                     onChange(call)
+                    resolveCallerName(call.callId, number)
                     CallCommandResult(true, callId = call.callId)
                 }
                 else -> CallCommandResult(false, "Unknown call action.")

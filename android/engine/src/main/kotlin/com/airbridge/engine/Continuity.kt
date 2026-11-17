@@ -623,7 +623,10 @@ class ContinuityChannel internal constructor(private val host: Host) {
         fun isAuthorized(peerId: String): Boolean
         fun isPaired(peerId: String): Boolean
         fun peerIds(): List<String>
+        /** Short control work; must not be blocked by contacts database reads. */
         fun execute(task: () -> Unit)
+        /** Contact-provider work has its own lane so slow queries cannot delay call control or state. */
+        fun executeContactQuery(task: () -> Unit)
         fun schedule(delayMs: Long, task: () -> Unit)
         fun listeners(): Iterable<EngineListener>
     }
@@ -775,7 +778,7 @@ class ContinuityChannel internal constructor(private val host: Host) {
         val query = (payload.optStr("query") ?: "").trim().take(Continuity.MAX_CONTACT_QUERY)
         val limit = (payload.optLong("limit") ?: Continuity.DEFAULT_CONTACTS_LIMIT.toLong())
             .coerceIn(1, Continuity.MAX_CONTACTS_PER_RESPONSE.toLong()).toInt()
-        host.execute {
+        host.executeContactQuery {
             try {
                 val all = provider.query(query, limit + 1).mapNotNull { Continuity.sanitizeContact(it) }
                 val page = all.take(limit)
