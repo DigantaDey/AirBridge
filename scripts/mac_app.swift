@@ -43,8 +43,15 @@ final class ServiceSupervisor {
         get { stateLock.lock(); defer { stateLock.unlock() }; return _ownPid }
         set { stateLock.lock(); _ownPid = newValue; stateLock.unlock() }
     }
-    private var consecutiveFailures = 0
-    private var recentStarts: [Date] = []
+    /// First failed health check of the current outage (nil while healthy).
+    private var unresponsiveSince: Date?
+    /// Crash-loop backoff: consecutive starts that exited early, and when the next start may happen.
+    private var earlyExits = 0
+    private var nextStartAllowed = Date.distantPast
+    private var startedAt = Date.distantPast
+    /// A live service that is merely busy (first-run TLS setup, a large transfer,
+    /// a slow helper) must not be killed: only a long, continuous silence is a hang.
+    static let hangGrace: TimeInterval = 90
     private var lastReplaceAttempt = Date.distantPast
     private var lastSeenPid: Int32?
     private let queue = DispatchQueue(label: "airbridge.supervisor")
@@ -85,16 +92,31 @@ final class ServiceSupervisor {
     /// User asked for a restart from the page.
     func restart() {
         queue.async {
+            self.log("restart requested")
             if let p = self.process, p.isRunning {
-                p.terminate()
-                p.waitUntilExit()
-            } else if let health = self.fetchHealth(), let pid = health.pid ?? self.listenerPid() {
-                self.terminateAirBridge(pid: pid)
+                self.stopChild(p)
+            } else if let pid = self.fetchHealth()?.pid ?? self.listenerPid() {
+                _ = self.terminateAirBridge(pid: pid)
             }
             self.process = nil
-            self.consecutiveFailures = 0
+            self.ownPid = 0
+            self.unresponsiveSince = nil
+            self.earlyExits = 0
+            self.nextStartAllowed = .distantPast
             self.spawnAndWait()
         }
+    }
+
+    /// SIGTERM, then SIGKILL if it does not exit within 5 s (never blocks forever).
+    private func stopChild(_ p: Process) {
+        guard p.isRunning else { return }
+        p.terminate()
+        for _ in 0..<50 {
+            if !p.isRunning { return }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        kill(p.processIdentifier, SIGKILL)
+        Thread.sleep(forTimeInterval: 0.2)
     }
 
     // MARK: - Watchdog
@@ -102,12 +124,12 @@ final class ServiceSupervisor {
     private func tick() {
         if quitting { return }
         if let health = fetchHealth() {
-            consecutiveFailures = 0
+            unresponsiveSince = nil
             if needsReplacement(health), Date().timeIntervalSince(lastReplaceAttempt) > 60 {
                 lastReplaceAttempt = Date()
                 log("replacing AirBridge \(health.version ?? "unknown") with installed \(installedVersion ?? "?")")
                 if let pid = health.pid ?? listenerPid() {
-                    terminateAirBridge(pid: pid)
+                    _ = terminateAirBridge(pid: pid)
                 }
                 process = nil
                 spawnAndWait()
@@ -123,19 +145,39 @@ final class ServiceSupervisor {
             }
             return
         }
-        consecutiveFailures += 1
+
+        let now = Date()
+        if unresponsiveSince == nil { unresponsiveSince = now }
+        let silentFor = now.timeIntervalSince(unresponsiveSince!)
         DispatchQueue.main.async { self.onServiceDown?() }
-        let ownRunning = process?.isRunning ?? false
-        // Not running at all → start now. Running but not answering for ~9 s → restart.
-        if !ownRunning || consecutiveFailures >= 3 {
-            if let p = process, p.isRunning {
-                log("service not responding; restarting")
-                p.terminate()
-                p.waitUntilExit()
+
+        // Our service is alive but not answering: busy, not dead. Restart only a long hang.
+        if let p = process, p.isRunning {
+            if silentFor >= ServiceSupervisor.hangGrace {
+                log("service pid \(p.processIdentifier) has not answered for \(Int(silentFor)) s; restarting it")
+                stopChild(p)
+                process = nil
+                ownPid = 0
+                unresponsiveSince = nil
+                spawnAndWait()
             }
-            process = nil
-            spawnAndWait()
+            return
         }
+
+        // Someone else holds the port (e.g. a login item). Never start a duplicate
+        // that can only fail with "address in use"; replace it only if it is an
+        // AirBridge that stays silent for the whole grace period.
+        if let pid = listenerPid() {
+            if silentFor >= ServiceSupervisor.hangGrace, terminateAirBridge(pid: pid) {
+                log("AirBridge pid \(pid) on port \(port) has not answered for \(Int(silentFor)) s; replaced it")
+                unresponsiveSince = nil
+                spawnAndWait()
+            }
+            return
+        }
+
+        // Nothing is running: start it (subject to crash-loop backoff).
+        spawnAndWait()
     }
 
     private func needsReplacement(_ health: ServerHealth) -> Bool {
@@ -161,14 +203,10 @@ final class ServiceSupervisor {
             log("AirBridge binary not found at \(binaryPath)")
             return
         }
-        // Crash-loop guard: at most 5 starts per minute.
+        // Crash-loop guard: exponential backoff after starts that exited early.
         let now = Date()
-        recentStarts = recentStarts.filter { now.timeIntervalSince($0) < 60 }
-        if recentStarts.count >= 5 {
-            log("service keeps exiting; waiting before the next start (see server.log)")
-            return
-        }
-        recentStarts.append(now)
+        if now < nextStartAllowed { return }
+        startedAt = now
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binaryPath)
@@ -184,9 +222,18 @@ final class ServiceSupervisor {
             guard let self = self else { return }
             self.queue.async {
                 if self.quitting { return }
-                self.log("service exited (status \(p.terminationStatus))")
+                let ranFor = Date().timeIntervalSince(self.startedAt)
+                self.log("service pid \(p.processIdentifier) exited (status \(p.terminationStatus)) after \(Int(ranFor)) s")
                 // A process we replaced on purpose: its successor owns the state.
                 guard self.process === p else { return }
+                if ranFor < 30 {
+                    self.earlyExits += 1
+                    let delay = min(60.0, pow(2.0, Double(self.earlyExits)))
+                    self.nextStartAllowed = Date().addingTimeInterval(delay)
+                    self.log("service exited soon after starting (\(self.earlyExits)x in a row); next start in \(Int(delay)) s — see the lines above")
+                } else {
+                    self.earlyExits = 0
+                }
                 self.process = nil
                 self.ownPid = 0
                 self.lastSeenPid = nil
@@ -203,13 +250,15 @@ final class ServiceSupervisor {
         process = proc
         ownPid = proc.processIdentifier
         lastSeenPid = nil
-        log("started AirBridge pid \(proc.processIdentifier)")
-        // TLS certificate generation can take a few seconds on the first launch.
-        for _ in 0..<240 { // up to 60 s
+        // The hang grace period counts from the start, so a slow first start
+        // (TLS certificate generation) is never mistaken for a hang.
+        unresponsiveSince = now
+        log("started AirBridge \(installedVersion ?? "") pid \(proc.processIdentifier)")
+        for _ in 0..<240 { // up to 60 s; the watchdog keeps waiting after that
             if quitting || !proc.isRunning { return }
             if let health = fetchHealth() {
                 lastSeenPid = health.pid ?? proc.processIdentifier
-                consecutiveFailures = 0
+                unresponsiveSince = nil
                 notifyReady()
                 return
             }
@@ -234,20 +283,22 @@ final class ServiceSupervisor {
     }
 
     /// Only ever terminate a process that is an AirBridge server.
-    private func terminateAirBridge(pid: Int32) {
-        guard pid > 1, pid != getpid() else { return }
+    @discardableResult
+    private func terminateAirBridge(pid: Int32) -> Bool {
+        guard pid > 1, pid != getpid() else { return false }
         let command = run("/bin/ps", ["-p", "\(pid)", "-o", "command="])
         guard command.range(of: "airbridge", options: .caseInsensitive) != nil else {
             log("port \(port) is used by another program (pid \(pid)); not touching it")
-            return
+            return false
         }
         kill(pid, SIGTERM)
-        for _ in 0..<20 {
-            if kill(pid, 0) != 0 { return }
+        for _ in 0..<50 {
+            if kill(pid, 0) != 0 { return true }
             Thread.sleep(forTimeInterval: 0.1)
         }
         kill(pid, SIGKILL)
         Thread.sleep(forTimeInterval: 0.2)
+        return true
     }
 
     private func listenerPid() -> Int32? {
@@ -269,7 +320,7 @@ final class ServiceSupervisor {
     }
 
     private func fetchHealth() -> ServerHealth? {
-        var request = URLRequest(url: healthURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 2.0)
+        var request = URLRequest(url: healthURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 5.0)
         request.httpMethod = "GET"
         let semaphore = DispatchSemaphore(value: 0)
         var result: ServerHealth?
@@ -282,7 +333,7 @@ final class ServiceSupervisor {
             result = ServerHealth(version: json["version"] as? String, pid: pid)
         }
         task.resume()
-        _ = semaphore.wait(timeout: .now() + 3.0)
+        _ = semaphore.wait(timeout: .now() + 6.0)
         return result
     }
 

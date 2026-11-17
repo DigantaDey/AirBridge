@@ -343,6 +343,7 @@ async function main(): Promise<void> {
   }
 
   // Default: daemon / app mode
+  installDaemonSafetyNets();
   const server = await createAirBridgeServer({
     port: opts.port,
     mode: 'production',
@@ -392,6 +393,45 @@ async function main(): Promise<void> {
   if (!opts.noBrowser) {
     setTimeout(() => openInBrowser(localUrl), 400);
   }
+}
+
+/**
+ * Long-running service hardening:
+ *  - an uncaught error in one connection/helper is logged with its stack and
+ *    the service keeps serving (a crash would drop every device and, under the
+ *    macOS app, look like "AirBridge keeps restarting"). A burst of errors
+ *    still exits so the supervisor can start a clean process.
+ *  - event-loop stalls are logged, so anything that blocks /api/health is
+ *    visible in ~/.airbridge/server.log instead of a silent restart.
+ */
+function installDaemonSafetyNets(): void {
+  const recent: number[] = [];
+  const onFatal = (kind: string) => (err: unknown) => {
+    const now = Date.now();
+    recent.push(now);
+    while (recent.length && now - recent[0]! > 60_000) recent.shift();
+    const detail = err instanceof Error ? err.stack || err.message : String(err);
+    console.error(`[airbridge] ${new Date().toISOString()} ${kind}: ${detail}`);
+    if (recent.length > 20) {
+      console.error('[airbridge] too many unexpected errors in one minute; exiting for a clean restart');
+      process.exit(70);
+    }
+  };
+  process.on('uncaughtException', onFatal('uncaught exception'));
+  process.on('unhandledRejection', onFatal('unhandled rejection'));
+  process.stdout.on?.('error', () => {});
+  process.stderr.on?.('error', () => {});
+
+  let last = Date.now();
+  const timer = setInterval(() => {
+    const now = Date.now();
+    const lag = now - last - 1_000;
+    last = now;
+    if (lag > 2_000) {
+      console.error(`[airbridge] ${new Date(now).toISOString()} event loop was blocked for ${(lag / 1000).toFixed(1)}s`);
+    }
+  }, 1_000);
+  timer.unref();
 }
 
 main().catch((err) => {

@@ -126,4 +126,59 @@ wait_for 15 "service stopped after quit" bash -c "! kill -0 $PID3 2>/dev/null"
 APP_PID=""
 ok "service stopped with the app"
 
+echo "▸ 6. a busy (event loop blocked) but alive service is NOT restarted"
+# Regression: a 15–30 s synchronous helper compile inside the service made the
+# old watchdog (3 failed checks ≈ 9 s) restart it forever.
+wait_for 10 "port free" port_free
+cat > "$WORK/airbridge-busy-server.mjs" <<'JS'
+import http from 'node:http';
+const [port, version] = [Number(process.argv[2]), process.argv[3]];
+http.createServer((req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify({ status: 'ok', service: 'AirBridge Warp Server', version, pid: process.pid }));
+}).listen(port, '0.0.0.0');
+// After start-up, block the event loop for 25 s (like a synchronous swiftc run).
+setTimeout(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25_000), 3_000);
+JS
+cat > "$WORK/airbridge-busy" <<SH
+#!/bin/bash
+if [ "\$1" = --version ]; then echo "airbridge $WANT"; exit 0; fi
+exec node "$WORK/airbridge-busy-server.mjs" "\$3" "$WANT"
+SH
+chmod +x "$WORK/airbridge-busy"
+printf '%s\n' "$WORK/airbridge-busy" > "$APP/Contents/Resources/binary-path"
+launch
+wait_for 30 "busy service up" version_is "$WANT"
+BUSY_PID="$(health | field pid)"
+sleep 6
+[ -z "$(health)" ] || fail "busy service still answered (event loop not blocked?)"
+sleep 26
+kill -0 "$BUSY_PID" 2>/dev/null || fail "busy service was killed by the watchdog"
+wait_for 10 "busy service answers again" version_is "$WANT"
+[ "$(health | field pid)" = "$BUSY_PID" ] || fail "busy service was restarted (pid changed)"
+ok "service blocked for 25 s kept running (pid $BUSY_PID)"
+stop_app
+kill -TERM "$BUSY_PID" 2>/dev/null || true
+wait_for 10 "port free" port_free
+
+echo "▸ 7. a service that crashes at start is backed off, not restarted in a burst"
+cat > "$WORK/airbridge-crash" <<SH
+#!/bin/bash
+if [ "\$1" = --version ]; then echo "airbridge $WANT"; exit 0; fi
+echo "simulated start-up failure" >&2
+exit 3
+SH
+chmod +x "$WORK/airbridge-crash"
+printf '%s\n' "$WORK/airbridge-crash" > "$APP/Contents/Resources/binary-path"
+LOG="$HOME/.airbridge/server.log"
+BEFORE=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+launch
+sleep 20
+stop_app
+STARTS=$(tail -n +"$((BEFORE + 1))" "$LOG" | grep -c "started AirBridge" || true)
+[ "$STARTS" -ge 2 ] || fail "crashed service was not retried ($STARTS starts)"
+[ "$STARTS" -le 4 ] || fail "crash loop not backed off: $STARTS starts in 20 s"
+tail -n +"$((BEFORE + 1))" "$LOG" | grep -q "simulated start-up failure" || fail "service output not captured in server.log"
+ok "crashing service retried with backoff ($STARTS starts in 20 s), output kept in server.log"
+
 echo "MAC APP SUPERVISOR: ALL PASS"

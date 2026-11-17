@@ -298,6 +298,41 @@ tail -n 50 ~/.airbridge/server.log
 ifconfig | grep "inet "                  # is one address on the phone's network?
 ```
 
+## Update (v0.0.5 field report): the service keeps restarting on the Mac
+
+**Symptoms.** The Mac window shows "AirBridge isn't running on this computer"
+and "Starting transfer service" over and over.
+
+**Root cause.** Mirroring a phone notification to macOS compiled a small Swift
+notifier using a *synchronous* `swiftc` call (`execFileSync`, up to 15 s).
+That froze the whole service, including `/api/health` and every WebSocket.
+The v0.0.5 app's watchdog restarted any service that missed three health
+checks (about 9 s). Each restart killed the compile before it finished, and
+the next notification started it again, so the loop never ended. A start-up
+slower than 60 s could trigger the same restart.
+
+**Fix.**
+
+- The notifier is built in the background (async `execFile`, written to a
+  temporary file and then renamed). `osascript` shows notifications in the
+  meantime. Nothing in the service blocks on it any more.
+- Watchdog:
+  - a live service is restarted only after **90 s** of continuous silence,
+    counted from its start;
+  - it never starts a duplicate while another AirBridge holds the port;
+  - early crashes back off exponentially (2 s → 60 s);
+  - stops are bounded (SIGTERM, then SIGKILL after 5 s);
+  - every exit is logged with its status and runtime.
+- The service logs event-loop stalls longer than 2 s. Uncaught errors are
+  logged with a stack trace instead of killing it (a burst of more than 20
+  in a minute still exits for a clean restart).
+- Tests:
+  - `tests/mac-notification.test.ts` (a slow fake `swiftc` must not stall
+    the event loop);
+  - macOS CI `scripts/test-mac-app.sh` scenario 6: a service whose event
+    loop is blocked for 25 s keeps its pid;
+  - scenario 7: a crashing service is backed off and its output is kept.
+
 ## Tests
 
 | Requirement | Where |
