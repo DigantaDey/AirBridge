@@ -257,6 +257,14 @@ interface EngineListener {
     fun onLanUrlsChanged(lanUrls: List<String>) {}
     /** Progress of a hotspot handoff offered over the session. */
     fun onHandoffStatus(id: String, state: Handoff.State, reason: String) {}
+    /** A paired computer sent contact cards (vCard). */
+    fun onContactsReceived(item: ContactShareItem) {}
+    /** A paired, verified computer asks to view this phone's screen. */
+    fun onScreenShareRequest(request: ScreenShareRequest) {}
+    /** A screen request or session ended (viewer stopped, timeout, disconnect). */
+    fun onScreenShareEnded(sessionId: String, reason: String) {}
+    /** Peer continuity features changed. */
+    fun onContinuityChanged() {}
 }
 
 // ---------------------------------------------------------------------------

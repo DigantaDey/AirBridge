@@ -360,3 +360,65 @@ html.dark .clipboard-error { color: #f87171; }
 .handoff-policy { display: inline-flex; align-items: center; gap: 6px; color: var(--ab-secondary); }
 .handoff-policy select { font: inherit; color: inherit; background: transparent; border: 1px solid var(--ab-border-strong); border-radius: 6px; padding: 2px 4px; }
 .crash-preview { flex: 1 1 100%; max-height: 260px; overflow: auto; margin: 4px 0 0; padding: 10px; border-radius: 8px; background: var(--ab-surface-2, rgba(127, 127, 127, 0.08)); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+
+/* Top bar: app version (like any desktop app's About line) */
+.version-badge { border: 1px solid var(--ab-border); border-radius: 999px; padding: 0 7px; color: var(--ab-muted); font-size: 10px; font-weight: 500; letter-spacing: 0; font-variant-numeric: tabular-nums; line-height: 18px; white-space: nowrap; user-select: text; -webkit-user-select: text; }
+.header-action-button.has-live-call { border-color: var(--ab-text); color: var(--ab-text); }
+
+/* Phone on your computer: contacts, calls, screen */
+.continuity-modal { width: min(100%, 620px); max-width: calc(100% - var(--ab-gutter) - var(--ab-gutter)); }
+.continuity-tabs { display: flex; gap: 4px; margin: 16px 0 6px; border-bottom: 1px solid var(--ab-border); }
+.continuity-tab { position: relative; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--ab-secondary); padding: 8px 12px; font-size: 13px; margin-bottom: -1px; }
+.continuity-tab.is-active { color: var(--ab-text); border-bottom-color: var(--ab-text); font-weight: 600; }
+.continuity-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--ab-text); margin-left: 6px; vertical-align: middle; }
+.continuity-device { display: flex; align-items: center; gap: 10px; margin: 12px 0 0; font-size: 12px; color: var(--ab-secondary); }
+.continuity-device select { flex: 1; min-width: 0; font: inherit; color: var(--ab-text); background: var(--ab-bg); border: 1px solid var(--ab-border-strong); border-radius: 6px; padding: 6px 8px; }
+.continuity-panel { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+.continuity-guidance { border: 1px dashed var(--ab-border-strong); padding: 12px 14px; margin: 0; font-size: 12px; color: var(--ab-secondary); }
+.continuity-note { color: var(--ab-muted); font-size: 11px; margin: 0; }
+.call-list, .contact-list { list-style: none; padding: 0; margin: 0; border-top: 1px solid var(--ab-border); }
+.call-row, .contact-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; border-bottom: 1px solid var(--ab-border); padding: 10px 0; min-width: 0; }
+.call-row.call-ringing { border-left: 2px solid var(--ab-text); padding-left: 10px; }
+.call-party { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.call-party strong { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.call-party small { color: var(--ab-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.call-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.call-actions button, .call-button { display: inline-flex; align-items: center; gap: 6px; }
+.dialer { display: flex; flex-direction: column; gap: 10px; }
+.dialer > input { border: 1px solid var(--ab-border-strong); border-radius: 6px; padding: 10px 12px; font-size: 18px; letter-spacing: .04em; text-align: center; color: var(--ab-text); background: var(--ab-bg); font-variant-numeric: tabular-nums; }
+.dial-pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; max-width: 280px; width: 100%; margin: 0 auto; }
+.dial-key { border: 1px solid var(--ab-border); border-radius: 8px; background: var(--ab-bg); color: var(--ab-text); padding: 10px 0; font-size: 16px; font-variant-numeric: tabular-nums; }
+.dial-key:hover { background: var(--ab-subtle); }
+.dialer-actions { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.contacts-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.contacts-search { flex: 1; min-width: 180px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--ab-border-strong); border-radius: 6px; padding: 0 9px; color: var(--ab-muted); }
+.contacts-search input { flex: 1; min-width: 0; border: 0; outline: 0; padding: 8px 0; background: transparent; color: var(--ab-text); }
+.contacts-toolbar .quiet-button, .contacts-send-row .quiet-button { display: inline-flex; align-items: center; gap: 5px; }
+.contact-list { max-height: 46vh; overflow: auto; }
+.contact-copy { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 1px; }
+.contact-copy > strong { font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
+.contact-copy > small { color: var(--ab-muted); font-size: 11px; }
+.contact-value { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--ab-secondary); font-variant-numeric: tabular-nums; }
+.contact-value a { color: var(--ab-secondary); }
+.contact-value small { color: var(--ab-muted); }
+.contacts-send-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.contact-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.contact-form input { border: 1px solid var(--ab-border-strong); border-radius: 6px; padding: 8px 10px; color: var(--ab-text); background: var(--ab-bg); }
+.contact-form-actions { display: flex; justify-content: flex-end; gap: 8px; grid-column: 1 / -1; }
+.screen-start { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+.screen-start .beam-button { display: inline-flex; align-items: center; gap: 6px; }
+.screen-viewer { display: flex; flex-direction: column; gap: 8px; }
+.screen-stage { position: relative; display: grid; place-items: center; min-height: 240px; max-height: 64vh; background: #000; border: 1px solid var(--ab-border-strong); overflow: hidden; }
+.screen-stage:fullscreen { max-height: none; border: 0; }
+.screen-frame { max-width: 100%; max-height: 64vh; object-fit: contain; display: block; }
+.screen-stage:fullscreen .screen-frame { max-height: 100vh; width: 100%; height: 100%; }
+.screen-frame.is-empty { visibility: hidden; position: absolute; }
+.screen-placeholder { color: #d4d4d4; font-size: 12px; padding: 20px; text-align: center; }
+.screen-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+.continuity-alerts { position: fixed; top: calc(70px + var(--ab-safe-top)); right: calc(20px + var(--ab-safe-right)); z-index: 70; display: flex; flex-direction: column; gap: 8px; width: min(380px, calc(100% - var(--ab-gutter) - var(--ab-gutter))); }
+.continuity-alert { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; border: 1px solid var(--ab-border-strong); background: var(--ab-bg); box-shadow: 0 8px 28px rgb(0 0 0 / .16); }
+.continuity-alert.incoming-call { border-color: var(--ab-text); }
+.continuity-alert.sharing-bar { border-style: dashed; }
+@media (max-width: 640px) {
+  .continuity-alerts { left: calc(var(--ab-gutter) + var(--ab-safe-left)); right: calc(var(--ab-gutter) + var(--ab-safe-right)); width: auto; }
+}

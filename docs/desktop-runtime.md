@@ -11,6 +11,29 @@ needs a paid Apple Developer account; the parts that would are listed at the end
 | **macOS app** | `AirBridge.app` (`scripts/mac_app.swift`): window and menu bar; supervises the service; shows native notifications; installs updates. Release builds ship the service inside the bundle at `Contents/Resources/airbridge-server`. |
 | **Installer** | `install.sh` / `install.ps1`: download, verify, install, and optionally register autostart. |
 
+## Menu bar, launcher and version
+
+Every desktop surface shows the running version and opens the phone features
+(Contacts, Calls, Screen Sharing):
+
+| Where | Version | Phone features |
+|---|---|---|
+| App top bar (all platforms, browser or app window) | `v0.0.6` badge (the UI build, else the service's) | **Contacts**, **Calls** (with an active-call count), **Screen** buttons |
+| macOS menu-bar item | first line, `AirBridge 0.0.6` (from `CFBundleShortVersionString`, else the running service), plus the icon's tooltip | **Contacts**, **Calls**, **Screen Sharing** |
+| macOS menu bar (app active) | **AirBridge → About AirBridge** | **Phone** menu: Contacts ⌘1, Calls ⌘2, Screen Sharing ⌘3. Also **Settings… ⌘,**, plus a standard Edit menu so ⌘C/⌘V work in the window |
+| Linux app launcher (`~/.local/share/applications/airbridge.desktop`) | Comment and `X-AirBridge-Version`, refreshed at every start (so self-updates show up) | Desktop Actions **Contacts / Calls / Screen Sharing** (right-click in GNOME's dash and top bar, KDE's panel, …) |
+
+`install.sh` writes the Linux launcher (`AIRBRIDGE_LAUNCHER=0` skips it), as does
+`AirBridge --install-startup`. `--uninstall-startup` removes it. Launcher actions run
+`AirBridge --open <panel>`: if a service is already answering `/api/health` on the
+port, the binary opens `http://localhost:<port>/?panel=<panel>` and exits. Otherwise
+it starts the service and opens the panel. The page consumes `?panel=` (then removes
+it from the URL). The macOS app calls `window.__airbridgeOpenPanel(name)` instead, and
+parks the request in `window.__airbridgePendingPanel` while the page is still loading.
+Only `contacts`, `calls`, `screen` and `settings` are accepted.
+
+Windows has no tray icon. Use the top bar in the browser window.
+
 ## Prebuilt macOS app
 
 Release CI runs `scripts/package-mac-app.sh` to build `AirBridge-macOS-arm64.zip` and

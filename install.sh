@@ -483,6 +483,55 @@ if [ "$os" = "Darwin" ]; then
     open "$HOME/Applications/AirBridge.app" >/dev/null 2>&1 || true
   fi
 fi
+# Only binaries that understand `--open` get a launcher (source installs run
+# the Node CLI, and an older release would read the flag as a file to send).
+if [ "$os" = "Linux" ] && [ "${AIRBRIDGE_LAUNCHER:-1}" != "0" ] && [ "$mode" = "binary" ] \
+  && "$bin" --help 2>/dev/null | grep -q -- '--open'; then
+  # App launcher: GNOME/KDE/… show it in the app grid, dock and top bar with
+  # the version and Contacts / Calls / Screen Sharing actions (right-click).
+  # `--open` hands off to an already-running service. The binary refreshes the
+  # version line itself after self-updates (src/server/desktopLauncher.ts).
+  app_version="$("$bin" --version 2>/dev/null | awk '{print $NF}' | tr -d '\r\n')"
+  [ -n "$app_version" ] || app_version="unknown"
+  launcher_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  exec_bin="\"$(printf %s "$bin" | sed -e 's/[\\"`$]/\\&/g' -e 's/\\/\\\\/g' -e 's/%/%%/g')\""
+  if mkdir -p "$launcher_dir" 2>/dev/null; then
+    cat > "$launcher_dir/airbridge.desktop.tmp" <<LAUNCHER
+[Desktop Entry]
+Version=1.5
+Type=Application
+Name=AirBridge
+GenericName=Phone & File Bridge
+Comment=AirBridge $app_version — end-to-end encrypted files, clipboard, contacts, calls and screen sharing with your phone
+Exec=$exec_bin --open
+Icon=airbridge
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+Keywords=phone;android;transfer;clipboard;contacts;calls;screen;share;
+StartupNotify=false
+Actions=Contacts;Calls;ScreenSharing;
+X-AirBridge-Version=$app_version
+
+[Desktop Action Contacts]
+Name=Contacts
+Icon=x-office-address-book
+Exec=$exec_bin --open contacts
+
+[Desktop Action Calls]
+Name=Calls
+Icon=call-start
+Exec=$exec_bin --open calls
+
+[Desktop Action ScreenSharing]
+Name=Screen Sharing
+Icon=video-display
+Exec=$exec_bin --open screen
+LAUNCHER
+    mv "$launcher_dir/airbridge.desktop.tmp" "$launcher_dir/airbridge.desktop"
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$launcher_dir" >/dev/null 2>&1 || true
+    echo "▸ app launcher: $launcher_dir/airbridge.desktop (AirBridge $app_version)"
+  fi
+fi
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) echo "  add to PATH:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;

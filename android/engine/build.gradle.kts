@@ -50,8 +50,18 @@ val hotspotPairingTest by tasks.registering(JavaExec::class) {
     outputs.upToDateWhen { false }
 }
 
+// Phone continuity channel: authorization, contacts/call commands, consent and
+// credit-based screen flow control (live TS interop: scripts/test-native-interop.ts).
+val continuityTest by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Runs phone continuity (contacts, calls, screen sharing) channel checks"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "com.airbridge.engine.ContinuityTestKt"
+    outputs.upToDateWhen { false }
+}
+
 tasks.named("check") {
-    dependsOn(vectorTest, pairingLinkTest, hotspotPairingTest)
+    dependsOn(vectorTest, pairingLinkTest, hotspotPairingTest, continuityTest)
 }
 
 val filesTest by tasks.registering(JavaExec::class) {

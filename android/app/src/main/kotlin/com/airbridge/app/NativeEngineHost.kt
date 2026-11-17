@@ -130,6 +130,9 @@ class NativeEngineHost(
         onChange = { refresh() },
     )
 
+    /** Contacts, calls and screen sharing for the paired computer. */
+    private val phoneContinuity = PhoneContinuity(context, prefs)
+
     private var lanUrls = emptyList<String>()
     private val clips = ArrayDeque<ClipboardItem>()
     private var clipBytes = 0
@@ -238,6 +241,7 @@ class NativeEngineHost(
                 created.clipboardReceiveEnabled = prefs.receiveClipboard
                 prefs.trustedKeys.forEach { created.setTrusted(it, true) }
                 engine = created
+                phoneContinuity.attach(created.continuity)
                 created.addListener(
                     object : EngineListener {
                         override fun onConnectionState(state: ConnectionState) {
@@ -314,7 +318,20 @@ class NativeEngineHost(
                         }
 
                         override fun onPeersChanged(peers: List<Peer>) {
+                            phoneContinuity.onPeersChanged()
                             refresh()
+                        }
+
+                        override fun onContactsReceived(item: ContactShareItem) {
+                            if (!closed) phoneContinuity.onContactsReceived(item)
+                        }
+
+                        override fun onScreenShareRequest(request: ScreenShareRequest) {
+                            if (!closed) phoneContinuity.onScreenShareRequest(request)
+                        }
+
+                        override fun onScreenShareEnded(sessionId: String, reason: String) {
+                            phoneContinuity.onScreenShareEnded(sessionId)
                         }
 
                         override fun onIncomingOffer(transfer: TransferView) {
@@ -589,6 +606,26 @@ class NativeEngineHost(
         engine?.reconnect()
     }
 
+    /** The engine's continuity channel (null until the engine started). */
+    fun continuityChannel(): ContinuityChannel? = engine?.continuity
+
+    /** Permissions or Settings toggles changed: re-advertise features to the computer. */
+    fun refreshContinuity() = phoneContinuity.refresh()
+
+    /**
+     * Sends contact cards to every verified computer; returns their names.
+     * Fails with a user-facing message when no computer can take them.
+     */
+    fun shareContacts(cards: List<ContactCard>): Result<String> = submitSync { current ->
+        val targets = current.peersSnapshot().filter { p ->
+            p.discoveryScope == "paired" && (p.verified || current.isTrustedPeer(p)) &&
+                current.continuity.peerFeatures(p.peerId).let { it.isEmpty() || Continuity.FEATURE_CONTACTS_RECEIVE in it }
+        }
+        require(targets.isNotEmpty()) { "Connect to a verified computer first" }
+        targets.forEach { current.continuity.shareContacts(it.peerId, cards) }
+        targets.joinToString { it.device.name }
+    }
+
     fun startHotspotHandoff() = handoff.start()
 
     fun stopHotspotHandoff() = handoff.stop()
@@ -596,6 +633,7 @@ class NativeEngineHost(
     override fun close() {
         handoff.shutdown()
         closed = true
+        phoneContinuity.detach()
         reverseAdvertiser.stop()
         runCatching { serverDiscovery.stop() }
         if (instance === this) instance = null

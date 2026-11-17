@@ -361,6 +361,39 @@ class AirBridgeEngine(private val config: EngineConfig) {
         }
     private var connectionThread: Thread? = null
     private var pumpThread: Thread? = null
+    private val continuityExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "airbridge-continuity").apply { isDaemon = true }
+    }
+
+    /** Contacts, calls and screen sharing with paired computers (Continuity.kt). */
+    val continuity: ContinuityChannel = ContinuityChannel(object : ContinuityChannel.Host {
+        override fun sendControl(peerId: String, payload: JsonValue.Obj) = sendEncryptedControl(peerId, payload)
+        override fun sendFrame(peerId: String, innerFrame: ByteArray): Boolean {
+            val conn = ws ?: return false
+            if (stopped.get() || !conn.isOpen || connectionState != ConnectionState.CONNECTED) return false
+            val routed = Frames.wrapRoutedRelayFrame(peerId, myPeerId, innerFrame)
+            // Droppable: never let screen frames crowd out file chunks or block capture.
+            return outbound.offer(Outbound(false, routed, conn), CONTINUITY_FRAME_BUDGET)
+        }
+        override fun sessionKey(peerId: String) = sessionFor(peerId)?.aesKey
+        override fun peer(peerId: String): Peer? = synchronized(lock) { peers[peerId] }
+        override fun isAuthorized(peerId: String): Boolean {
+            val peer = synchronized(lock) { peers[peerId] } ?: return false
+            return peer.discoveryScope == "paired" && (peer.verified || isTrustedPeer(peer))
+        }
+        override fun isPaired(peerId: String): Boolean = synchronized(lock) { peers[peerId]?.discoveryScope == "paired" }
+        override fun peerIds(): List<String> = synchronized(lock) { peers.keys.toList() }
+        override fun execute(task: () -> Unit) {
+            if (stopped.get()) return
+            try { continuityExecutor.execute(task) } catch (_: java.util.concurrent.RejectedExecutionException) {}
+        }
+        override fun schedule(delayMs: Long, task: () -> Unit) {
+            if (stopped.get()) return
+            try { timerExecutor.schedule({ runCatching(task) }, delayMs, TimeUnit.MILLISECONDS) }
+            catch (_: java.util.concurrent.RejectedExecutionException) {}
+        }
+        override fun listeners(): Iterable<EngineListener> = listeners
+    })
 
     // =========================================================================
     // Listeners & snapshots
@@ -405,6 +438,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
     }
 
     private fun emitPeers(list: List<Peer>) {
+        continuity.onPeersChanged(list)
         for (l in listeners) l.onPeersChanged(list)
     }
 
@@ -471,6 +505,8 @@ class AirBridgeEngine(private val config: EngineConfig) {
             lock.notifyAll()
         }
         synchronized(recvBudgetLock) { recvBudgetLock.notifyAll() }
+        continuity.stopAll()
+        continuityExecutor.shutdownNow()
         sendExecutor.shutdownNow()
         cryptoExecutor.shutdownNow()
         recvWriteExecutor.shutdownNow()
@@ -678,6 +714,8 @@ class AirBridgeEngine(private val config: EngineConfig) {
 
     private companion object {
         const val RATE_LIMIT_HOLD_OFF_MS = 60_000L
+        /** Screen frames are admitted only while the socket queue holds at most this much. */
+        const val CONTINUITY_FRAME_BUDGET = 6 * 1024 * 1024
     }
 
     private fun reconnectDelayMs(attempt: Int): Long =
@@ -1208,6 +1246,7 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 if (acceptedTransferKeys.containsKey(id) && acceptedTransferKeys[id] != key) return
             }
         }
+        if (continuity.handleControl(fromPeerId, payload)) return
         when (payload.optStr("kind")) {
             "ping" -> sendPlaintextControl(
                 fromPeerId,

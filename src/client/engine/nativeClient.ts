@@ -1,6 +1,8 @@
 import type { DeviceProfile, VisibilityMode } from '../../shared/protocol.js';
 import { WarpClient, type ClipboardBeamItem, type SendableFileInput, type TransferSessionView, type WarpClientOptions, type WarpClientSnapshot } from './warpClient.js';
 import type { AirBridgeNativeBridge } from './nativeShell.js';
+import type { CallCommandResult, ContactShareItem, ContactsQueryResult, ContinuityOptions, ScreenFrame, ScreenFrameSource } from './continuity.js';
+import type { CallInfo, ContactCard } from '../../shared/continuity.js';
 
 /** Public client contract shared by the browser peer and Android's metadata UI. */
 export type AirBridgeClient = Pick<WarpClient, keyof WarpClient>;
@@ -151,4 +153,22 @@ export class NativeClient implements AirBridgeClient {
   async cancelTransfer(transferId: string): Promise<void> { this.command('cancel', { transferId }); }
   async updateReceivedFolder(_downloadDir: string): Promise<string> { throw new Error('Android saves verified files to Downloads/AirBridge.'); }
   async openReceivedFolder(_savedPath?: string): Promise<void> { throw new Error('Open Downloads/AirBridge in your Android Files app.'); }
+  // Phone continuity lives in the native Compose app (the phone is the
+  // provider there); this legacy WebView bridge does not drive it.
+  async requestContacts(_peerId: string): Promise<ContactsQueryResult> { throw new Error(CONTINUITY_NATIVE); }
+  async shareContacts(_peerId: string, _contacts: ContactCard[]): Promise<ContactShareItem> { throw new Error(CONTINUITY_NATIVE); }
+  clearSharedContacts(): void {}
+  async answerCall(_peerId: string, _callId: string): Promise<CallCommandResult> { throw new Error(CONTINUITY_NATIVE); }
+  async rejectCall(_peerId: string, _callId: string): Promise<CallCommandResult> { throw new Error(CONTINUITY_NATIVE); }
+  async hangUpCall(_peerId: string, _callId: string): Promise<CallCommandResult> { throw new Error(CONTINUITY_NATIVE); }
+  async dialNumber(_peerId: string, _number: string): Promise<CallCommandResult> { throw new Error(CONTINUITY_NATIVE); }
+  publishCallState(_call: CallInfo): void {}
+  requestScreenShare(_peerId: string): string { throw new Error(CONTINUITY_NATIVE); }
+  acceptScreenShare(_sessionId: string, source: ScreenFrameSource): void { source.stop(); throw new Error(CONTINUITY_NATIVE); }
+  declineScreenShare(_sessionId: string): void {}
+  stopScreenShare(_sessionId: string): void {}
+  subscribeScreenFrames(_sessionId: string, _listener: (frame: ScreenFrame) => void): () => void { return () => {}; }
+  configureContinuity(_options: Partial<ContinuityOptions>): void {}
 }
+
+const CONTINUITY_NATIVE = 'Contacts, calls and screen sharing are handled by the AirBridge app on this phone.';

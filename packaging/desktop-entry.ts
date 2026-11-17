@@ -30,6 +30,7 @@ import { installLogCapture, recentLogs, startEventLoopMonitor } from '../src/ser
 import { CrashStore, beginRun, buildCrashReport, endRunCleanly, loadCrashDsn } from '../src/server/crashReports.ts';
 import { Updater, appBundleForExecutable, confirmUpdateHealthy, isScriptRuntime, resolvePendingUpdate } from '../src/server/updater.ts';
 import { emitShellEvent } from '../src/server/shellEvents.ts';
+import { isShellPanel, panelUrl, probeRunningInstance, removeLinuxLauncher, writeLinuxLauncher, type ShellPanel } from '../src/server/desktopLauncher.ts';
 import { DEFAULT_RELAY_PORT, RELAY_ENDPOINT_FILE, parseRelayEndpoint, startRelayServer } from '../src/server/relay.ts';
 import clientAssets from './clientAssets.json';
 import pkg from '../package.json';
@@ -56,6 +57,8 @@ interface CliOptions {
   /** `--relay host:port|off` (persisted for the login item). */
   relayEndpoint?: string;
   relayListen?: string;
+  /** `--open [panel]`: open the local UI (a panel of it), reusing a running service. */
+  openPanel?: ShellPanel | 'home';
   sendFiles: string[];
   help: boolean;
   version: boolean;
@@ -81,6 +84,8 @@ function printHelp(): void {
     --tls-key <pem>       Private key for --tls-cert
     --tls-dir <path>      Where the generated CA lives (default ~/.airbridge/tls)
     --no-browser          Do not open the local UI in a browser
+    --open [panel]        Open the UI (contacts, calls, screen or settings);
+                          hands off to an already-running AirBridge
     --relay <host:port>   Use this AirBridge relay when phones can't reach this
                           computer directly (saved; \`--relay off\` removes it).
                           Traffic stays end-to-end TLS; the relay sees ciphertext.
@@ -124,7 +129,9 @@ function parseArgs(argv: string[]): CliOptions {
     else if (arg === '--no-browser') opts.noBrowser = true;
     else if (arg === '--relay' && argv[i + 1]) opts.relayEndpoint = argv[++i];
     else if (arg === '--listen' && argv[i + 1]) opts.relayListen = argv[++i];
-    else if (arg === '--install-startup') opts.action = 'install';
+    else if (arg === '--open') {
+      opts.openPanel = isShellPanel(argv[i + 1]) ? (argv[++i] as ShellPanel) : 'home';
+    } else if (arg === '--install-startup') opts.action = 'install';
     else if (arg === '--uninstall-startup') opts.action = 'uninstall';
     else positional.push(arg);
   }
@@ -228,6 +235,7 @@ X-GNOME-Autostart-enabled=true
   );
   fs.chmodSync(desktopPath, 0o755);
   console.log(`✅ Auto-start installed (XDG autostart): ${desktopPath}`);
+  installLinuxLauncher(exe, opts);
 }
 
 function uninstallStartup(): void {
@@ -256,7 +264,22 @@ function uninstallStartup(): void {
     'airbridge.desktop'
   );
   fs.rmSync(desktopPath, { force: true });
+  removeLinuxLauncher();
   console.log('✅ Auto-start removed.');
+}
+
+/** Linux app launcher (top bar / dock / app grid) with the version + panel actions. */
+function launcherArgs(opts: Pick<CliOptions, 'port'>): string[] {
+  return opts.port !== 3000 ? ['--port', String(opts.port)] : [];
+}
+
+function installLinuxLauncher(exe: string, opts: CliOptions): void {
+  try {
+    const file = writeLinuxLauncher({ executable: exe, version: VERSION, extraArgs: launcherArgs(opts), install: true });
+    if (file) console.log(`✅ App launcher installed (Contacts, Calls, Screen Sharing): ${file}`);
+  } catch (err) {
+    console.warn(`[airbridge] could not write the app launcher: ${(err as Error).message}`);
+  }
 }
 
 function escapeXml(s: string): string {
@@ -402,6 +425,15 @@ async function main(): Promise<void> {
   }
 
   // Default: daemon / app mode
+  const openPanel = opts.openPanel === 'home' ? null : (opts.openPanel ?? null);
+  if (opts.openPanel) {
+    // Launcher / menu action: if AirBridge already runs, just show the panel.
+    const running = await probeRunningInstance(opts.port);
+    if (running) {
+      openInBrowser(panelUrl(running.url, openPanel));
+      return;
+    }
+  }
   const stateDir = path.join(os.homedir(), '.airbridge');
   fs.mkdirSync(stateDir, { recursive: true });
   const crashStore = new CrashStore(path.join(stateDir, 'crashes'));
@@ -486,8 +518,14 @@ async function main(): Promise<void> {
   console.log('     (check the fingerprint above first), then rescan.');
   console.log('  (Ctrl+C to stop)\n');
 
-  if (!opts.noBrowser) {
-    setTimeout(() => openInBrowser(localUrl), 400);
+  if (!opts.noBrowser || opts.openPanel) {
+    setTimeout(() => openInBrowser(panelUrl(localUrl, openPanel)), 400);
+  }
+  if (process.platform === 'linux' && isPackagedBinary) {
+    // Keep an installed launcher's version + path current (self-updates).
+    try {
+      writeLinuxLauncher({ executable: currentExecutable(), version: VERSION, extraArgs: launcherArgs(opts) });
+    } catch { /* read-only home: the launcher just keeps its old version text */ }
   }
 
   if (pending === 'pending') {

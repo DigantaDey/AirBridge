@@ -1,3 +1,5 @@
+import type { CallAction, CallInfo, ContactCard, ContinuityFeature, ScreenShareState } from './continuity.js';
+
 export type PlatformType = 'macos' | 'android' | 'ios' | 'windows' | 'linux' | 'unknown';
 export type FormFactor = 'laptop' | 'phone' | 'tablet' | 'desktop';
 export type VisibilityMode = 'nearby' | 'paired-only' | 'hidden';
@@ -162,6 +164,75 @@ export type ControlPayload =
   | {
       kind: 'pong';
       ts: number;
+    }
+  // ---- Phone continuity (src/shared/continuity.ts; docs/continuity.md) ----
+  | {
+      kind: 'continuity-hello';
+      v: number;
+      features: ContinuityFeature[];
+    }
+  | {
+      kind: 'contacts-request';
+      requestId: string;
+      query?: string;
+      limit?: number;
+    }
+  | {
+      kind: 'contacts-response';
+      requestId: string;
+      contacts?: ContactCard[];
+      total?: number;
+      truncated?: boolean;
+      error?: 'unsupported' | 'disabled' | 'permission' | 'unauthorized' | 'failed';
+      message?: string;
+    }
+  | {
+      kind: 'contact-share';
+      shareId: string;
+      vcard: string;
+      timestamp: number;
+    }
+  | {
+      kind: 'call-state';
+      call: CallInfo;
+    }
+  | {
+      kind: 'call-command';
+      commandId: string;
+      action: CallAction;
+      callId?: string;
+      number?: string;
+    }
+  | {
+      kind: 'call-command-result';
+      commandId: string;
+      ok: boolean;
+      error?: string;
+      callId?: string;
+    }
+  | {
+      kind: 'screen-share-request';
+      sessionId: string;
+      maxWidth?: number;
+      maxFps?: number;
+    }
+  | {
+      kind: 'screen-share-state';
+      sessionId: string;
+      state: ScreenShareState;
+      width?: number;
+      height?: number;
+      reason?: string;
+    }
+  | {
+      kind: 'screen-share-ack';
+      sessionId: string;
+      seq: number;
+    }
+  | {
+      kind: 'screen-share-stop';
+      sessionId: string;
+      reason?: string;
     };
 
 export type ClientToServerMessage =
@@ -420,6 +491,8 @@ export function formatPairCode(code: string): string {
 export const FRAME_ENCRYPTED_CHUNK = 0x01;
 export const FRAME_ROUTED_RELAY = 0x02;
 export const FRAME_BINARY_SACK = 0x03;
+/** Encrypted screen-share frame (see continuity.ts). */
+export { FRAME_SCREEN } from './continuity.js';
 
 export const ID_ASCII_LENGTH = 16; // 16 hex chars = 64 bits entropy
 export const GCM_IV_LENGTH = 12;

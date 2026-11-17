@@ -42,6 +42,18 @@ import {
 } from '../src/shared/pairingProof';
 import { beaconTag, handoffAuthKey, handoffKeysFromPrivate, sealOffer } from '../src/server/handoff';
 import { loadOrCreateDeviceIdentity } from '../src/client/engine/identity';
+import { encryptMediaFrame } from '../src/client/engine/crypto';
+import {
+  buildVCards,
+  dialableNumber,
+  encodeScreenFrame,
+  encodeScreenFrameAad,
+  nextScreenQuality,
+  parseVCards,
+  sanitizeCall,
+  sanitizePhoneNumber,
+  type ContactCard,
+} from '../src/shared/continuity';
 
 const b64url = (b: Uint8Array): string =>
   Buffer.from(b).toString('base64url');
@@ -334,6 +346,45 @@ async function main(): Promise<void> {
       keyB64: b64url(new Uint8Array(hkdfSync('sha256', ikm, salt, utf8(info), 32))),
     },
   ];
+
+  // ---- phone continuity (vCard, numbers, calls, sealed screen frames) ----
+  const cards: ContactCard[][] = [
+    [{ name: 'Ada Lovelace', phones: [{ number: '+44 20 7946 0958', label: 'mobile' }, { number: '(020) 7946-0000', label: 'work' }], emails: [{ address: 'ada@example.org', label: 'home' }], organization: 'Analytical Engines; Ltd, London', note: 'Line one\nLine two, with comma' }],
+    [{ name: 'Zoë ' + 'Ünïcødé '.repeat(12).trim(), phones: [{ number: '*#06#' }], emails: [] }, { name: 'Bob', phones: [], emails: [{ address: 'b@x.io', label: 'work' }] }],
+    [{ name: 'Back\\slash 😀', phones: [{ number: '123', label: 'pager' }], emails: [] }],
+  ];
+  const parseCases = [
+    ['BEGIN:VCARD', 'VERSION:2.1', 'N;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:M=C3=BCller;J=C3=BCrgen;;;', 'FN;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:J=C3=BCrgen M=C3=BC=', 'ller', 'TEL;CELL;PREF:+49 151 2345678', 'TEL;HOME:030 123456', 'EMAIL;HOME:jm@example.de', 'END:VCARD', 'BEGIN:VCARD', 'VERSION:2.1', 'N:Solo;;;;', 'TEL;WORK;VOICE:555-0100', 'END:VCARD'].join('\r\n'),
+    ['BEGIN:VCARD', 'VERSION:4.0', 'FN:Grace', ' Hopper', 'item1.TEL;VALUE=uri;TYPE="voice,cell":tel:+1-202-555-0143', 'EMAIL;TYPE=work:grace@navy.mil', 'END:VCARD', 'BEGIN:VCARD', 'VERSION:4.0', 'NOTE:no identity', 'END:VCARD'].join('\n'),
+    'BEGIN:VCARD\r\nVERSION:3.0\r\nN:Doe;Jane;Q.;Dr.;PhD\r\nORG:Acme;R&D\r\nTEL;TYPE=FAX:+1 555 0101\r\nEMAIL:jane@acme.test\r\nEND:VCARD\r\n',
+    'garbage\nEND:VCARD',
+  ];
+  const keyBytes = new Uint8Array(32).fill(0x11);
+  const mediaKey = await globalThis.crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['encrypt']);
+  const frameCases = [
+    { sessionId: 'a1b2c3d4e5f60718', seq: 1, codec: 1, width: 1080, height: 2400, plain: new Uint8Array([0xff, 0xd8, 1, 2, 3, 0xff, 0xd9]) },
+    { sessionId: '0000000000000000', seq: 0xfffffffe, codec: 1, width: 65535, height: 1, plain: utf8('x'.repeat(300)) },
+  ];
+  out.continuity = [{
+    vcards: cards.map((c) => ({ cards: c, vcard: buildVCards(c) })),
+    parses: parseCases.map((text) => ({ text, cards: parseVCards(text) })),
+    phones: ['+1 (555) 010-0199', '*#06#', '12+34', '555; DROP TABLE', '---', 'tel:123', ' 0044 20 7946 0958 ext. 12 ', 'p123w45'].map((input) => ({
+      input, sanitized: sanitizePhoneNumber(input) ?? null, dialable: dialableNumber(input) ?? null,
+    })),
+    calls: [
+      { callId: '0123456789abcdef', state: 'ringing', direction: 'incoming', number: '+1 555 0100', name: 'Mum', updatedAt: 5, actions: ['answer', 'reject', 'answer', 'explode'], audioRoute: 'bluetooth' },
+      { callId: '0123456789abcdef', state: 'active', direction: 'outgoing', number: 'evil<script>', connectedAt: 7, updatedAt: 9, actions: ['hangup'] },
+      { callId: 'short', state: 'ringing', updatedAt: 1 },
+      { callId: '0123456789abcdef', state: 'exploding', updatedAt: 1 },
+    ].map((input) => ({ input, sanitized: sanitizeCall(input, 0) })),
+    quality: [[0.7, 50], [0.7, 300], [0.7, 900], [0.31, 900], [0.85, 10], [0.5, 201], [0.5, 400]].map(([q, rtt]) => ({ q, rtt, next: nextScreenQuality(q, rtt) })),
+    frames: await Promise.all(frameCases.map(async (c, i) => {
+      const aad = encodeScreenFrameAad(c);
+      const iv = new Uint8Array(12).fill(0xa0 + i);
+      const { ciphertext } = await encryptMediaFrame(mediaKey, aad, c.plain, iv);
+      return { keyHex: hex(keyBytes), sessionId: c.sessionId, seq: c.seq, codec: c.codec, width: c.width, height: c.height, ivHex: hex(iv), plainHex: hex(c.plain), aadHex: hex(aad), frameHex: hex(encodeScreenFrame(aad, iv, ciphertext)) };
+    })),
+  }];
 
   const self = dirname(fileURLToPath(import.meta.url));
   const dest = resolve(self, '../android/engine/src/test/resources/vectors.json');

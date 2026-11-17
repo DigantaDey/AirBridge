@@ -250,6 +250,32 @@ object AirCrypto {
         length: Int = ciphertext.size,
     ): ByteArray = aesGcm(aesKey, iv, ciphertext, encrypt = false, offset = offset, length = length)
 
+    /**
+     * Screen-share frame seal: AES-256-GCM under the session key with the frame
+     * header as additional data (see continuity.ts / Continuity.kt). File chunks
+     * carry no AAD, so neither can be replayed as the other.
+     */
+    fun encryptMediaFrame(aesKey: SecretKeySpec, aad: ByteArray, plaintext: ByteArray, fixedIv: ByteArray? = null): Pair<ByteArray, ByteArray> {
+        val iv = fixedIv?.copyOf() ?: ByteArray(Frames.GCM_IV_LENGTH).also { random.nextBytes(it) }
+        require(iv.size == Frames.GCM_IV_LENGTH) { "Invalid IV length" }
+        return iv to aesGcmAad(aesKey, iv, aad, plaintext, 0, plaintext.size, encrypt = true)
+    }
+
+    fun decryptMediaFrame(aesKey: SecretKeySpec, aad: ByteArray, iv: ByteArray, ciphertext: ByteArray, offset: Int = 0, length: Int = ciphertext.size): ByteArray =
+        aesGcmAad(aesKey, iv, aad, ciphertext, offset, length, encrypt = false)
+
+    private fun aesGcmAad(key: SecretKeySpec, iv: ByteArray, aad: ByteArray, data: ByteArray, offset: Int, length: Int, encrypt: Boolean): ByteArray {
+        val cipher = ciphers.get()!!
+        return try {
+            cipher.init(if (encrypt) Cipher.ENCRYPT_MODE else Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
+            cipher.updateAAD(aad)
+            cipher.doFinal(data, offset, length)
+        } catch (e: Exception) {
+            ciphers.remove()
+            throw e
+        }
+    }
+
     private fun aesGcm(
         key: SecretKeySpec,
         iv: ByteArray,

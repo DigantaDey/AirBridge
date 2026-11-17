@@ -42,11 +42,13 @@ import {
   setNativeTransferActive,
   scanPairingCode,
 } from "./engine/nativeShell.js";
-import { createAirBridgeClient, type AirBridgeClient } from "./engine/nativeClient.js";
-import { isStaleUi, reloadForServerVersion } from "./engine/buildInfo.js";
+import { createAirBridgeClient, hasNativeEngine, type AirBridgeClient } from "./engine/nativeClient.js";
+import { isStaleUi, reloadForServerVersion, UI_VERSION } from "./engine/buildInfo.js";
+import { ContinuityAlerts, ContinuityCenter, activeCallCount, downloadVCard, type ContinuityTab } from "./components/ContinuityCenter.js";
+import { canCaptureScreen, startDisplayCapture } from "./engine/screenCapture.js";
 import { canRestartLocalService, isThisComputerPage, requestLocalServiceRestart } from "./engine/desktopShell.js";
 import { ServiceStatusBar, useDiagnosticsCopy } from "./components/ServiceStatusBar.js";
-import { ClipboardList, Clock, Download, FolderOpen, Settings } from "lucide-react";
+import { ClipboardList, Clock, Contact, Download, FolderOpen, Phone, ScreenShare, Settings } from "lucide-react";
 
 interface ToastNotice {
   id: string;
@@ -54,6 +56,10 @@ interface ToastNotice {
   body: string;
   actionLabel?: string;
   onAction?: () => void;
+}
+
+function isShellPanel(panel: string): panel is ContinuityTab {
+  return panel === "contacts" || panel === "calls" || panel === "screen";
 }
 
 export function App() {
@@ -152,6 +158,9 @@ export function App() {
     } finally { setFolderSaving(false); }
   };
   const [toast, setToast] = useState<ToastNotice | null>(null);
+  // Contacts / Calls / Screen (top bar). The Android app has its own native UI for these.
+  const [continuityTab, setContinuityTab] = useState<ContinuityTab | null>(null);
+  const continuityEnabled = !hasNativeEngine();
 
   useEffect(() => {
     // The Android shell reserves the real status/nav bar insets in a native
@@ -252,6 +261,22 @@ export function App() {
 
     const client = createAirBridgeClient({
       initialPairCode,
+      // This computer can share its screen when the browser supports it; each
+      // request still needs the user's approval and the browser's own picker.
+      screenSourceAvailable: canCaptureScreen,
+      onIncomingContact: (item) => {
+        const names = item.contacts.map((c) => c.name);
+        showToast({
+          id: `contact-${item.shareId}`,
+          title: `${names.length === 1 ? "Contact" : `${names.length} contacts`} from ${item.peerName}`,
+          body: names.slice(0, 3).join(", ") + (names.length > 3 ? ` +${names.length - 3}` : ""),
+          actionLabel: "Save .vcf",
+          onAction: () => { downloadVCard(item.vcard, names[0] ?? "contact"); setToast(null); },
+        });
+      },
+      onCallStateChanged: (call) => {
+        if (call.state === "ringing" && call.direction === "incoming") playIncomingChime(soundMutedRef.current);
+      },
       onIncomingTransfer: () => {
         playIncomingChime(soundMutedRef.current);
       },
@@ -681,6 +706,7 @@ export function App() {
   useEffect(() => {
     const closeTopmostLayer = (): boolean => {
       if (folderPickerOpen) { setFolderPickerOpen(false); return true; }
+      if (continuityTab) { setContinuityTab(null); return true; }
       if (clipboardOpen) { setClipboardOpen(false); return true; }
       if (activeIncomingOffer) {
         clientRef.current?.declineIncomingTransfer(activeIncomingOffer.transferId);
@@ -703,7 +729,33 @@ export function App() {
       delete window.__airbridgeSystemBack;
       window.removeEventListener("keydown", onEscape);
     };
-  }, [folderPickerOpen, clipboardOpen, activeIncomingOffer, pairingOpen, downloadsOpen, recentOpen, settingsOpen, showAdvanced, toast]);
+  }, [folderPickerOpen, continuityTab, clipboardOpen, activeIncomingOffer, pairingOpen, downloadsOpen, recentOpen, settingsOpen, showAdvanced, toast]);
+
+  // Desktop shells (macOS menu bar, Phone menu) open panels by name. A request
+  // that arrived before React mounted is parked in __airbridgePendingPanel.
+  useEffect(() => {
+    const open = (panel: string): boolean => {
+      if (panel === "settings") { setSettingsOpen(true); return true; }
+      if (!isShellPanel(panel) || !continuityEnabled) return false;
+      setContinuityTab(panel);
+      return true;
+    };
+    window.__airbridgeOpenPanel = open;
+    const pending = window.__airbridgePendingPanel;
+    if (pending) { delete window.__airbridgePendingPanel; open(pending); }
+    // Linux launcher actions / `AirBridge --open calls` arrive as ?panel=calls.
+    // Remove it so a reload doesn't reopen the panel; ?pair= etc. are kept.
+    try {
+      const url = new URL(window.location.href);
+      const requested = url.searchParams.get("panel");
+      if (requested) {
+        url.searchParams.delete("panel");
+        window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+        open(requested);
+      }
+    } catch { /* non-standard location (file://, sandboxed frame) */ }
+    return () => { delete window.__airbridgeOpenPanel; };
+  }, [continuityEnabled]);
 
   // Android reports the OS Accessibility Service state after the page loads and
   // whenever the user returns from Android Settings. Keep the opt-in UI honest.
@@ -786,11 +838,63 @@ export function App() {
     [snap.transfers],
   );
 
+  // Version shown in the top bar like any desktop app: the UI bundle's version,
+  // falling back to the service's when running unbundled.
+  const appVersion = (UI_VERSION && UI_VERSION !== "dev" ? UI_VERSION : snap.serverVersion || UI_VERSION) ?? null;
+  const versionTitle = [
+    `AirBridge ${appVersion === "dev" ? "development build" : `version ${appVersion}`}`,
+    snap.serverVersion && snap.serverVersion !== appVersion ? `Service ${snap.serverVersion}` : null,
+  ].filter(Boolean).join(" · ");
+  const callCount = activeCallCount(snap.continuity);
+  const viewingCount = (snap.continuity?.screenShares ?? []).filter((s) => s.role === "viewer" && s.state === "active").length;
+
   return (
     <div className="utility-shell">
       <header className="utility-header">
-        <div className="brand"><span className="brand-mark">A</span><span>AirBridge</span></div>
+        <div className="brand">
+          <span className="brand-mark">A</span><span>AirBridge</span>
+          {appVersion && (
+            <span className="version-badge" title={versionTitle} aria-label={`Version ${appVersion}`}>
+              {appVersion === "dev" ? "dev" : `v${appVersion}`}
+            </span>
+          )}
+        </div>
         <div className="header-actions">
+          {continuityEnabled && (
+            <>
+              <button
+                type="button"
+                className="header-action-button"
+                aria-label="Contacts"
+                title="Contacts on your phone"
+                onClick={() => setContinuityTab("contacts")}
+              >
+                <Contact className="header-action-icon" size={16} aria-hidden="true" />
+                <span className="header-action-label">Contacts</span>
+              </button>
+              <button
+                type="button"
+                className={callCount > 0 ? "header-action-button has-live-call" : "header-action-button"}
+                aria-label={callCount > 0 ? `Calls (${callCount} active)` : "Calls"}
+                title="Answer and place phone calls"
+                onClick={() => setContinuityTab("calls")}
+              >
+                <Phone className="header-action-icon" size={16} aria-hidden="true" />
+                <span className="header-action-label">Calls</span>
+                {callCount > 0 && <span className="header-count-badge"> ({callCount})</span>}
+              </button>
+              <button
+                type="button"
+                className={viewingCount > 0 ? "header-action-button has-live-call" : "header-action-button"}
+                aria-label="Screen sharing"
+                title="View a phone or computer screen"
+                onClick={() => setContinuityTab("screen")}
+              >
+                <ScreenShare className="header-action-icon" size={16} aria-hidden="true" />
+                <span className="header-action-label">Screen</span>
+              </button>
+            </>
+          )}
           <button
             type="button"
             className="header-action-button"
@@ -965,6 +1069,12 @@ export function App() {
           {isNativeShell() && <div className="settings-info"><strong>Background battery access</strong><p>{batteryUnrestricted ? "Android battery optimization is disabled for AirBridge." : "Android battery optimization is enabled. For long screen-off transfers, choose AirBridge → Unrestricted or Don’t optimize in Android’s battery settings."} The native service keeps transfers independent of this screen; some manufacturers also require allowing background activity or auto-start. Force-stop and Android’s Stop action still end the service.</p><button type="button" className="secondary-button" onClick={() => openNativeBatterySettings()}>Open battery settings</button></div>}{isNativeShell() && <div className="settings-info accessibility-settings"><strong>Accessibility-assisted clipboard capture</strong><p>Off by default. Android 10+ can hide clipboard changes from background apps. Opting in lets AirBridge watch for copy and selection events through a service you enable in Android Settings, then beam plain text to your paired computer while this screen is hidden. AirBridge cannot enable the service for you, never reads other apps' text fields or keystrokes, and Android may still block hidden clipboard reads. Accessibility is not a clipboard-permission bypass. If a copy is blocked, use Share → AirBridge or select text → AirBridge in the other app.</p><label className="setting-toggle"><span><strong>Use Accessibility Service for hidden clipboard</strong><small>{accessibilityOptIn ? "Opted in. " : "Off. "}{accessibilityServiceEnabled ? "Service enabled in Android Settings." : "Service not enabled yet — open Android Settings below."}</small></span><input type="checkbox" checked={accessibilityOptIn} onChange={(event) => { const enabled = event.target.checked; if (setNativeAccessibilityOptIn(enabled)) { setAccessibilityOptIn(enabled); if (enabled && !accessibilityServiceEnabled) openNativeAccessibilitySettings(); } }} /></label><p className="accessibility-status" aria-live="polite"><strong>Android Settings:</strong> {accessibilityServiceEnabled ? "AirBridge clipboard bridge is enabled." : "AirBridge clipboard bridge is not enabled."}</p><button type="button" className="secondary-button" onClick={() => openNativeAccessibilitySettings()}>Open Accessibility settings</button></div>}<div className="settings-info"><strong>About connection status</strong><p>“Running” means this app is connected to its transfer service. “Nearby” means another device was discovered; a secure session is only ready after pairing completes.</p></div><div className="settings-info"><strong>Privacy and consent</strong><p>Incoming transfers ask before saving. Auto-accept is off. Revoke trusted devices in advanced trust management.</p></div>{isNativeShell() && <div className="settings-info"><strong>Paired computer</strong><p>The UI is bundled with this app. The native service connects to your paired computer independently of this screen. Changing computers ends active transfers and starts a fresh pairing.</p><button type="button" className="secondary-button" onClick={() => forgetNativeComputer()}>Change computer</button></div>}<a className="text-button advanced-toggle" href="https://github.com/DigantaDey/AirBridge#android-background-behavior" target="_blank" rel="noreferrer">About this version</a></section></div>}
       <TransferModal offer={activeIncomingOffer} senderPublicKey={incomingSenderPubKey} onAccept={(transferId, trustSender) => { if (trustSender && incomingSenderPubKey) clientRef.current?.toggleTrustedPeer(incomingSenderPubKey, true); clientRef.current?.acceptIncomingTransfer(transferId).catch((error: unknown) => showToast({ id: "accept-error", title: "Could not accept transfer", body: error instanceof Error ? error.message : "Try accepting the offer again." })); }} onDecline={(transferId) => { clientRef.current?.declineIncomingTransfer(transferId).catch(() => {}); }} />
       {clipboardOpen && <ClipboardCenter peers={snap.peers} items={snap.clipboardItems} autoSync={snap.autoClipboardSync} hostClipboardActive={Boolean(snap.localDaemon.clipboardBridge)} receiveEnabled={snap.clipboardReceiveEnabled} initialPeerId={clipboardPeerId} prefill={clipboardPrefill} onToggleAutoSync={(enabled) => clientRef.current?.setAutoClipboardSync(enabled)} onToggleReceive={(enabled) => clientRef.current?.setClipboardReceiveEnabled(enabled)} onMarkCopied={markLocalCopyHandled} onSend={handleSendClipboard} onSendImage={handleSendClipboardImage} onClose={() => setClipboardOpen(false)} />}
+      {continuityEnabled && continuityTab && clientRef.current && (
+        <ContinuityCenter client={clientRef.current} peers={snap.peers} continuity={snap.continuity} initialTab={continuityTab} onClose={() => setContinuityTab(null)} />
+      )}
+      {continuityEnabled && clientRef.current && (
+        <ContinuityAlerts client={clientRef.current} continuity={snap.continuity} onOpenCalls={() => setContinuityTab("calls")} startCapture={startDisplayCapture} />
+      )}
       {folderPickerOpen && <FolderPickerModal initialPath={receivedFolder || receivedFolderInput || ''} onSelect={(p) => { setReceivedFolderInput(p); setFolderPickerOpen(false); }} onClose={() => setFolderPickerOpen(false)} />}
       {toast && <div className="utility-toast" role="status"><strong>{toast.title}</strong><span>{toast.body}</span>{toast.actionLabel && <button type="button" className="toast-action" onClick={toast.onAction}>{toast.actionLabel}</button>}<button aria-label="Dismiss notification" onClick={() => setToast(null)}>×</button></div>}
     </div>

@@ -82,6 +82,13 @@ Download and install `AirBridge.apk` from the [Latest Release](https://github.co
 
 See [Pairing and connectivity](docs/pairing-and-connectivity.md) for the protocols, the threat model and the manual test plan.
 
+### 📞 Your Phone on Your Computer
+* **Contacts**: Search and browse the phone's contacts from the computer, call or save any of them (vCard), and send contacts in either direction. Received contacts open Android's own editor, so AirBridge never needs permission to change your address book.
+* **Calls**: See who's calling, then answer, decline or hang up from the computer, or place calls with the dialer. Call audio stays on the phone or its headset: Android does not let apps carry call audio to a computer. Hanging up needs Android 9 or later.
+* **Screen Sharing**: View the phone's screen live on the computer. Computers can also share a screen or window with each other through the browser's picker. Frames are end-to-end encrypted and adapt to the link. Every session must be approved on the device being shared, and it can be stopped from either side.
+* **Everywhere on the desktop**: Contacts, Calls and Screen buttons in the app's top bar, a **Phone** menu and menu-bar entries in the macOS app, and **Contacts / Calls / Screen Sharing** actions on the Linux app launcher (GNOME, KDE, …). The version is always visible: the top bar, the menu-bar menu, **About AirBridge**, and the launcher.
+* **You stay in control**: Each feature has its own switch and permission in the Android app (**Settings → Phone on your computer**). Only paired, verified devices can use them.
+
 ### 📱 Adaptive Edge-to-Edge Native UI
 * **Dynamic Safe-Area Handling**: Automatically calculates status bar, display cutout, and navigation bar insets, ensuring zero overlap with device status bars.
 * **No Sideways Panning / Webpage Bounce**: Touch-action constraints (`pan-y`) and native overscroll mode (`OVER_SCROLL_NEVER`) eliminate horizontal page sliding for a 100% native app feel.
@@ -99,6 +106,7 @@ See [Pairing and connectivity](docs/pairing-and-connectivity.md) for the protoco
 | **Direct-to-Disk Chunked Streaming** | **Yes (`.part` Resume Journal)** | ⚠️ Memory Bounded | ⚠️ In-Memory Buffering | ⚠️ Memory Bounded | ❌ In-Memory Assembly | ⚠️ Variable |
 | **SHA-256 Pre-Save Verification** | **Yes (Verified before rename)** | ❌ No | ❌ Post-Transfer | ❌ No | ❌ No | ❌ No |
 | **No Cloud / 100% Offline LAN** | **Yes** | ⚠️ Needs Apple ID | **Yes** | **Yes** | ⚠️ Needs WebRTC STUN | ⚠️ Needs Google Acc |
+| **Contacts, Calls & Screen from the Computer** | **Yes (E2EE, per-feature consent)** | ⚠️ Apple Devices Only | ❌ No | ⚠️ Partial | ❌ No | ❌ No |
 | **CLI / Daemon Execution Mode** | **Yes (`npx airbridge` / Binary)** | ❌ No | ❌ No | ⚠️ Partial | ❌ No | ❌ No |
 
 ---
@@ -163,6 +171,9 @@ npx airbridge daemon --dir ~/Inbox --reveal
 
 # One-shot terminal file send (generates pairing QR in terminal)
 npx airbridge send ./Presentation.pdf ./Archive.zip
+
+# Open a panel (contacts, calls, screen or settings); reuses a running AirBridge
+AirBridge --open calls
 
 # Run a relay on an always-on box, and point a computer at it
 airbridge relay --listen 0.0.0.0:47391

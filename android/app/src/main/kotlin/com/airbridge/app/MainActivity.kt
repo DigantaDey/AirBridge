@@ -177,6 +177,8 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         viewModel.refreshSystemStatus()
         maybeRequestNotificationsPermission()
+        // Contacts/phone permissions may have changed in system Settings.
+        NativeEngineHost.instance?.refreshContinuity()
     }
 
     override fun onStop() {

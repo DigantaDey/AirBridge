@@ -83,6 +83,10 @@ declare global {
     __airbridgeNativeAccessibilityState?: (enabled: boolean) => void;
     /** Android asks the web UI (or the injected shell shim) to close its topmost sheet before exiting. */
     __airbridgeSystemBack?: () => boolean;
+    /** Desktop shells (macOS menu bar) open a panel: contacts, calls, screen or settings. */
+    __airbridgeOpenPanel?: (panel: string) => boolean;
+    /** A panel requested before the page finished mounting. */
+    __airbridgePendingPanel?: string;
   }
 }
 

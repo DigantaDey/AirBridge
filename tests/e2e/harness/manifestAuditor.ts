@@ -110,11 +110,12 @@ export async function readAndroidManifest(manifestPath = DEFAULT_MANIFEST_PATH):
   }
 
   const activities: ParsedActivity[] = [];
-  const activityRegex = /<activity\s+([^>]+?)>(.*?)<\/activity>/gs;
+  // Self-closing <activity ... /> has no body (and must not swallow the next one).
+  const activityRegex = /<activity\s+([^>]*?)(?:\/>|>(.*?)<\/activity>)/gs;
 
   while ((match = activityRegex.exec(rawXml)) !== null) {
     const attrs = match[1];
-    const body = match[2];
+    const body = match[2] ?? '';
     const nameMatch = /android:name="([^"]+)"/.exec(attrs);
     const exportedMatch = /android:exported="([^"]+)"/.exec(attrs);
     const launchMatch = /android:launchMode="([^"]+)"/.exec(attrs);

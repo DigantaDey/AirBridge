@@ -67,6 +67,23 @@ class Prefs(context: Context) {
         set(value) = sp.edit().putBoolean("notificationSharing", value).apply()
 
     /**
+     * Phone continuity toggles. Each feature is only advertised to the computer
+     * when its toggle is on AND Android granted the matching permission.
+     * Screen sharing additionally asks for consent on every session.
+     */
+    var contactsOnComputer: Boolean
+        get() = sp.getBoolean("contactsOnComputer", true)
+        set(value) = sp.edit().putBoolean("contactsOnComputer", value).apply()
+
+    var callsFromComputer: Boolean
+        get() = sp.getBoolean("callsFromComputer", true)
+        set(value) = sp.edit().putBoolean("callsFromComputer", value).apply()
+
+    var screenSharing: Boolean
+        get() = sp.getBoolean("screenSharing", true)
+        set(value) = sp.edit().putBoolean("screenSharing", value).apply()
+
+    /**
      * Accessibility-assisted hidden clipboard capture is OFF by default. The
      * user must explicitly opt in, then enable the AirBridge service in
      * Android's Accessibility settings; the app cannot enable it silently.

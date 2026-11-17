@@ -42,6 +42,17 @@ import {
 } from './crypto.js';
 import { loadOrCreateDeviceId } from './deviceDetect.js';
 import {
+  ContinuityManager,
+  type CallCommandResult,
+  type ContactShareItem,
+  type ContactsQueryResult,
+  type ContinuityOptions,
+  type ContinuitySnapshot,
+  type ScreenFrame,
+  type ScreenFrameSource,
+} from './continuity.js';
+import { FRAME_SCREEN, type CallInfo, type ContactCard } from '../../shared/continuity.js';
+import {
   type DeviceIdentity,
   type IdentityStore,
   indexedDbIdentityStore,
@@ -151,6 +162,8 @@ const COMPLETE_ACK_TIMEOUT_MS = 60_000;
 const MAX_COMPLETE_ACK_RETRIES = 2;
 const ENCRYPT_PIPELINE_DEPTH = 8; // 8 MiB in flight at 1 MiB/chunk without stalling the socket
 const MAX_BUFFER_HIGH_WATER = 8 * 1024 * 1024; // keep high-speed local Wi-Fi fed smoothly
+/** Screen frames are dropped (latest-frame-wins) once this much is queued on the socket. */
+const CONTINUITY_MAX_BUFFERED = 2 * 1024 * 1024;
 const BUFFER_LOW_WATER = 2 * 1024 * 1024;
 
 export interface SendableFileInput {
@@ -285,6 +298,8 @@ export interface WarpClientSnapshot {
   autoClipboardSync: boolean;
   clipboardReceiveEnabled: boolean;
   notificationSharing: boolean;
+  /** Contacts, calls and screen sharing with paired devices. */
+  continuity?: ContinuitySnapshot;
 }
 
 export interface NotificationBeamItem {
@@ -298,7 +313,7 @@ export interface NotificationBeamItem {
   timestamp: number;
 }
 
-export interface WarpClientOptions {
+export interface WarpClientOptions extends ContinuityOptions {
   wsUrl?: string;
   initialPairCode?: string;
   storagePrefix?: string;
@@ -989,9 +1004,32 @@ export class WarpClient {
   private lastIncomingClip: { peerId: string; text: string; ts: number } | null = null;
   private pendingAutoClipboard: { text: string; capturedAt: number; deliveredTo: Set<string> } | null = null;
   private autoClipboardSending = false;
+  private readonly continuity: ContinuityManager;
 
   constructor(opts: WarpClientOptions = {}) {
     this.opts = opts;
+    this.continuity = new ContinuityManager({
+      sendControl: (peerId, payload) => this.sendControlMessage(peerId, payload, true),
+      sendFrame: (peerId, frame) => this.sendContinuityFrame(peerId, frame),
+      sessionKey: async (peerId) => {
+        const peer = this.peers.find((p) => p.peerId === peerId);
+        if (!peer) return null;
+        try {
+          return (await this.ensureCryptoSession(peer)).aesKey;
+        } catch {
+          return null;
+        }
+      },
+      peer: (peerId) => this.peers.find((p) => p.peerId === peerId),
+      isAuthorized: (peerId) => {
+        const peer = this.peers.find((p) => p.peerId === peerId);
+        return !!peer && peer.discoveryScope === 'paired' &&
+          (this.peerVerification(peer) === 'verified' || this.isPeerTrusted(peer));
+      },
+      isPaired: (peerId) => this.peers.some((p) => p.peerId === peerId && p.discoveryScope === 'paired'),
+      peerIds: () => this.peers.map((p) => p.peerId),
+      emit: () => this.emit(),
+    }, opts);
     this.storagePrefix = opts.storagePrefix ?? 'airbridge';
     this.storage = opts.storage === undefined ? getSafeLocalStorage() : opts.storage;
     this.peerId = loadOrCreatePeerId(this.storagePrefix, this.storage);
@@ -1138,6 +1176,7 @@ export class WarpClient {
 
   public stop(): void {
     this.destroyed = true;
+    this.continuity.destroy();
     this.pendingAutoClipboard = null;
     for (const sendState of this.outgoingStates.values()) {
       sendState.cancelled = true;
@@ -1239,6 +1278,7 @@ export class WarpClient {
       autoClipboardSync: this.autoClipboardSync,
       clipboardReceiveEnabled: this.clipboardReceiveEnabled,
       notificationSharing: this.notificationSharing,
+      continuity: this.continuity.snapshot(),
     };
   }
 
@@ -1278,6 +1318,85 @@ export class WarpClient {
 
     await this.sendControlMessage(targetPeerId, payload, true);
     return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phone continuity: contacts, calls, screen sharing (see ./continuity.ts)
+  // ---------------------------------------------------------------------------
+
+  /** Ask a paired phone for its contacts (filtered on the phone by `query`). */
+  public requestContacts(peerId: string, options?: { query?: string; limit?: number }): Promise<ContactsQueryResult> {
+    return this.continuity.requestContacts(peerId, options);
+  }
+
+  /** Send contact cards (as vCard 3.0) to a paired device. */
+  public shareContacts(peerId: string, contacts: ContactCard[]): Promise<ContactShareItem> {
+    return this.continuity.shareContacts(peerId, contacts);
+  }
+
+  public clearSharedContacts(): void {
+    this.continuity.clearSharedContacts();
+  }
+
+  public answerCall(peerId: string, callId: string): Promise<CallCommandResult> {
+    return this.continuity.sendCallCommand(peerId, 'answer', { callId });
+  }
+
+  public rejectCall(peerId: string, callId: string): Promise<CallCommandResult> {
+    return this.continuity.sendCallCommand(peerId, 'reject', { callId });
+  }
+
+  public hangUpCall(peerId: string, callId: string): Promise<CallCommandResult> {
+    return this.continuity.sendCallCommand(peerId, 'hangup', { callId });
+  }
+
+  /** Place a call on the phone; audio stays on the phone or its headset. */
+  public dialNumber(peerId: string, number: string): Promise<CallCommandResult> {
+    return this.continuity.sendCallCommand(peerId, 'dial', { number });
+  }
+
+  /** Phone/simulator side: report a call change to authorized peers. */
+  public publishCallState(call: CallInfo, peerId?: string): void {
+    this.continuity.publishCallState(call, peerId);
+  }
+
+  /** Ask a device to share its screen; returns the session id. */
+  public requestScreenShare(peerId: string, options?: { maxWidth?: number; maxFps?: number }): string {
+    return this.continuity.requestScreenShare(peerId, options);
+  }
+
+  public acceptScreenShare(sessionId: string, source: ScreenFrameSource): void {
+    this.continuity.acceptScreenShare(sessionId, source);
+  }
+
+  public declineScreenShare(sessionId: string): void {
+    this.continuity.declineScreenShare(sessionId);
+  }
+
+  public stopScreenShare(sessionId: string): void {
+    this.continuity.stopScreenShare(sessionId);
+  }
+
+  /** Decrypted frames for a viewer session (the latest frame is replayed on subscribe). */
+  public subscribeScreenFrames(sessionId: string, listener: (frame: ScreenFrame) => void): () => void {
+    return this.continuity.subscribeScreenFrames(sessionId, listener);
+  }
+
+  /** Update what this device offers (e.g. screen capture became available) and re-announce. */
+  public configureContinuity(options: Partial<ContinuityOptions>): void {
+    this.continuity.configure(options);
+  }
+
+  /** Media frames ride the relay socket; drop (never queue) when it is congested. */
+  private sendContinuityFrame(peerId: string, innerFrame: Uint8Array): boolean {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > CONTINUITY_MAX_BUFFERED) return false;
+    try {
+      ws.send(wrapRoutedRelayFrame(peerId, this.peerId, innerFrame));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   public updateDeviceName(newName: string): void {
@@ -2670,6 +2789,8 @@ export class WarpClient {
           if (payload[0] === FRAME_BINARY_SACK) {
             const sack = decodeBinarySackFrame(payload);
             this.applyChunkAck(sourcePeerId, { transferId: sack.transferId, fileIndex: sack.fileIndex, ackedChunkIndex: sack.chunkIndex });
+          } else if (payload[0] === FRAME_SCREEN) {
+            void this.continuity.handleScreenFrame(sourcePeerId, payload);
           } else {
             this.handleIncomingEncryptedChunk(sourcePeerId, payload, 'ws-relay').catch(() => {});
           }
@@ -2682,6 +2803,8 @@ export class WarpClient {
           if (payload[0] === FRAME_BINARY_SACK) {
             const sack = decodeBinarySackFrame(payload);
             this.applyChunkAck(sourcePeerId, { transferId: sack.transferId, fileIndex: sack.fileIndex, ackedChunkIndex: sack.chunkIndex });
+          } else if (payload[0] === FRAME_SCREEN) {
+            void this.continuity.handleScreenFrame(sourcePeerId, payload);
           } else {
             this.handleIncomingEncryptedChunk(sourcePeerId, payload, 'ws-relay').catch(() => {});
           }
@@ -2934,6 +3057,7 @@ export class WarpClient {
       this.connectionNotice = 'A device entry failed verification and was ignored. Someone may be tampering with this network.';
     }
     this.peers = nextPeers;
+    this.continuity.onPeersChanged(nextPeers.map((p) => ({ peerId: p.peerId, publicKey: p.device.publicKey })));
     for (const peer of nextPeers) {
       const key = this.identityCacheKey(peer);
       if (!key || this.identityChecks.has(key) || this.identityPending.has(key)) continue;
@@ -3100,6 +3224,8 @@ export class WarpClient {
       if (envelope.payload?.kind !== 'ping' && envelope.payload?.kind !== 'pong') return;
       payload = envelope.payload;
     }
+
+    if (await this.continuity.handleControl(fromPeerId, payload)) return;
 
     switch (payload.kind) {
       case 'ping': {

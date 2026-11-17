@@ -767,7 +767,7 @@ enum LoginItem {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, WKScriptMessageHandler, UNUserNotificationCenterDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, WKScriptMessageHandler, UNUserNotificationCenterDelegate {
     var window: NSWindow!
     var webView: WKWebView!
     var statusItem: NSStatusItem!
@@ -777,6 +777,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
     var pageLoaded = false
     var loginMenuItem: NSMenuItem?
     var updateMenuItem: NSMenuItem?
+    /// "AirBridge 0.0.6" at the top of the menu-bar menu (like any Mac utility).
+    var versionMenuItem: NSMenuItem?
+    /// Panel to open once the page has loaded (Contacts / Calls / Screen / Settings).
+    var pendingPanel: String?
     /// Launched at login (or relaunched while hidden): no window until asked.
     let launchedInBackground = CommandLine.arguments.contains("--background")
     var relaunching = false
@@ -833,7 +837,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
             button.toolTip = "AirBridge — Fast E2EE File Transfer"
 
             let menu = NSMenu()
+            menu.delegate = self
+            let version = NSMenuItem(title: AppDelegate.versionLabel(nil), action: nil, keyEquivalent: "")
+            version.isEnabled = false
+            menu.addItem(version)
+            versionMenuItem = version
+            menu.addItem(NSMenuItem.separator())
             menu.addItem(NSMenuItem(title: "Open AirBridge", action: #selector(showWindow), keyEquivalent: "o"))
+            // Phone on your computer: contacts, calls and screen sharing.
+            menu.addItem(NSMenuItem(title: "Contacts", action: #selector(openContacts), keyEquivalent: ""))
+            menu.addItem(NSMenuItem(title: "Calls", action: #selector(openCalls), keyEquivalent: ""))
+            menu.addItem(NSMenuItem(title: "Screen Sharing", action: #selector(openScreenSharing), keyEquivalent: ""))
+            menu.addItem(NSMenuItem.separator())
             menu.addItem(NSMenuItem(title: "Restart AirBridge Service", action: #selector(restartService), keyEquivalent: "r"))
             menu.addItem(NSMenuItem.separator())
             let update = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "u")
@@ -850,6 +865,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
             menu.addItem(NSMenuItem(title: "Quit AirBridge", action: #selector(terminateApp), keyEquivalent: "q"))
             statusItem.menu = menu
         }
+
+        buildMainMenu()
+        refreshVersionLabels()
 
         // 2. Native macOS Window
         let rect = NSRect(x: 0, y: 0, width: 960, height: 720)
@@ -881,7 +899,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
 
         // 4. Supervise the service; (re)load the UI whenever it (re)starts.
         supervisor = ServiceSupervisor(port: port, binaryPath: binaryPath, appBundlePath: appBundlePath)
-        supervisor.onServiceReady = { [weak self] in self?.loadUI() }
+        supervisor.onServiceReady = { [weak self] in
+            self?.loadUI()
+            self?.refreshVersionLabels()
+        }
         supervisor.start()
 
         // 5. Native notifications + lifecycle events from the service.
@@ -1149,6 +1170,114 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
         webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10))
     }
 
+    // MARK: Version + menus
+
+    /// Bundle version (release / installer bundles), else the service's.
+    var appVersion: String? {
+        if let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !v.isEmpty { return v }
+        return supervisor?.installedVersion
+    }
+
+    static func versionLabel(_ version: String?) -> String {
+        guard let v = version, !v.isEmpty else { return "AirBridge" }
+        return "AirBridge \(v)"
+    }
+
+    func refreshVersionLabels() {
+        let label = AppDelegate.versionLabel(appVersion)
+        versionMenuItem?.title = label
+        statusItem?.button?.toolTip = "\(label) — Fast E2EE File Transfer"
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        refreshVersionLabels()
+    }
+
+    /// Standard Mac menu bar: app menu (About shows the version), Edit (copy and
+    /// paste inside the window), Phone (contacts, calls, screen) and Window.
+    private func buildMainMenu() {
+        let main = NSMenu()
+
+        let appItem = NSMenuItem()
+        main.addItem(appItem)
+        let appMenu = NSMenu(title: "AirBridge")
+        appMenu.addItem(NSMenuItem(title: "About AirBridge", action: #selector(showAbout), keyEquivalent: ""))
+        appMenu.addItem(NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: ""))
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(NSMenuItem(title: "Hide AirBridge", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h"))
+        let hideOthers = NSMenuItem(title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(hideOthers)
+        appMenu.addItem(NSMenuItem(title: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: ""))
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(NSMenuItem(title: "Quit AirBridge", action: #selector(terminateApp), keyEquivalent: "q"))
+        appItem.submenu = appMenu
+
+        let editItem = NSMenuItem()
+        main.addItem(editItem)
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        let redo = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(redo)
+        edit.addItem(NSMenuItem.separator())
+        edit.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        edit.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        edit.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        edit.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        editItem.submenu = edit
+
+        let phoneItem = NSMenuItem()
+        main.addItem(phoneItem)
+        let phone = NSMenu(title: "Phone")
+        phone.addItem(NSMenuItem(title: "Contacts", action: #selector(openContacts), keyEquivalent: "1"))
+        phone.addItem(NSMenuItem(title: "Calls", action: #selector(openCalls), keyEquivalent: "2"))
+        phone.addItem(NSMenuItem(title: "Screen Sharing", action: #selector(openScreenSharing), keyEquivalent: "3"))
+        phoneItem.submenu = phone
+
+        let windowItem = NSMenuItem()
+        main.addItem(windowItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))
+        windowMenu.addItem(NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
+        windowItem.submenu = windowMenu
+        NSApp.windowsMenu = windowMenu
+
+        NSApp.mainMenu = main
+    }
+
+    @objc func showAbout() {
+        var options: [NSApplication.AboutPanelOptionKey: Any] = [
+            .applicationName: "AirBridge",
+            .credits: NSAttributedString(string: "End-to-end encrypted file transfer, clipboard, contacts, calls and screen sharing between your devices."),
+        ]
+        if let v = appVersion { options[.applicationVersion] = v; options[.version] = "" }
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: options)
+    }
+
+    @objc func openContacts() { openPanel("contacts") }
+    @objc func openCalls() { openPanel("calls") }
+    @objc func openScreenSharing() { openPanel("screen") }
+    @objc func openSettings() { openPanel("settings") }
+
+    /// Shows the window and opens a panel in the page (queued until it loads).
+    func openPanel(_ panel: String) {
+        pendingPanel = panel
+        showWindow()
+        flushPendingPanel()
+    }
+
+    private func flushPendingPanel() {
+        guard pageLoaded, let panel = pendingPanel, ["contacts", "calls", "screen", "settings"].contains(panel) else { return }
+        pendingPanel = nil
+        // The page may still be mounting: it picks the request up on start.
+        let js = "(window.__airbridgeOpenPanel || function (p) { window.__airbridgePendingPanel = p; })('\(panel)')"
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
     @objc func showWindow() {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -1192,7 +1321,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
     // --- Navigation state (the watchdog reloads after a failed load) ---
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         pageLoaded = true
+        flushPendingPanel()
     }
+
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         pageLoaded = false

@@ -366,6 +366,74 @@ fun main(args: Array<String>) {
         RelayRoute.parse("[2001:db8::1]:4740", "b".repeat(64))?.host == "2001:db8::1" &&
         RelayRoute.parse("relay:0", "a".repeat(64)) == null && RelayRoute.parse("relay:1", "xyz") == null)
 
+    // ------------------------------------------------------- phone continuity
+    root.optArr("continuity")?.items?.forEach { cv ->
+        val c = cv.asObj()
+        fun cardFrom(o: JsonValue.Obj) = ContactCard(
+            name = o.optStr("name")!!,
+            phones = o.optArr("phones")!!.items.map { ContactPhone(it.asObj().optStr("number")!!, it.asObj().optStr("label")) },
+            emails = o.optArr("emails")!!.items.map { ContactEmail(it.asObj().optStr("address")!!, it.asObj().optStr("label")) },
+            organization = o.optStr("organization"),
+            note = o.optStr("note"),
+            id = o.optStr("id"),
+            starred = o.optBool("starred") == true,
+        )
+        c.optArr("vcards")!!.items.forEachIndexed { i, v ->
+            val o = v.asObj()
+            val cards = o.optArr("cards")!!.items.map { cardFrom(it.asObj()) }
+            val built = VCard.buildAll(cards)
+            check("continuity.vcard.build[$i]", built == o.optStr("vcard"), "got ${built.replace("\r\n", "|")}")
+            check("continuity.vcard.roundtrip[$i]", VCard.parse(built).map { it.name } == cards.map { it.name.trim() })
+        }
+        c.optArr("parses")!!.items.forEachIndexed { i, v ->
+            val o = v.asObj()
+            val want = o.optArr("cards")!!.items.map { cardFrom(it.asObj()) }
+            val got = VCard.parse(o.optStr("text")!!)
+            check("continuity.vcard.parse[$i]", got == want, "got $got want $want")
+        }
+        c.optArr("phones")!!.items.forEachIndexed { i, v ->
+            val o = v.asObj()
+            val input = o.optStr("input")!!
+            check("continuity.phone.sanitize[$i]", Continuity.sanitizePhoneNumber(input) == o.optStr("sanitized"), "got ${Continuity.sanitizePhoneNumber(input)}")
+            check("continuity.phone.dial[$i]", Continuity.dialableNumber(input) == o.optStr("dialable"), "got ${Continuity.dialableNumber(input)}")
+        }
+        c.optArr("calls")!!.items.forEachIndexed { i, v ->
+            val o = v.asObj()
+            val got = Continuity.sanitizeCall(o.optObj("input")!!, 0)
+            val want = o.optObj("sanitized")?.let { w ->
+                CallInfo(
+                    callId = w.optStr("callId")!!, state = w.optStr("state")!!, direction = w.optStr("direction")!!,
+                    number = w.optStr("number"), name = w.optStr("name"), connectedAt = w.optLong("connectedAt"),
+                    updatedAt = w.optLong("updatedAt")!!, actions = w.optArr("actions")!!.items.map { it.asString() },
+                    audioRoute = w.optStr("audioRoute"),
+                )
+            }
+            check("continuity.call[$i]", got == want, "got $got want $want")
+        }
+        c.optArr("quality")!!.items.forEachIndexed { i, v ->
+            val o = v.asObj()
+            val got = Continuity.nextQuality(o["q"]!!.asDouble(), o.optLong("rtt")!!)
+            check("continuity.quality[$i]", Math.abs(got - o["next"]!!.asDouble()) < 1e-9, "got $got")
+        }
+        c.optArr("frames")!!.items.forEachIndexed { i, v ->
+            val o = v.asObj()
+            val key = javax.crypto.spec.SecretKeySpec(hexToBytes(o.optStr("keyHex")!!), "AES")
+            val aad = Continuity.encodeScreenAad(o.optStr("sessionId")!!, o.optLong("seq")!!, o.optInt("codec")!!, o.optInt("width")!!, o.optInt("height")!!)
+            check("continuity.frame.aad[$i]", aad.toHex() == o.optStr("aadHex"))
+            val plain = hexToBytes(o.optStr("plainHex")!!)
+            val (iv, ct) = AirCrypto.encryptMediaFrame(key, aad, plain, hexToBytes(o.optStr("ivHex")!!))
+            val frame = Continuity.encodeScreenFrame(aad, iv, ct)
+            check("continuity.frame.seal[$i]", frame.toHex() == o.optStr("frameHex"))
+            val decoded = Continuity.decodeScreenFrame(hexToBytes(o.optStr("frameHex")!!))
+            check("continuity.frame.decode[$i]", decoded.sessionId == o.optStr("sessionId") && decoded.seq == o.optLong("seq") &&
+                decoded.width == o.optInt("width") && decoded.height == o.optInt("height") && decoded.codec == o.optInt("codec"))
+            check("continuity.frame.open[$i]", AirCrypto.decryptMediaFrame(key, decoded.aad, decoded.iv, decoded.ciphertext).contentEquals(plain))
+            val forged = hexToBytes(o.optStr("frameHex")!!).also { it[20] = (it[20].toInt() xor 1).toByte() }
+            val f = Continuity.decodeScreenFrame(forged)
+            check("continuity.frame.tamper[$i]", runCatching { AirCrypto.decryptMediaFrame(key, f.aad, f.iv, f.ciphertext) }.isFailure)
+        }
+    }
+
     if (failed > 0) {
         println("VECTORS: $failed FAILED, $passed passed")
         exitProcess(1)

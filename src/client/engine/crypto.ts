@@ -215,6 +215,42 @@ export async function decryptBinaryChunk(
   return new Uint8Array(plainBuf);
 }
 
+/**
+ * Seals a screen-share frame: AES-256-GCM under the peer session key with the
+ * frame header (type, session, sequence, codec, size) as additional data, so a
+ * relay cannot splice a frame into another session or reorder it unnoticed.
+ * File chunks use no AAD, so neither kind can be replayed as the other.
+ */
+export async function encryptMediaFrame(
+  aesKey: CryptoKey,
+  aad: Uint8Array,
+  plaintext: Uint8Array,
+  fixedIv?: Uint8Array
+): Promise<{ iv: Uint8Array; ciphertext: Uint8Array }> {
+  const iv = fixedIv ? Uint8Array.from(fixedIv) : globalThis.crypto.getRandomValues(new Uint8Array(12));
+  if (iv.byteLength !== 12) throw new Error('Invalid IV length');
+  const cipherBuf = await globalThis.crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: toArrayBuffer(iv), additionalData: asBufferSource(aad) },
+    aesKey,
+    asBufferSource(plaintext)
+  );
+  return { iv, ciphertext: new Uint8Array(cipherBuf) };
+}
+
+export async function decryptMediaFrame(
+  aesKey: CryptoKey,
+  aad: Uint8Array,
+  iv: Uint8Array,
+  ciphertext: Uint8Array
+): Promise<Uint8Array> {
+  const plainBuf = await globalThis.crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: toArrayBuffer(iv), additionalData: asBufferSource(aad) },
+    aesKey,
+    asBufferSource(ciphertext)
+  );
+  return new Uint8Array(plainBuf);
+}
+
 export async function sha256Hex(chunks: Array<Uint8Array | undefined>): Promise<string> {
   // Keep ordinary files on WebCrypto's native implementation. The merge is
   // capped at 8 MiB; larger receives use the incremental path below and never
