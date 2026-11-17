@@ -163,6 +163,7 @@ fun AirBridgeApp(
             onOpenDownloads = onOpenDownloads,
             onRequestBatteryExemption = onRequestBatteryExemption,
             onOpenAppSettings = onOpenAppSettings,
+            onOpenPrivacyPolicy = onOpenPrivacyPolicy,
             onBeamText = { text, onSent -> viewModel.beamText(text, onSent) },
             onPickClipboardImage = onPickClipboardImage,
             onBeamSystemClipboard = { viewModel.beamSystemClipboardNow() },
