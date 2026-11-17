@@ -204,6 +204,16 @@ export type ClientToServerMessage =
   | {
       type: 'set-host-clipboard';
       text: string;
+    }
+  | {
+      /** Hotspot handoff: credentials sealed to the computer's handoff key (base64url, see handoff.ts). */
+      type: 'handoff-offer';
+      envelope: string;
+    }
+  | {
+      /** The phone stopped its hotspot (or the user ended the direct link). */
+      type: 'handoff-end';
+      id: string;
     };
 
 /**
@@ -265,6 +275,8 @@ export type ServerToClientMessage =
       hubProof?: string;
       /** Encrypted-relay rendezvous for code-authenticated native clients (see relay docs). */
       relay?: RelayOffer | null;
+      /** Hotspot/Bluetooth handoff keys for code-authenticated native clients. */
+      handoff?: HandoffInfo | null;
       lanUrls: string[];
       /** Same order as lanUrls, with interface details. Optional for older servers. */
       lanEndpoints?: LanEndpoint[];
@@ -313,10 +325,45 @@ export type ServerToClientMessage =
       timestamp: number;
     }
   | {
+      type: 'handoff-status';
+      id: string;
+      state: HandoffState;
+      /** Short human-readable detail (why it failed, which network was joined). */
+      reason?: string;
+    }
+  | {
       type: 'error';
       code: string;
       message: string;
     };
+
+/**
+ * What a code-authenticated phone needs for a hotspot handoff with this
+ * computer when they share no network: the computer's static P-256 handoff
+ * key (offers are sealed to it) and the secret behind its rotating Bluetooth
+ * tag. `proof` = HMAC(vouch key, "handoff\n{peerId}\n{key}\n{beacon}") binds
+ * both to the code-authenticated session.
+ */
+export interface HandoffInfo {
+  v: 1;
+  /** base64url uncompressed P-256 public key (65 bytes). */
+  key: string;
+  /** base64url 16-byte secret for the rotating Bluetooth tag. */
+  beacon: string;
+  proof: string;
+}
+
+export type HandoffState =
+  /** Waiting for the user on the computer to allow it. */
+  | 'pending'
+  | 'joining'
+  | 'joined'
+  | 'declined'
+  | 'expired'
+  | 'failed'
+  /** Not a valid offer for this computer (wrong key, code, replay, bad credentials). */
+  | 'invalid'
+  | 'ended';
 
 export interface RelayOffer {
   /** host:port of an AirBridge relay (TCP rendezvous; traffic inside stays TLS to this computer). */

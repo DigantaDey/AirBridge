@@ -277,6 +277,64 @@ fun main(args: Array<String>) {
         check("hubProof[$i]", proof == o.optStr("proof"), proof)
         check("hubProof[$i].pin-bound", !PairingProof.verifyHubProof(vk, o.optStr("peerId")!!, o.optStr("pairCode")!!, "other", o.optStr("proof")))
     }
+    // ---------------------------------------------------------------- hotspot handoff
+    root.optArr("handoff")!!.items.forEach { v ->
+        val o = v.asObj()
+        val key = o.optStr("keyB64")!!
+        val beacon = o.optStr("beaconB64")!!
+        val p = o.optObj("proof")!!
+        val vk = Base64Url.decode(p.optStr("vouchKeyB64")!!)
+        val peerId = p.optStr("peerId")!!
+        check("handoff.proof", PairingProof.handoffProof(vk, peerId, key, beacon) == p.optStr("value"))
+        val info = Handoff.Info(key, beacon, p.optStr("value")!!)
+        check("handoff.proof.verify", Handoff.verifyInfo(vk, peerId, info))
+        check("handoff.proof.peer-bound", !Handoff.verifyInfo(vk, "fedcba9876543210", info))
+        check("handoff.proof.key-bound", !Handoff.verifyInfo(vk, peerId, info.copy(key = AirCrypto.generateIdentityKeyPair().publicKeyB64)))
+        check("handoff.info.json", Handoff.Info.parse(info.toJson()) == info)
+        o.optArr("authKeys")!!.items.forEach { a ->
+            val code = a.optStr("code")!!
+            check("handoff.authKey[$code]", Base64Url.encode(Handoff.authKey(code)) == a.optStr("keyB64"))
+        }
+        o.optArr("tags")!!.items.forEachIndexed { i, t ->
+            val now = t.optLong("now")!!
+            val tag = Base64Url.decode(t.optStr("tagB64")!!)
+            check("handoff.tag[$i]", Handoff.beaconTag(Base64Url.decode(beacon), now).contentEquals(tag))
+            check("handoff.tag[$i].matches", Handoff.matchesTag(beacon, tag, now))
+            check("handoff.tag[$i].skew", Handoff.matchesTag(beacon, tag, now + Handoff.BEACON_WINDOW_MS))
+            check("handoff.tag[$i].stale", !Handoff.matchesTag(beacon, tag, now + 3 * Handoff.BEACON_WINDOW_MS))
+            check("handoff.tag[$i].other-computer", !Handoff.matchesTag(Base64Url.encode(ByteArray(16) { 9 }), tag, now))
+        }
+        o.optArr("seals")!!.items.forEachIndexed { i, sv ->
+            val so = sv.asObj()
+            val off = so.optObj("offer")!!
+            val offer = Handoff.Offer(
+                ssid = off.optStr("ssid")!!,
+                psk = off.optStr("psk")!!,
+                security = Handoff.Security.values().first { it.wire == off.optStr("sec") },
+                reversePort = off.optInt("rp")!!,
+                identityKey = off.optStr("id")!!,
+                deviceName = off.optStr("name")!!,
+            )
+            val sealed = Handoff.seal(
+                key, so.optStr("code")!!, offer,
+                ephemeralPrivate = java.math.BigInteger(so.optStr("ephemeralHex")!!, 16),
+                iv = Base64Url.decode(so.optStr("ivB64")!!),
+                nonce = Base64Url.decode(so.optStr("nonceB64")!!),
+                issuedAt = so.optLong("issuedAt")!!,
+            )
+            check("handoff.seal[$i]", Base64Url.encode(sealed) == so.optStr("envelopeB64"), Base64Url.encode(sealed).take(40))
+            val random = Handoff.seal(key, so.optStr("code")!!, offer)
+            check("handoff.seal[$i].randomized", random.size == sealed.size && !random.contentEquals(sealed) && random[0] == 1.toByte())
+        }
+        val rejects = listOf(
+            Handoff.Offer("x".repeat(33), "password1", Handoff.Security.WPA2, 47390, "", "P"),
+            Handoff.Offer("ok", "short", Handoff.Security.WPA2, 47390, "", "P"),
+            Handoff.Offer("bad\nname", "password1", Handoff.Security.WPA2, 47390, "", "P"),
+        )
+        rejects.forEachIndexed { i, r -> check("handoff.validate.reject[$i]", runCatching { Handoff.validate(r) }.isFailure) }
+        check("handoff.status.parse", Handoff.parseBleStatus("{\"s\":\"joined\",\"r\":\"Joined X\"}".toByteArray()) == (Handoff.State.JOINED to "Joined X"))
+        check("handoff.status.junk", Handoff.parseBleStatus("nope".toByteArray()) == null)
+    }
     root.optArr("identityBindings")!!.items.forEachIndexed { i, v ->
         val o = v.asObj()
         val ok = PairingProof.verifyIdentityBinding(o.optStr("identityKey")!!, o.optStr("sig")!!, o.optStr("sessionKey")!!)

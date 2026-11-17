@@ -318,7 +318,6 @@ export class ReverseConnector {
     this.timer = null;
   }
 
-  /** Forget backoff (network changed: old failures say nothing about the new network). */
   /** Diagnostics: per-target dial state. */
   describe(): { target: string; failures: number; live: boolean; nextInSeconds: number }[] {
     const now = this.now();
@@ -330,6 +329,7 @@ export class ReverseConnector {
     }));
   }
 
+  /** Forget backoff (network changed: old failures say nothing about the new network). */
   reset(): void {
     for (const s of this.state.values()) {
       s.failures = 0;

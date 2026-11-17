@@ -194,6 +194,8 @@ data class WelcomeInfo(
     val admission: String = "legacy",
     /** Relay rendezvous (only for code-authenticated connections). */
     val relay: RelayRoute? = null,
+    /** Hotspot handoff keys (code-authenticated connections, proof verified). */
+    val handoff: Handoff.Info? = null,
 )
 
 /**
@@ -253,6 +255,8 @@ interface EngineListener {
     fun onConnectAttempt(hosts: List<String>) {}
     /** The computer reported new reachable addresses (`network` message). */
     fun onLanUrlsChanged(lanUrls: List<String>) {}
+    /** Progress of a hotspot handoff offered over the session. */
+    fun onHandoffStatus(id: String, state: Handoff.State, reason: String) {}
 }
 
 // ---------------------------------------------------------------------------

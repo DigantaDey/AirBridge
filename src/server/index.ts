@@ -41,6 +41,10 @@ import { REVERSE_CONNECT_PORT, isValidPairCode, normalizePairCode, type HostFire
 import { firewallKey, readMacFirewall } from './macFirewall.js';
 import { addShellSubscriber, shellSubscriberCount } from './shellEvents.js';
 import { buildDiagnostics } from './diagnostics.js';
+import { BLE_UUIDS, BEACON_WINDOW_MS, HandoffService, loadOrCreateHandoffKeys, handoffInfoFor, type HandoffPolicy } from './handoff.js';
+import { createWifiJoiner, type WifiJoiner } from './wifiJoin.js';
+import { emitShellEvent } from './shellEvents.js';
+import { postMacOsNotification } from './macNotification.js';
 import { sendCrashReport, type CrashStore, type Dsn } from './crashReports.js';
 import type { Updater } from './updater.js';
 import {
@@ -139,6 +143,11 @@ export interface AirBridgeServerOptions {
    * (`host:port`) when set; `false` disables.
    */
   relay?: false | { endpoint: string; hostKeyFile?: string; standby?: number };
+  /**
+   * Hotspot/Bluetooth handoff (see handoff.ts). On by default outside tests
+   * (AIRBRIDGE_HANDOFF=0 turns it off); `false` disables.
+   */
+  handoff?: false | { stateDir?: string; joiner?: WifiJoiner; consentTimeoutMs?: number };
 }
 
 /** Loopback peer that this server did not dial itself. */
@@ -333,6 +342,7 @@ export async function createAirBridgeServer(
         : null;
 
   let relayAgent: RelayAgent | null = null;
+  let handoffService: HandoffService | null = null;
   const hub = new SignalingHub({
     getLanUrls: advertisedUrls,
     getLanEndpoints: advertisedEndpoints,
@@ -345,12 +355,57 @@ export async function createAirBridgeServer(
     onHostPairCodeChange: (code) => backgroundPeer?.setPairCode(code),
     isLocalMachine: options.isLocalMachineAddress,
     getRelayOffer: () => relayAgent?.offer() ?? null,
+    getHandoffInfo: (vouchKey, peerId) => (handoffService ? handoffInfoFor(handoffKeys!, vouchKey, peerId) : null),
+    onHandoffOffer: (peerId, envelope) => { handoffService?.submit(envelope, 'session', peerId); },
+    onHandoffEnd: (_peerId, id) => { void handoffService?.end(id, 'The phone ended the direct link'); },
     onPakeFailure: (recent) => {
       if (recent === 20) {
         console.warn('[AirBridge] 20 wrong pairing codes in 5 minutes. If this was not you, rotate the pairing code.');
       }
     },
   });
+
+  // Hotspot handoff: keys live next to the TLS material (~/.airbridge).
+  const handoffEnabled = options.handoff === undefined
+    ? mode !== 'test' && process.env.AIRBRIDGE_HANDOFF !== '0'
+    : options.handoff !== false;
+  const handoffOpts = options.handoff || {};
+  const handoffStateDir = handoffOpts.stateDir ?? path.dirname(tls?.certDir ?? path.join(process.env.HOME ?? os.homedir(), '.airbridge', 'tls'));
+  const handoffKeys = handoffEnabled ? loadOrCreateHandoffKeys(handoffStateDir) : null;
+  const handoffTargets: ReverseTarget[] = [];
+  if (handoffKeys) {
+    const joiner = handoffOpts.joiner ?? createWifiJoiner();
+    handoffService = new HandoffService({
+      keys: handoffKeys,
+      pairCodes: () => hub.getRoomCodes(),
+      joiner,
+      stateDir: handoffStateDir,
+      consentTimeoutMs: handoffOpts.consentTimeoutMs,
+      log: mode === 'test' ? undefined : (line) => console.log(`[AirBridge] ${line}`),
+      onJoined: (_offer, reversePort) => {
+        // Dial the phone on the new network now: its hotspot is our gateway.
+        void (async () => {
+          const found = await readDefaultGateways().catch(() => []);
+          handoffTargets.length = 0;
+          for (const g of found) handoffTargets.push({ address: g.address, port: reversePort, source: 'gateway' });
+          lastGatewayRead = 0;
+          reverseConnector?.reset();
+          void reverseConnector?.tick();
+          hub.broadcastNetworkUpdate();
+        })();
+      },
+    });
+    handoffService.on('status', (view: { peerId: string | null; id: string; state: import('../shared/protocol.js').HandoffState; reason: string }) => {
+      if (view.peerId) hub.sendToPeer(view.peerId, { type: 'handoff-status', id: view.id, state: view.state, reason: view.reason });
+      if (view.state === 'ended' || view.state === 'failed') handoffTargets.length = 0;
+    });
+    handoffService.on('request', (view: { id: string; deviceName: string; ssid: string; expiresAt: string }) => {
+      const delivered = emitShellEvent({ type: 'handoff-request', id: view.id, deviceName: view.deviceName, ssid: view.ssid, expiresAt: view.expiresAt }, 'handoff');
+      if (!delivered) {
+        postMacOsNotification(`${view.deviceName} wants a direct link`, `Open AirBridge to let this computer join “${view.ssid}”.`);
+      }
+    });
+  }
 
   const backgroundClipboardEnabled =
     options.backgroundClipboard === true ||
@@ -597,8 +652,78 @@ export async function createAirBridgeServer(
     res.json(await updater.install());
   }));
 
+  // Hotspot handoff: requests, consent and settings (this computer only).
+  app.get('/api/handoff', asyncRoute(async (req, res) => {
+    if (!localOnly(req, res)) return;
+    res.setHeader('Cache-Control', 'no-store');
+    if (!handoffService) { res.json({ enabled: false, offers: [] }); return; }
+    const joiner = handoffOpts.joiner;
+    res.json({
+      enabled: true,
+      policy: handoffService.getPolicy(),
+      unsupportedReason: await (joiner ?? cachedJoiner()).unsupportedReason().catch(() => null),
+      offers: handoffService.list().filter((o) => o.state === 'pending' || o.state === 'joining' || o.state === 'joined'),
+    });
+  }));
+  app.put('/api/handoff/settings', express.json({ limit: '1kb' }), (req, res) => {
+    if (!localOnly(req, res)) return;
+    if (!isSameOriginRequest(req)) { res.status(403).json({ error: 'Cross-origin request refused' }); return; }
+    const policy = (req.body as { policy?: unknown })?.policy;
+    if (!handoffService || (policy !== 'ask' && policy !== 'always' && policy !== 'off')) { res.status(400).json({ error: 'policy must be ask, always or off' }); return; }
+    handoffService.setPolicy(policy as HandoffPolicy);
+    res.json({ policy });
+  });
+  app.post('/api/handoff/:id/respond', express.json({ limit: '1kb' }), (req, res) => {
+    if (!localOnly(req, res)) return;
+    if (!isSameOriginRequest(req)) { res.status(403).json({ error: 'Cross-origin request refused' }); return; }
+    const body = (req.body ?? {}) as { allow?: unknown; always?: unknown };
+    const view = handoffService?.respond(String(req.params.id), body.allow === true, body.always === true);
+    if (!view) { res.status(404).json({ error: 'No such request' }); return; }
+    res.json(view);
+  });
+  app.post('/api/handoff/:id/end', asyncRoute(async (req, res) => {
+    if (!localOnly(req, res)) return;
+    if (!isSameOriginRequest(req)) { res.status(403).json({ error: 'Cross-origin request refused' }); return; }
+    const view = await handoffService?.end(String(req.params.id), 'Ended on the computer');
+    if (!view) { res.status(404).json({ error: 'No such request' }); return; }
+    res.json(view);
+  }));
+  // Bluetooth bridge for the native shell (macOS app runs the GATT peripheral).
+  const shellOnly = (req: Request, res: Response): boolean => {
+    if (!localOnly(req, res)) return false;
+    if (req.headers['x-airbridge-shell'] !== '1') { res.status(400).json({ error: 'Shell clients only.' }); return false; }
+    return true;
+  };
+  app.get('/api/local/handoff/beacon', (req, res) => {
+    if (!shellOnly(req, res)) return;
+    res.setHeader('Cache-Control', 'no-store');
+    if (!handoffService || handoffService.getPolicy() === 'off') { res.json({ enabled: false }); return; }
+    const now = Date.now();
+    res.json({
+      enabled: true,
+      uuids: BLE_UUIDS,
+      tag: Buffer.from(handoffService.beaconTag()).toString('base64'),
+      refreshInMs: BEACON_WINDOW_MS - (now % BEACON_WINDOW_MS) + 1_000,
+    });
+  });
+  app.post('/api/local/handoff/offer', express.json({ limit: '2kb' }), (req, res) => {
+    if (!shellOnly(req, res)) return;
+    const envelope = (req.body as { envelope?: unknown })?.envelope;
+    if (!handoffService || typeof envelope !== 'string' || envelope.length > 1024) { res.status(400).json({ error: 'Bad offer' }); return; }
+    res.json(handoffService.submit(new Uint8Array(Buffer.from(envelope, 'base64')), 'bluetooth'));
+  });
+  app.get('/api/local/handoff/offer/:id', (req, res) => {
+    if (!shellOnly(req, res)) return;
+    const view = handoffService?.get(String(req.params.id));
+    if (!view) { res.status(404).json({ error: 'No such request' }); return; }
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(view);
+  });
+
   // Crash reports: listed and previewed in full, sent only on request.
   const crashStore = options.crashStore ?? null;
+  let joinerCache: WifiJoiner | null = null;
+  const cachedJoiner = () => (joinerCache ??= createWifiJoiner());
   app.get('/api/crashes', (req, res) => {
     if (!localOnly(req, res)) return;
     res.setHeader('Cache-Control', 'no-store');
@@ -1199,7 +1324,7 @@ export async function createAirBridgeServer(
         .flatMap((p) => p.addresses.map((address) => ({ address, port: p.port, source: 'mdns' as const })));
     }
     const recent = hub.recentRemoteAddresses().map((address) => ({ address, port: REVERSE_CONNECT_PORT, source: 'recent' as const }));
-    return [...gateways, ...discoveredPhones, ...recent];
+    return [...handoffTargets, ...gateways, ...discoveredPhones, ...recent];
   };
   reverseConnector = reverseEnabled
     ? new ReverseConnector({
@@ -1279,6 +1404,7 @@ export async function createAirBridgeServer(
       if (networkTimer) clearInterval(networkTimer);
       if (firewallTimer) clearInterval(firewallTimer);
       reverseConnector?.stop();
+      await handoffService?.dispose().catch(() => {});
       relayAgent?.stop();
       mdns?.close();
       backgroundPeer?.stop();

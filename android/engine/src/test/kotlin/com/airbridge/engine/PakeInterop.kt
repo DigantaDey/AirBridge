@@ -36,6 +36,11 @@ private class PakeRecorder : EngineListener {
     @Volatile var relayHost: String? = null
     @Volatile var directHost: String? = null
     val failures = java.util.concurrent.CopyOnWriteArrayList<ConnectionDiagnosis>()
+    val handoff = java.util.concurrent.CopyOnWriteArrayList<Triple<String, Handoff.State, String>>()
+    override fun onHandoffStatus(id: String, state: Handoff.State, reason: String) {
+        handoff += Triple(id, state, reason)
+        println("      · handoff $state ${reason.take(60)}")
+    }
     override fun onWelcome(info: WelcomeInfo) { welcome = info }
     override fun onRelayConnected(relayHost: String) { this.relayHost = relayHost; directHost = null }
     override fun onEndpointConnected(host: String, viaReverse: Boolean) { directHost = host; relayHost = null }
@@ -85,6 +90,7 @@ fun main(args: Array<String>) {
         require("admitted with the code proven (pake)", welcome.admission == "pake") { "${welcome.admission}" }
         require("relay offer present", welcome.relay != null) { welcome.toString() }
         require("relay route pinned to the vouched TLS anchor", e.relayRoute?.tlsPin == pin) { "${e.relayRoute}" }
+        require("handoff key vouched by the code-holding hub", welcome.handoff != null && e.handoffInfo == welcome.handoff) { "${welcome.handoff}" }
         require("connected directly (relay not needed)", rec.directHost != null && !e.connectedViaRelay)
         waitUntil("desktop peer") { e.peersSnapshot().any { it.device.platform == "macos" } }
         val mac = e.peersSnapshot().first { it.device.platform == "macos" }
@@ -141,6 +147,22 @@ fun main(args: Array<String>) {
         r.sendClipboardText(mac2.peerId, "hello-through-the-relay-31337")
         waitUntil("desktop received the relayed clipboard", 30_000) { File(out, "desktop-relay-ok").exists() }
         require("end-to-end encrypted beam delivered through the relay", true)
+
+        println("== hotspot handoff offered over the relayed session ==")
+        val info = r.handoffInfo
+        // Same computer key and tag secret; the proof differs because it binds the peer id.
+        require("handoff key known on the relayed connection", info != null && info.key == e.handoffInfo?.key && info.beacon == e.handoffInfo?.beacon)
+        val envelope = Handoff.seal(info!!.key, code, Handoff.Offer("AndroidShare_4821", "p4ss-w0rd-xyz", Handoff.Security.WPA2_WPA3, 47390, r.myIdentityKey, "Pixel (Kotlin)"))
+        require("sealed offer fits one Bluetooth attribute", envelope.size <= 512) { "${envelope.size} bytes" }
+        require("offer sent over the session", r.sendHandoffOffer(envelope))
+        waitUntil("computer asks its user", 20_000) { rrec.handoff.any { it.second == Handoff.State.PENDING } }
+        waitUntil("computer joined the hotspot", 30_000) { rrec.handoff.any { it.second == Handoff.State.JOINED } }
+        val handoffId = rrec.handoff.first { it.second == Handoff.State.JOINED }.first
+        require("replayed offer refused", r.sendHandoffOffer(envelope))
+        waitUntil("replay rejected", 20_000) { rrec.handoff.any { it.second == Handoff.State.INVALID } }
+        require("hotspot end sent", r.sendHandoffEnd(handoffId))
+        waitUntil("computer left the hotspot", 20_000) { rrec.handoff.any { it.first == handoffId && it.second == Handoff.State.ENDED } }
+        waitUntil("desktop checked the handoff", 20_000) { File(out, "desktop-handoff-ok").exists() }
 
         println("== direct path returns: leave the relay ==")
         directBlocked.set(false)

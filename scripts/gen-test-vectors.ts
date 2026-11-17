@@ -38,7 +38,9 @@ import {
   passwordScalar,
   peerVouch,
   vouchKeyFrom,
+  handoffProof,
 } from '../src/shared/pairingProof';
+import { beaconTag, handoffAuthKey, handoffKeysFromPrivate, sealOffer } from '../src/server/handoff';
 import { loadOrCreateDeviceIdentity } from '../src/client/engine/identity';
 
 const b64url = (b: Uint8Array): string =>
@@ -281,6 +283,27 @@ async function main(): Promise<void> {
     { peerId: '0123456789abcdef', pairCode: 'K7Q2XP', tlsPin: 'pinpinpinpinpinpinpinpinpinpinpinpinpinpinp' },
     { peerId: '0123456789abcdef', pairCode: 'K7Q2XP', tlsPin: null },
   ].map((h) => ({ ...h, keHex: joinRun.keHex, proof: hubProof(vk, h) }));
+
+  // ---- hotspot handoff (sealed offers, welcome proof, rotating tag) ----
+  const handoffKeys = handoffKeysFromPrivate(new Uint8Array(32).fill(0x42), new Uint8Array(16).fill(0x24));
+  const handoffKey = b64url(handoffKeys.publicKey);
+  const handoffBeacon = b64url(handoffKeys.beaconSecret);
+  const ephHex = '1f'.repeat(32);
+  const sealCases = [
+    { code: 'K7Q2XP', offer: { ssid: 'AndroidShare_4821', psk: 'p4ss-w0rd-xyz', sec: 'wpa2' as const, rp: 47390, id: deviceIdentity.publicKeyB64, name: 'Pixel 8' } },
+    { code: 'k7q-2xp', offer: { ssid: 'DIRECT-ab Café', psk: 'a'.repeat(64), sec: 'wpa3' as const, rp: 47391, id: '', name: 'Galaxy “S24”' } },
+  ];
+  out.handoff = [{
+    keyB64: handoffKey,
+    beaconB64: handoffBeacon,
+    proof: { vouchKeyB64: b64url(vk), peerId: '0123456789abcdef', value: handoffProof(vk, { peerId: '0123456789abcdef', key: handoffKey, beacon: handoffBeacon }) },
+    authKeys: ['K7Q2XP', 'k7q-2xp'].map((code) => ({ code, keyB64: b64url(handoffAuthKey(code)) })),
+    tags: [1_800_000_000_000, 1_800_000_899_999, 1_800_000_900_000].map((now) => ({ now, tagB64: b64url(beaconTag(handoffKeys.beaconSecret, now)) })),
+    seals: sealCases.map((c, i) => {
+      const opts = { ephemeralPrivateKey: Uint8Array.from(Buffer.from(ephHex, 'hex')), iv: new Uint8Array(12).fill(i + 1), nonce: new Uint8Array(12).fill(0x30 + i), issuedAt: 1_800_000_000 };
+      return { ...c, ephemeralHex: ephHex, ivB64: b64url(opts.iv), nonceB64: b64url(opts.nonce), issuedAt: opts.issuedAt, envelopeB64: b64url(sealOffer(handoffKey, c.code, c.offer, opts)) };
+    }),
+  }];
 
   // ---- identity bindings (WebCrypto ECDSA, raw r||s) ----
   const goodSig = await deviceIdentity.signBinding(pubA);

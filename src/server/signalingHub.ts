@@ -6,6 +6,7 @@ import {
   type Admission,
   type ClientToServerMessage,
   type DeviceProfile,
+  type HandoffInfo,
   type PakeHello,
   type RelayOffer,
   type LanEndpoint,
@@ -56,6 +57,8 @@ interface ConnectedClient {
   admission: Admission;
   /** SPAKE2-derived key used to vouch for peers this client sees (admission 'pake' only). */
   vouchKey?: Uint8Array;
+  /** Recent handoff-offer times (rate limit). */
+  handoffAttempts?: number[];
 }
 
 interface PendingPake {
@@ -252,6 +255,9 @@ export class SignalingHub {
   private readonly pakeLimiter = new PakeFailureLimiter();
   private onPakeFailure?: (recentFailures: number) => void;
   private getRelayOffer: () => RelayOffer | null;
+  private getHandoffInfo: (vouchKey: Uint8Array, peerId: string) => HandoffInfo | null;
+  private onHandoffOffer?: (peerId: string, envelope: Uint8Array) => void;
+  private onHandoffEnd?: (peerId: string, id: string) => void;
   private readonly isLocalMachine: (remoteAddress: string | undefined) => boolean;
 
   public readonly wss: WebSocketServer;
@@ -286,12 +292,20 @@ export class SignalingHub {
     onPakeFailure?: (recentFailures: number) => void;
     /** Relay rendezvous handed to code-authenticated devices (null = no relay configured). */
     getRelayOffer?: () => RelayOffer | null;
+    /** Hotspot-handoff keys for code-authenticated devices (null = handoff off). */
+    getHandoffInfo?: (vouchKey: Uint8Array, peerId: string) => HandoffInfo | null;
+    /** A code-authenticated device sent a sealed hotspot offer. */
+    onHandoffOffer?: (peerId: string, envelope: Uint8Array) => void;
+    onHandoffEnd?: (peerId: string, id: string) => void;
     /** Override "is this socket from the hub computer itself" (tests). */
     isLocalMachine?: (remoteAddress: string | undefined) => boolean;
   }) {
     this.isLocalMachine = opts.isLocalMachine ?? isLocalMachineAddress;
     this.onPakeFailure = opts.onPakeFailure;
     this.getRelayOffer = opts.getRelayOffer ?? (() => null);
+    this.getHandoffInfo = opts.getHandoffInfo ?? (() => null);
+    this.onHandoffOffer = opts.onHandoffOffer;
+    this.onHandoffEnd = opts.onHandoffEnd;
     this.getLanUrls = opts.getLanUrls;
     this.getHostFirewall = opts.getHostFirewall ?? (() => null);
     this.getLanEndpoints =
@@ -348,6 +362,24 @@ export class SignalingHub {
   /** Pair code embedded in the startup QR (shared by host desktop clients). */
   getDefaultPairCode(): string {
     return this.hostPairCode;
+  }
+
+  /**
+   * Codes of rooms this hub issued (host room first). A hotspot offer must be
+   * authenticated with one of them.
+   */
+  getRoomCodes(): string[] {
+    const codes = new Set<string>([this.hostPairCode]);
+    for (const entry of this.pairCodeByPeer.values()) codes.add(entry.pairCode);
+    return [...codes];
+  }
+
+  /** Send a control message to one connected peer; false if it is not connected. */
+  sendToPeer(peerId: string, msg: ServerToClientMessage): boolean {
+    const client = this.clients.get(peerId);
+    if (!client || client.ws.readyState !== WebSocket.OPEN) return false;
+    this.sendJson(client.ws, msg);
+    return true;
   }
 
   /** The daemon's persisted group must also be the startup QR's group. */
@@ -599,6 +631,7 @@ export class SignalingHub {
         ...(vouchKey ? { hubProof: hubProof(vouchKey, { peerId, pairCode, tlsPin }) } : {}),
         // The relay token is a capability: only for devices that proved the code.
         ...(admission === 'pake' ? { relay: this.getRelayOffer() } : {}),
+        ...(admission === 'pake' && vouchKey ? { handoff: this.getHandoffInfo(vouchKey, peerId) } : {}),
         lanUrls: this.getLanUrls(),
         lanEndpoints: this.getLanEndpoints(),
         tlsPin,
@@ -845,6 +878,36 @@ export class SignalingHub {
               from: registeredClient.peerId,
               envelope: msg.envelope,
             });
+          }
+          break;
+        }
+
+        case 'handoff-offer': {
+          // Only devices that proved the code got the handoff key; others cannot
+          // make a valid offer, but refuse early and rate-limit everyone.
+          if (registeredClient.admission !== 'pake' || !this.onHandoffOffer) {
+            this.sendJson(ws, { type: 'error', code: 'HANDOFF_UNAVAILABLE', message: 'Direct links need a device paired with the code.' });
+            break;
+          }
+          const now = Date.now();
+          const attempts = (registeredClient.handoffAttempts ?? []).filter((t) => now - t < 60_000);
+          attempts.push(now);
+          registeredClient.handoffAttempts = attempts;
+          if (attempts.length > 6) {
+            this.sendJson(ws, { type: 'error', code: 'HANDOFF_RATE_LIMITED', message: 'Too many direct-link requests; wait a minute.' });
+            break;
+          }
+          if (typeof msg.envelope !== 'string' || msg.envelope.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(msg.envelope)) {
+            this.sendJson(ws, { type: 'error', code: 'BAD_HANDOFF', message: 'Malformed direct-link request.' });
+            break;
+          }
+          this.onHandoffOffer(registeredClient.peerId, new Uint8Array(Buffer.from(msg.envelope, 'base64url')));
+          break;
+        }
+
+        case 'handoff-end': {
+          if (registeredClient.admission === 'pake' && typeof msg.id === 'string' && /^[0-9a-f]{16}$/.test(msg.id)) {
+            this.onHandoffEnd?.(registeredClient.peerId, msg.id);
           }
           break;
         }

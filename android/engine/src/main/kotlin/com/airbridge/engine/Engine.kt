@@ -82,6 +82,8 @@ data class EngineConfig(
      * so the relay works on the first attempt after an app restart.
      */
     val initialRelay: RelayRoute? = null,
+    /** Handoff keys saved from an earlier code-authenticated welcome (Bluetooth handoff works offline). */
+    val initialHandoff: Handoff.Info? = null,
     /** How long direct paths get before the relay joins the race. */
     val relayDelayMs: Long = 2_500,
     /** While on the relay, how often to check whether a direct path is back. */
@@ -233,6 +235,23 @@ class AirBridgeEngine(private val config: EngineConfig) {
     /** Relay route vouched for by the last code-authenticated welcome (with its TLS pin). */
     @Volatile var relayRoute: RelayRoute? = config.initialRelay?.takeIf { it.tlsPin.isNotBlank() }
         private set
+
+    /** Handoff keys vouched for by the last code-authenticated welcome (verified proof). */
+    @Volatile var handoffInfo: Handoff.Info? = config.initialHandoff
+        private set
+
+    /**
+     * Sends a sealed hotspot offer over the live session (e.g. the relay).
+     * Returns false when there is no welcomed connection.
+     */
+    fun sendHandoffOffer(envelope: ByteArray): Boolean = runCatching {
+        sendServer(JsonValue.Obj().put("type", "handoff-offer").put("envelope", Base64Url.encode(envelope)))
+    }.isSuccess
+
+    /** Tells the computer the hotspot is going away (it leaves and rejoins its previous network). */
+    fun sendHandoffEnd(id: String): Boolean = runCatching {
+        sendServer(JsonValue.Obj().put("type", "handoff-end").put("id", id))
+    }.isSuccess
 
     /** True while the live connection runs through the relay. */
     val connectedViaRelay: Boolean get() = (ws?.connectedViaRelay == true) && welcomedClient === ws
@@ -1004,12 +1023,17 @@ class AirBridgeEngine(private val config: EngineConfig) {
                 } else null
                 if (relay != null) relayRoute = relay
                 else if (admitted == "pake" && key != null && relayO == null) relayRoute = null // computer turned the relay off
+                // Handoff keys: only with a valid proof under this session's vouch key.
+                val handoff = if (admitted == "pake" && key != null) {
+                    Handoff.Info.fromJson(msg.optObj("handoff"))?.takeIf { Handoff.verifyInfo(key, id, it) }
+                } else null
+                if (handoff != null) handoffInfo = handoff
                 synchronized(lock) {
                     peerId = id
                     pairCode = code
                 }
                 welcomedClient = ws
-                for (l in listeners) l.onWelcome(WelcomeInfo(id, code, lanUrls, admitted, relay))
+                for (l in listeners) l.onWelcome(WelcomeInfo(id, code, lanUrls, admitted, relay, handoff))
                 for (l in listeners) l.onPairCodeChanged(code)
                 setConnectionState(ConnectionState.CONNECTED)
                 applyPeers(msg.optArr("peers"))
@@ -1043,6 +1067,11 @@ class AirBridgeEngine(private val config: EngineConfig) {
             "network" -> {
                 val lanUrls = msg.optArr("lanUrls")?.items?.mapNotNull { it.asStringOrNull() } ?: emptyList()
                 for (l in listeners) l.onLanUrlsChanged(lanUrls)
+            }
+            "handoff-status" -> {
+                val id = msg.optStr("id") ?: return
+                val state = Handoff.State.fromWire(msg.optStr("state")) ?: return
+                for (l in listeners) l.onHandoffStatus(id, state, msg.optStr("reason") ?: "")
             }
             "rtc-signal" -> { /* relay-only engine */ }
         }

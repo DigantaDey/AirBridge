@@ -15,7 +15,9 @@ import type { Response } from 'express';
 export type ShellEvent =
   | { type: 'notification'; title: string; body: string; appName?: string }
   | { type: 'update-installed'; version: string; relaunch: boolean }
-  | { type: 'hello'; version: string; pid: number };
+  | { type: 'hello'; version: string; pid: number }
+  /** A phone offers its hotspot; the shell may ask the user with native Allow / Not now actions. */
+  | { type: 'handoff-request'; id: string; deviceName: string; ssid: string; expiresAt: string };
 
 interface Subscriber {
   res: Response;

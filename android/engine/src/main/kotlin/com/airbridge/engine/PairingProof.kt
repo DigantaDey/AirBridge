@@ -63,6 +63,18 @@ object PairingProof {
             proof.toByteArray(Charsets.UTF_8),
         )
 
+    /** Binds the computer's handoff key and Bluetooth tag secret to this session (handoffProof in pairingProof.ts). */
+    fun handoffProof(vouchKey: ByteArray, peerId: String, key: String, beacon: String): String {
+        val msg = listOf("handoff", peerId, key, beacon).joinToString("\n")
+        return Base64Url.encode(AirCrypto.hmacSha256(vouchKey, msg.toByteArray(Charsets.UTF_8)))
+    }
+
+    fun verifyHandoffProof(vouchKey: ByteArray, peerId: String, key: String, beacon: String, proof: String?): Boolean =
+        proof != null && Spake2.constantTimeEquals(
+            handoffProof(vouchKey, peerId, key, beacon).toByteArray(Charsets.UTF_8),
+            proof.toByteArray(Charsets.UTF_8),
+        )
+
     fun identityBindingMessage(publicKey: String): ByteArray =
         "airbridge-device-binding-v1\n$publicKey".toByteArray(Charsets.UTF_8)
 

@@ -108,3 +108,16 @@ export function verifyHubProof(vouchKey: Uint8Array, s: HubProofSubject, proof: 
 export function identityBindingMessage(publicKey: string): Uint8Array {
   return enc.encode(`airbridge-device-binding-v1\n${publicKey}`);
 }
+
+/**
+ * Binds the computer's handoff key and Bluetooth tag secret to a
+ * code-authenticated session (see HandoffInfo in protocol.ts).
+ */
+export function handoffProof(vouchKey: Uint8Array, input: { peerId: string; key: string; beacon: string }): string {
+  return bytesToBase64Url(hmac(sha256, vouchKey, enc.encode(`handoff\n${input.peerId}\n${input.key}\n${input.beacon}`)));
+}
+
+export function verifyHandoffProof(vouchKey: Uint8Array, input: { peerId: string; key: string; beacon: string }, proof: string | undefined | null): boolean {
+  if (!proof) return false;
+  return constantTimeEqual(enc.encode(handoffProof(vouchKey, input)), enc.encode(proof));
+}
