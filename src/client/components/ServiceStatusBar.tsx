@@ -5,6 +5,7 @@
  * and "Copy diagnostics" for support requests. Hidden on phones and remote pages.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { HandoffPrompt } from './HandoffPrompt.js';
 
 export interface UpdateStatusView {
   supported: boolean;
@@ -164,6 +165,7 @@ export function ServiceStatusBar({ page, connected }: { page: Record<string, unk
           </span>
         </div>
       ) : null}
+      {connected ? <HandoffPrompt /> : null}
       {connected ? <CrashReports /> : null}
       <button className="text-button service-bar-diagnostics" onClick={() => void diagnostics.copy()} disabled={diagnostics.state === 'copying'}>
         {diagnostics.label}

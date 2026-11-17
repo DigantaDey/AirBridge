@@ -18,7 +18,10 @@ describe('F14: Background Continuity, WakeLocks & Network Recovery', () => {
     expect(hasPermission(manifest, 'ACCESS_NETWORK_STATE')).toBe(true);
     expect(hasPermission(manifest, 'CHANGE_NETWORK_STATE')).toBe(false);
     expect(hasPermission(manifest, 'ACCESS_WIFI_STATE')).toBe(true);
-    expect(hasPermission(manifest, 'CHANGE_WIFI_STATE')).toBe(false);
+    // Only for the hotspot handoff, which calls startLocalOnlyHotspot (requires it).
+    const handoff = await readRepoFile('android/app/src/main/kotlin/com/airbridge/app/HotspotHandoff.kt');
+    expect(handoff).toContain('startLocalOnlyHotspot(');
+    expect(hasPermission(manifest, 'CHANGE_WIFI_STATE')).toBe(true);
   });
 
   it('acquires bounded PARTIAL_WAKE_LOCK with periodic refresh in ConnectionService', async () => {

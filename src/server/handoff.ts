@@ -305,13 +305,16 @@ export class HandoffService extends EventEmitter {
   private readonly offers = new Map<string, OfferRecord>();
   private readonly seenNonces = new Map<string, number>();
   private policy: HandoffPolicy;
+  private keysShared: boolean;
   private active: OfferRecord | null = null;
   private readonly now: () => number;
 
   constructor(private readonly o: HandoffServiceOptions) {
     super();
     this.now = o.now ?? Date.now;
-    this.policy = this.loadPolicy();
+    const settings = this.loadSettings();
+    this.policy = settings.policy;
+    this.keysShared = settings.shared;
   }
 
   getPolicy(): HandoffPolicy {
@@ -320,21 +323,44 @@ export class HandoffService extends EventEmitter {
 
   setPolicy(policy: HandoffPolicy): void {
     this.policy = policy;
+    this.saveSettings();
+  }
+
+  /**
+   * True once a code-authenticated phone has received this computer's handoff
+   * keys. Until then nobody could use the Bluetooth path, so the desktop shell
+   * doesn't start Bluetooth (and doesn't trigger the OS permission prompt).
+   */
+  get shared(): boolean {
+    return this.keysShared;
+  }
+
+  markShared(): void {
+    if (this.keysShared) return;
+    this.keysShared = true;
+    this.saveSettings();
+  }
+
+  private saveSettings(): void {
     if (!this.o.stateDir) return;
     try {
-      fs.writeFileSync(path.join(this.o.stateDir, 'handoff.json'), JSON.stringify({ policy }), { mode: 0o600 });
+      fs.writeFileSync(
+        path.join(this.o.stateDir, 'handoff.json'),
+        JSON.stringify({ policy: this.policy, shared: this.keysShared }),
+        { mode: 0o600 },
+      );
     } catch {
       // keep in memory
     }
   }
 
-  private loadPolicy(): HandoffPolicy {
-    if (!this.o.stateDir) return 'ask';
+  private loadSettings(): { policy: HandoffPolicy; shared: boolean } {
+    if (!this.o.stateDir) return { policy: 'ask', shared: false };
     try {
-      const p = (JSON.parse(fs.readFileSync(path.join(this.o.stateDir, 'handoff.json'), 'utf8')) as { policy?: string }).policy;
-      return p === 'always' || p === 'off' ? p : 'ask';
+      const raw = JSON.parse(fs.readFileSync(path.join(this.o.stateDir, 'handoff.json'), 'utf8')) as { policy?: string; shared?: unknown };
+      return { policy: raw.policy === 'always' || raw.policy === 'off' ? raw.policy : 'ask', shared: raw.shared === true };
     } catch {
-      return 'ask';
+      return { policy: 'ask', shared: false };
     }
   }
 

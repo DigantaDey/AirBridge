@@ -355,7 +355,11 @@ export async function createAirBridgeServer(
     onHostPairCodeChange: (code) => backgroundPeer?.setPairCode(code),
     isLocalMachine: options.isLocalMachineAddress,
     getRelayOffer: () => relayAgent?.offer() ?? null,
-    getHandoffInfo: (vouchKey, peerId) => (handoffService ? handoffInfoFor(handoffKeys!, vouchKey, peerId) : null),
+    getHandoffInfo: (vouchKey, peerId) => {
+      if (!handoffService) return null;
+      handoffService.markShared();
+      return handoffInfoFor(handoffKeys!, vouchKey, peerId);
+    },
     onHandoffOffer: (peerId, envelope) => { handoffService?.submit(envelope, 'session', peerId); },
     onHandoffEnd: (_peerId, id) => { void handoffService?.end(id, 'The phone ended the direct link'); },
     onPakeFailure: (recent) => {
@@ -697,10 +701,12 @@ export async function createAirBridgeServer(
   app.get('/api/local/handoff/beacon', (req, res) => {
     if (!shellOnly(req, res)) return;
     res.setHeader('Cache-Control', 'no-store');
-    if (!handoffService || handoffService.getPolicy() === 'off') { res.json({ enabled: false }); return; }
+    // `shared`: some phone holds the keys, so Bluetooth is worth starting.
+    if (!handoffService || handoffService.getPolicy() === 'off') { res.json({ enabled: false, shared: handoffService?.shared ?? false }); return; }
     const now = Date.now();
     res.json({
       enabled: true,
+      shared: handoffService.shared,
       uuids: BLE_UUIDS,
       tag: Buffer.from(handoffService.beaconTag()).toString('base64'),
       refreshInMs: BEACON_WINDOW_MS - (now % BEACON_WINDOW_MS) + 1_000,

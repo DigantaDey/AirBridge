@@ -12,6 +12,34 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- QR pairing. Optional: the connect screen still accepts a typed address. -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!--
+      Hotspot handoff ("Use this phone's hotspot"): a local-only hotspot whose
+      credentials are sealed to the paired computer, delivered over the session
+      or Bluetooth LE. Neither is used to derive location.
+    -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="tiramisu" />
+    <!-- Local-only hotspot (API 26-32) and BLE scanning (API 26-30) require it. -->
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.ACCESS_COARSE_LOCATION"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
     <!-- Public Downloads publishing for the pre-Android 10 save path. -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
@@ -22,6 +50,9 @@
         android:required="false" />
     <uses-feature
         android:name="android.hardware.camera.autofocus"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
         android:required="false" />
 
     <application

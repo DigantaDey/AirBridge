@@ -354,4 +354,9 @@ html.dark .clipboard-error { color: #f87171; }
 .update-actions { display: flex; gap: 14px; }
 .update-note-quiet { border-style: dashed; }
 .crash-note .update-actions { flex-wrap: wrap; }
+.handoff-note { border-color: var(--ab-text); }
+.handoff-note .update-actions { flex-wrap: wrap; }
+.update-note small.handoff-warning, .handoff-warning { color: var(--ab-text); font-weight: 600; }
+.handoff-policy { display: inline-flex; align-items: center; gap: 6px; color: var(--ab-secondary); }
+.handoff-policy select { font: inherit; color: inherit; background: transparent; border: 1px solid var(--ab-border-strong); border-radius: 6px; padding: 2px 4px; }
 .crash-preview { flex: 1 1 100%; max-height: 260px; overflow: auto; margin: 4px 0 0; padding: 10px; border-radius: 8px; background: var(--ab-surface-2, rgba(127, 127, 127, 0.08)); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }

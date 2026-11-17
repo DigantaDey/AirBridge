@@ -2,6 +2,7 @@ import AppKit
 import WebKit
 import Foundation
 import UserNotifications
+import CoreBluetooth
 
 /**
  * AirBridge Native macOS Application (AppKit + WebKit + NSStatusItem)
@@ -479,6 +480,219 @@ final class ShellEventStream: NSObject, URLSessionDataDelegate {
     }
 }
 
+// MARK: - Hotspot handoff over Bluetooth LE (GATT peripheral)
+
+/// Lets a paired phone hand over its hotspot when the two share no network.
+///
+/// The phone reads the rotating tag (proves this is the computer it paired
+/// with), writes its sealed offer, then follows the status characteristic.
+/// This app only shuttles opaque bytes: the service opens and verifies the
+/// offer (sealed to its key, MACed with the pairing code) and asks for consent.
+/// Nothing identifying is advertised: just the service UUID, no name.
+final class HandoffPeripheral: NSObject, CBPeripheralManagerDelegate {
+    private let port: String
+    private let log: (String) -> Void
+    private var manager: CBPeripheralManager?
+    private var tagChar: CBMutableCharacteristic?
+    private var offerChar: CBMutableCharacteristic?
+    private var statusChar: CBMutableCharacteristic?
+    private var serviceUUID: CBUUID?
+    private var tag = Data()
+    private var status = Data("{\"s\":\"idle\",\"r\":\"\"}".utf8)
+    private var refreshTimer: Timer?
+    private var pollTimer: Timer?
+    private var currentOffer: String?
+    private var advertisingWanted = false
+    private var stopped = false
+    private var warnedNoUsageString = false
+
+    init(port: String, log: @escaping (String) -> Void) {
+        self.port = port
+        self.log = log
+        super.init()
+    }
+
+    func start() {
+        stopped = false
+        refreshBeacon()
+    }
+
+    func stop() {
+        stopped = true
+        refreshTimer?.invalidate()
+        pollTimer?.invalidate()
+        manager?.stopAdvertising()
+        manager?.removeAllServices()
+    }
+
+    private static func shellRequest(port: String, path: String, method: String = "GET", body: [String: Any]? = nil, completion: @escaping (Int, [String: Any]?) -> Void) {
+        guard let url = URL(string: "http://localhost:\(port)\(path)") else { completion(0, nil); return }
+        var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 15)
+        req.httpMethod = method
+        req.setValue("1", forHTTPHeaderField: "X-AirBridge-Shell")
+        if let body = body {
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        }
+        URLSession.shared.dataTask(with: req) { data, response, _ in
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            DispatchQueue.main.async { completion(code, json) }
+        }.resume()
+    }
+
+    /// Fetches the current tag; reschedules itself for the next time window.
+    private func refreshBeacon() {
+        guard !stopped else { return }
+        HandoffPeripheral.shellRequest(port: port, path: "/api/local/handoff/beacon") { [weak self] code, json in
+            guard let self = self, !self.stopped else { return }
+            var next: TimeInterval = 60
+            if code == 200, let json = json, json["enabled"] as? Bool == true, json["shared"] as? Bool == true,
+               let tagB64 = json["tag"] as? String, let tag = Data(base64Encoded: tagB64),
+               let uuids = json["uuids"] as? [String: String] {
+                self.tag = tag
+                self.ensureManager(uuids: uuids)
+                self.advertisingWanted = true
+                self.startAdvertisingIfReady()
+                if let ms = json["refreshInMs"] as? Double { next = max(5, min(ms / 1000, 15 * 60)) }
+            } else {
+                // Turned off, nothing shared yet, or the service is restarting.
+                self.advertisingWanted = false
+                self.manager?.stopAdvertising()
+            }
+            self.refreshTimer?.invalidate()
+            self.refreshTimer = Timer.scheduledTimer(withTimeInterval: next, repeats: false) { [weak self] _ in self?.refreshBeacon() }
+        }
+    }
+
+    private func ensureManager(uuids: [String: String]) {
+        // Without the usage string macOS terminates the app on first Bluetooth use
+        // (e.g. an older locally assembled bundle): skip Bluetooth instead.
+        guard Bundle.main.object(forInfoDictionaryKey: "NSBluetoothAlwaysUsageDescription") != nil else {
+            if !warnedNoUsageString { log("handoff: this app bundle has no Bluetooth usage description; Bluetooth handoff disabled") }
+            warnedNoUsageString = true
+            return
+        }
+        guard manager == nil,
+              let service = uuids["service"], let tagId = uuids["tag"], let offerId = uuids["offer"], let statusId = uuids["status"] else { return }
+        serviceUUID = CBUUID(string: service)
+        tagChar = CBMutableCharacteristic(type: CBUUID(string: tagId), properties: [.read], value: nil, permissions: [.readable])
+        offerChar = CBMutableCharacteristic(type: CBUUID(string: offerId), properties: [.write], value: nil, permissions: [.writeable])
+        statusChar = CBMutableCharacteristic(type: CBUUID(string: statusId), properties: [.read, .notify], value: nil, permissions: [.readable])
+        // First use shows the macOS Bluetooth prompt (NSBluetoothAlwaysUsageDescription).
+        manager = CBPeripheralManager(delegate: self, queue: nil)
+        log("handoff: Bluetooth peripheral created")
+    }
+
+    private func startAdvertisingIfReady() {
+        guard advertisingWanted, let manager = manager, manager.state == .poweredOn, let uuid = serviceUUID else { return }
+        if !manager.isAdvertising {
+            manager.startAdvertising([CBAdvertisementDataServiceUUIDsKey: [uuid]])
+        }
+    }
+
+    func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
+        switch peripheral.state {
+        case .poweredOn:
+            guard let uuid = serviceUUID, let t = tagChar, let o = offerChar, let s = statusChar else { return }
+            let service = CBMutableService(type: uuid, primary: true)
+            service.characteristics = [t, o, s]
+            peripheral.removeAllServices()
+            peripheral.add(service)
+        case .unauthorized:
+            log("handoff: Bluetooth access denied for AirBridge (System Settings › Privacy & Security › Bluetooth)")
+        case .poweredOff:
+            log("handoff: Bluetooth is off")
+        default:
+            break
+        }
+    }
+
+    func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
+        if let error = error { log("handoff: GATT service failed: \(error.localizedDescription)"); return }
+        startAdvertisingIfReady()
+    }
+
+    func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
+        if let error = error { log("handoff: advertising failed: \(error.localizedDescription)") }
+    }
+
+    func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveRead request: CBATTRequest) {
+        let uuid = request.characteristic.uuid
+        let value: Data
+        if uuid == tagChar?.uuid {
+            value = tag
+        } else if uuid == statusChar?.uuid {
+            value = status
+        } else {
+            peripheral.respond(to: request, withResult: .attributeNotFound)
+            return
+        }
+        guard request.offset <= value.count else {
+            peripheral.respond(to: request, withResult: .invalidOffset)
+            return
+        }
+        request.value = value.subdata(in: request.offset..<value.count)
+        peripheral.respond(to: request, withResult: .success)
+    }
+
+    /// Long writes arrive as several requests with offsets: reassemble them.
+    func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
+        guard let first = requests.first else { return }
+        guard requests.allSatisfy({ $0.characteristic.uuid == offerChar?.uuid }) else {
+            peripheral.respond(to: first, withResult: .writeNotPermitted)
+            return
+        }
+        var envelope = Data()
+        for r in requests.sorted(by: { $0.offset < $1.offset }) {
+            guard let v = r.value, r.offset == envelope.count, envelope.count + v.count <= 1024 else {
+                peripheral.respond(to: first, withResult: .invalidAttributeValueLength)
+                return
+            }
+            envelope.append(v)
+        }
+        peripheral.respond(to: first, withResult: .success)
+        submit(envelope)
+    }
+
+    private func submit(_ envelope: Data) {
+        setStatus(state: "pending", reason: "")
+        HandoffPeripheral.shellRequest(port: port, path: "/api/local/handoff/offer", method: "POST", body: ["envelope": envelope.base64EncodedString()]) { [weak self] code, json in
+            guard let self = self else { return }
+            guard code == 200, let json = json, let id = json["id"] as? String else {
+                self.setStatus(state: "failed", reason: "AirBridge on the computer isn't responding")
+                return
+            }
+            self.currentOffer = id
+            self.apply(json)
+            self.pollTimer?.invalidate()
+            self.pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.poll() }
+        }
+    }
+
+    private func poll() {
+        guard let id = currentOffer else { pollTimer?.invalidate(); return }
+        HandoffPeripheral.shellRequest(port: port, path: "/api/local/handoff/offer/\(id)") { [weak self] code, json in
+            guard let self = self, self.currentOffer == id else { return }
+            if code == 200, let json = json { self.apply(json) } else if code == 404 { self.pollTimer?.invalidate() }
+        }
+    }
+
+    private func apply(_ view: [String: Any]) {
+        let state = view["state"] as? String ?? "failed"
+        setStatus(state: state, reason: view["reason"] as? String ?? "")
+        // The phone stops listening at "joined"; the session takes over on the hotspot.
+        if state != "pending" && state != "joining" { pollTimer?.invalidate() }
+    }
+
+    private func setStatus(state: String, reason: String) {
+        let body: [String: String] = ["s": state, "r": String(reason.prefix(120))]
+        guard let data = try? JSONSerialization.data(withJSONObject: body), data != status else { return }
+        status = data
+        if let c = statusChar { _ = manager?.updateValue(data, for: c, onSubscribedCentrals: nil) }
+    }
+}
+
 // MARK: - Local service API (loopback only)
 
 enum LocalAPI {
@@ -559,6 +773,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
     var statusItem: NSStatusItem!
     var supervisor: ServiceSupervisor!
     var events: ShellEventStream?
+    var handoffPeripheral: HandoffPeripheral?
     var pageLoaded = false
     var loginMenuItem: NSMenuItem?
     var updateMenuItem: NSMenuItem?
@@ -672,6 +887,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
         // 5. Native notifications + lifecycle events from the service.
         setUpEventStream(port: port)
 
+        // 6. Bluetooth path for hotspot handoff (starts Bluetooth only once a
+        //    phone holds this computer's handoff keys).
+        if ProcessInfo.processInfo.environment["AIRBRIDGE_HANDOFF"] != "0" {
+            let peripheral = HandoffPeripheral(port: port) { [weak self] message in self?.supervisor.log(message) }
+            peripheral.start()
+            handoffPeripheral = peripheral
+        }
+
         if !launchedInBackground {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -689,7 +912,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
     private func startEventStream(notifications: Bool) {
         events?.stop()
         // Without notification permission the service keeps using osascript.
-        let caps = notifications ? ["notification", "lifecycle"] : ["lifecycle"]
+        let caps = notifications ? ["notification", "lifecycle", "handoff"] : ["lifecycle"]
         let stream = ShellEventStream(port: eventPort, capabilities: caps)
         stream.onEvent = { [weak self] type, json in self?.handleServiceEvent(type, json) }
         stream.start()
@@ -705,6 +928,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
         guard canUseUserNotifications else { return }
         let center = UNUserNotificationCenter.current()
         center.delegate = self
+        registerNotificationCategories()
         let upgrade: () -> Void = { [weak self] in
             DispatchQueue.main.async {
                 guard let self = self, !self.relaunching else { return }
@@ -731,6 +955,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
         switch type {
         case "notification":
             postNotification(title: json["title"] as? String ?? "AirBridge", body: json["body"] as? String ?? "", appName: json["appName"] as? String)
+        case "handoff-request":
+            postHandoffRequest(json)
         case "update-installed":
             let version = json["version"] as? String ?? ""
             if json["relaunch"] as? Bool == true { relaunchAfterUpdate(version: version) }
@@ -752,12 +978,65 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigati
         }
     }
 
+    private static let handoffCategory = "AIRBRIDGE_HANDOFF"
+
+    private func registerNotificationCategories() {
+        let join = UNNotificationAction(identifier: "join", title: "Join", options: [])
+        let always = UNNotificationAction(identifier: "always", title: "Always join paired phones", options: [])
+        let decline = UNNotificationAction(identifier: "decline", title: "Not now", options: [.destructive])
+        let category = UNNotificationCategory(identifier: AppDelegate.handoffCategory, actions: [join, always, decline], intentIdentifiers: [], options: [.customDismissAction])
+        UNUserNotificationCenter.current().setNotificationCategories([category])
+    }
+
+    /// A paired phone offers its hotspot: ask with actionable buttons (also answerable in the window).
+    private func postHandoffRequest(_ json: [String: Any]) {
+        guard canUseUserNotifications, let id = json["id"] as? String else { return }
+        let device = (json["deviceName"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "Your phone"
+        let ssid = json["ssid"] as? String ?? ""
+        let content = UNMutableNotificationContent()
+        content.title = "\(device) offers its hotspot"
+        content.body = "Join “\(ssid)” for a direct link? Your normal Wi-Fi comes back when the phone stops the hotspot."
+        content.sound = .default
+        content.categoryIdentifier = AppDelegate.handoffCategory
+        content.userInfo = ["handoffId": id]
+        let request = UNNotificationRequest(identifier: "handoff-\(id)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error { self.supervisor.log("handoff notification failed: \(error.localizedDescription)") }
+        }
+    }
+
+    private func respondToHandoff(id: String, allow: Bool, always: Bool) {
+        guard let url = URL(string: "http://localhost:\(eventPort)/api/handoff/\(id)/respond") else { return }
+        var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 15)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["allow": allow, "always": always])
+        URLSession.shared.dataTask(with: req) { _, response, _ in
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code != 200 { self.supervisor.log("handoff response failed (HTTP \(code))") }
+        }.resume()
+    }
+
     // Show banners while AirBridge is frontmost too.
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         if #available(macOS 11.0, *) { completionHandler([.banner, .sound]) } else { completionHandler([.alert, .sound]) }
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        let content = response.notification.request.content
+        if content.categoryIdentifier == AppDelegate.handoffCategory, let id = content.userInfo["handoffId"] as? String {
+            switch response.actionIdentifier {
+            case "join": respondToHandoff(id: id, allow: true, always: false)
+            case "always": respondToHandoff(id: id, allow: true, always: true)
+            case "decline": respondToHandoff(id: id, allow: false, always: false)
+            // Dismissed: leave it pending; it can still be answered in the window until it expires.
+            case UNNotificationDismissActionIdentifier: break
+            // Body click: answer in the window.
+            default: DispatchQueue.main.async { self.showWindow() }
+            }
+            completionHandler()
+            return
+        }
         DispatchQueue.main.async { self.showWindow() }
         completionHandler()
     }

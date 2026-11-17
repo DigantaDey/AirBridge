@@ -185,6 +185,17 @@ describe('HandoffService', () => {
     expect(calls.filter((c) => c.startsWith('join'))).toHaveLength(1);
   });
 
+  it('remembers once keys were shared with a phone (gates Bluetooth in the desktop app), with the policy', () => {
+    const svc = service(keys, fakeJoiner().joiner);
+    expect(svc.shared).toBe(false);
+    svc.setPolicy('always');
+    svc.markShared();
+    const reloaded = service(keys, fakeJoiner().joiner);
+    expect(reloaded.shared).toBe(true);
+    expect(reloaded.getPolicy()).toBe('always');
+    expect((fs.statSync(path.join(dir, 'handoff.json')).mode & 0o777).toString(8)).toBe('600');
+  });
+
   it('reports a failed join without leaking the password', async () => {
     const { joiner } = fakeJoiner({ fail: 'Could not join “AndroidShare_4821”: network not found' });
     const svc = service(keys, joiner);
@@ -350,8 +361,9 @@ describe('handoff through the hub (code-authenticated phone)', () => {
 
       // The macOS app's Bluetooth bridge: tag for the GATT service, offers forwarded as base64.
       expect((await fetch(`${base}/api/local/handoff/beacon`)).status).toBe(400); // shell header required
-      const beacon = await (await fetch(`${base}/api/local/handoff/beacon`, { headers: { 'X-AirBridge-Shell': '1' } })).json() as { enabled: boolean; tag: string; uuids: { service: string } };
+      const beacon = await (await fetch(`${base}/api/local/handoff/beacon`, { headers: { 'X-AirBridge-Shell': '1' } })).json() as { enabled: boolean; shared: boolean; tag: string; uuids: { service: string } };
       expect(beacon.enabled).toBe(true);
+      expect(beacon.shared).toBe(true); // a code-authenticated phone now holds the keys
       expect(Buffer.from(beacon.tag, 'base64')).toHaveLength(9);
       const viaBle = await (await fetch(`${base}/api/local/handoff/offer`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-AirBridge-Shell': '1' },

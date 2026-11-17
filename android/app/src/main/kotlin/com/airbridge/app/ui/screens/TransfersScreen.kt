@@ -53,8 +53,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.airbridge.app.HandoffUiState
 import com.airbridge.app.NativeFiles
 import com.airbridge.app.PeerUiState
+import com.airbridge.app.ui.components.HotspotHandoffCard
 import com.airbridge.app.ui.components.TransferCard
 import com.airbridge.app.ui.connectionLabel
 import com.airbridge.app.ui.formatBytes
@@ -84,6 +86,8 @@ fun TransfersScreen(
     onRequestBatteryExemption: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
     modifier: Modifier = Modifier,
+    onStartHotspotHandoff: () -> Unit = {},
+    onStopHotspotHandoff: () -> Unit = {},
 ) {
     val activeStatuses = setOf(
         TransferStatus.PENDING_ACCEPT,
@@ -118,6 +122,11 @@ fun TransfersScreen(
                         uiState = uiState,
                         onRequestBatteryExemption = onRequestBatteryExemption,
                         onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                    )
+                    HotspotHandoffCard(
+                        state = uiState.engine.handoff,
+                        onStart = onStartHotspotHandoff,
+                        onStop = onStopHotspotHandoff,
                     )
                     PeersSelectorCard(
                         peers = uiState.engine.peers,
@@ -173,6 +182,16 @@ fun TransfersScreen(
                             uiState = uiState,
                             onRequestBatteryExemption = onRequestBatteryExemption,
                             onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                            modifier = mediumCardModifier,
+                        )
+                    }
+                }
+                if (uiState.engine.handoff.available || uiState.engine.handoff.phase != HandoffUiState.Phase.IDLE) {
+                    item(key = "handoff") {
+                        HotspotHandoffCard(
+                            state = uiState.engine.handoff,
+                            onStart = onStartHotspotHandoff,
+                            onStop = onStopHotspotHandoff,
                             modifier = mediumCardModifier,
                         )
                     }

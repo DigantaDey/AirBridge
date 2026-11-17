@@ -132,6 +132,16 @@ class Prefs(context: Context) {
         get() = sp.getString("nativeRelayRoute", null)
         set(value) = sp.edit().apply { if (value == null) remove("nativeRelayRoute") else putString("nativeRelayRoute", value) }.apply()
 
+    /**
+     * Hotspot handoff keys from the last code-authenticated welcome
+     * ([com.airbridge.engine.Handoff.Info]): the computer's offer key and
+     * Bluetooth tag secret. Kept so a hotspot can be handed over with no
+     * network at all. Proof already verified when saved.
+     */
+    var handoffInfo: com.airbridge.engine.Handoff.Info?
+        get() = com.airbridge.engine.Handoff.Info.parse(sp.getString("nativeHandoffInfo", null))
+        set(value) = sp.edit().apply { if (value == null) remove("nativeHandoffInfo") else putString("nativeHandoffInfo", value.toJson()) }.apply()
+
     fun tlsTrust(link: PairingLink): com.airbridge.engine.PinnedTlsTrust = invitations.tlsTrust(link)
 
     fun forget() {
@@ -140,6 +150,7 @@ class Prefs(context: Context) {
             .remove("nativeTrustedKeys")
             .remove("nativePeerId")
             .remove("nativeRelayRoute")
+            .remove("nativeHandoffInfo")
             .apply()
     }
 }

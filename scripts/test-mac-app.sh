@@ -60,11 +60,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>AirBridgeTest</string>
   <key>CFBundleExecutable</key><string>AirBridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>Your paired phone can hand over its hotspot over Bluetooth when it and this Mac share no network.</string>
 </dict></plist>
 PLIST
 printf '%s\n' "$BIN" > "$APP/Contents/Resources/binary-path"
 printf '%s\n' "$PORT" > "$APP/Contents/Resources/port"
-swiftc -O scripts/mac_app.swift -o "$EXE" -framework AppKit -framework WebKit -framework UserNotifications
+swiftc -O scripts/mac_app.swift -o "$EXE" -framework AppKit -framework WebKit -framework UserNotifications -framework CoreBluetooth
 codesign --force -s - "$EXE"
 "$BIN" --version | grep -q "$WANT" || fail "binary reports $("$BIN" --version), want $WANT"
 

@@ -304,6 +304,7 @@ install_macos_app() {
   <key>CFBundleIconFile</key><string>AirBridge.icns</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSUIElement</key><true/>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>Your paired phone can hand over its hotspot over Bluetooth when it and this Mac share no network.</string>
 </dict></plist>
 PLIST
   printf '%s\n' "$bin" > "$contents/Resources/binary-path"
@@ -322,7 +323,7 @@ PLIST
 
   if [ "${AIRBRIDGE_NATIVE_APP:-1}" = "1" ] && command -v swiftc >/dev/null 2>&1 && [ -s "$swift_src" ]; then
     echo "▸ compiling native macOS Swift App GUI"
-    if swiftc -O -suppress-warnings "$swift_src" -o "$contents/MacOS/AirBridge" -framework AppKit -framework WebKit -framework UserNotifications 2>/dev/null; then
+    if swiftc -O -suppress-warnings "$swift_src" -o "$contents/MacOS/AirBridge" -framework AppKit -framework WebKit -framework UserNotifications -framework CoreBluetooth 2>/dev/null; then
       codesign --force -s - "$contents/MacOS/AirBridge" 2>/dev/null || true
       rm -f "$swift_src"
       icon_url="https://raw.githubusercontent.com/${REPO}/main/macos/AirBridge.icns"
