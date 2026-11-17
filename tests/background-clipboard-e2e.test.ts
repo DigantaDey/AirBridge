@@ -141,7 +141,12 @@ describe('background clipboard without open browser UIs', () => {
         Reflect.deleteProperty(globalThis, 'localStorage');
       }
     }
-  }, 40_000);
+  // This deliberately exercises encrypted pairing, a polled host clipboard,
+  // and a suspended UI socket. Under a fully parallel CI run each bounded
+  // readiness wait can consume its own budget, so keep the test-level limit
+  // above their combined worst case rather than turning a slow runner into a
+  // false functional failure.
+  }, 80_000);
   it('restores the startup QR pairing group and disabled clipboard preferences after a daemon restart', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'airbridge-background-restart-'));
     const stateFile = path.join(dir, 'peer.json');
