@@ -189,6 +189,14 @@ jobs:
           find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%f\n' | sort \
             | xargs -r sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
+      - name: Staged rollout policy
+        # Not in SHA256SUMS on purpose: maintainers re-upload it to halt or
+        # widen the rollout (scripts/rollout.mjs). It only decides *when*
+        # computers update; what they run is still checked against SHA256SUMS.
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          AIRBRIDGE_ROLLOUT_STAGES: ${{ vars.AIRBRIDGE_ROLLOUT_STAGES }}
+        run: node scripts/rollout.mjs init "$TAG" --out dist-bin/rollout.json
       - name: Attest build provenance (Sigstore)
         uses: actions/attest-build-provenance@v2
         with:

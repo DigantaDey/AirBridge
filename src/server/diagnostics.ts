@@ -104,6 +104,8 @@ export interface DiagnosticsInput {
   connectedDevices: unknown[];
   shellSubscribers: number;
   update: unknown;
+  /** Recent crash summaries (titles are already scrubbed). */
+  crashes?: unknown[];
 }
 
 export function buildDiagnostics(input: DiagnosticsInput): Record<string, unknown> {
@@ -142,6 +144,7 @@ export function buildDiagnostics(input: DiagnosticsInput): Record<string, unknow
     devices: input.connectedDevices,
     shell: { subscribers: input.shellSubscribers },
     update: input.update,
+    crashes: input.crashes ?? [],
     eventLoop: eventLoopStats(),
     logs: recentLogs(200),
   };

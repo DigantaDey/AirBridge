@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Updater, assetNameFor, compareVersions, parseChecksums, resolvePendingUpdate } from '../src/server/updater.js';
+import { decideRollout, loadOrCreateInstallId, parseRolloutPolicy, readBadVersions, rolloutBucket } from '../src/server/rollout.js';
 
 let dir: string;
 let server: http.Server;
@@ -250,5 +251,108 @@ describe('appBundleForExecutable', () => {
     expect(appBundleForExecutable(link, {})).toBe(fs.realpathSync(bundle));
     expect(appBundleForExecutable('/usr/local/bin/AirBridge', {})).toBeNull();
     expect(appBundleForExecutable('/x', { AIRBRIDGE_APP_BUNDLE: '/Applications/AirBridge.app' })).toBe('/Applications/AirBridge.app');
+  });
+});
+
+describe('staged rollout', () => {
+  const HOUR = 3_600_000;
+  const published = Date.parse('2026-11-20T10:00:00Z');
+  const policy = (extra: Record<string, unknown> = {}) => JSON.stringify({
+    version: '0.0.6',
+    publishedAt: new Date(published).toISOString(),
+    stages: [{ afterHours: 0, percent: 10 }, { afterHours: 24, percent: 50 }, { afterHours: 72, percent: 100 }],
+    ...extra,
+  });
+  /** An install id whose bucket for 0.0.6 falls in [lo, hi) percent. */
+  const idInBucket = (lo: number, hi: number) => {
+    for (let i = 0; ; i++) {
+      const id = i.toString(16).padStart(32, '0');
+      const b = rolloutBucket(id, '0.0.6') / 100;
+      if (b >= lo && b < hi) return id;
+    }
+  };
+
+  it('buckets are stable per install, independent across versions, and uniform', () => {
+    const id = 'a'.repeat(32);
+    expect(rolloutBucket(id, '0.0.6')).toBe(rolloutBucket(id, 'v0.0.6'));
+    const counts = new Array(10).fill(0);
+    let differs = 0;
+    for (let i = 0; i < 5000; i++) {
+      const x = crypto.randomBytes(16).toString('hex');
+      counts[Math.floor(rolloutBucket(x, '0.0.6') / 1000)]++;
+      if (Math.floor(rolloutBucket(x, '0.0.6') / 1000) !== Math.floor(rolloutBucket(x, '0.0.7') / 1000)) differs++;
+    }
+    for (const c of counts) expect(c).toBeGreaterThan(380); // 500 expected per decile
+    expect(differs).toBeGreaterThan(4000); // early adopters rotate between releases
+  });
+
+  it('ramps by schedule, honours halts and required versions, and rejects junk policies', () => {
+    const p = parseRolloutPolicy(JSON.parse(policy()), '0.0.6')!;
+    const early = idInBucket(0, 10);
+    const middle = idInBucket(20, 40);
+    expect(decideRollout(p, early, '0.0.5', published + HOUR)).toMatchObject({ eligible: true, percent: 10 });
+    const waiting = decideRollout(p, middle, '0.0.5', published + HOUR);
+    expect(waiting).toMatchObject({ eligible: false, percent: 10, eligibleAt: new Date(published + 24 * HOUR).toISOString() });
+    expect(decideRollout(p, middle, '0.0.5', published + 25 * HOUR).eligible).toBe(true);
+    expect(decideRollout(p, idInBucket(99, 100), '0.0.5', published + 73 * HOUR).eligible).toBe(true);
+
+    const halted = parseRolloutPolicy(JSON.parse(policy({ halted: true })), '0.0.6')!;
+    expect(decideRollout(halted, early, '0.0.5', published + 100 * HOUR)).toMatchObject({ eligible: false, halted: true });
+
+    const required = parseRolloutPolicy(JSON.parse(policy({ minimumVersion: '0.0.5' })), '0.0.6')!;
+    expect(decideRollout(required, idInBucket(99, 100), '0.0.4', published)).toMatchObject({ eligible: true, forced: true });
+    expect(decideRollout(required, idInBucket(99, 100), '0.0.5', published).eligible).toBe(false);
+
+    expect(decideRollout(null, middle, '0.0.5').eligible).toBe(true); // older releases: everyone
+    expect(parseRolloutPolicy(JSON.parse(policy()), '0.0.7')).toBeNull(); // policy for another version
+    expect(parseRolloutPolicy({ version: '0.0.6', publishedAt: 'soon', stages: [] }, '0.0.6')).toBeNull();
+    expect(parseRolloutPolicy({ version: '0.0.6', publishedAt: '2026-01-01T00:00:00Z', stages: [{ afterHours: 0, percent: 400 }] }, '0.0.6')).toBeNull();
+  });
+
+  it('background checks wait for the rollout; a manual check or Install does not', async () => {
+    const exe = installedBinary('0.0.5');
+    release('0.0.6', { 'AirBridge-linux-x64': fakeBinary('0.0.6'), 'rollout.json': policy() });
+    const u = makeUpdater(exe, { installId: idInBucket(60, 70), now: () => published + 2 * HOUR });
+    const auto = await u.checkAndStage();
+    expect(auto).toMatchObject({ available: true, state: 'deferred' });
+    expect(auto.rollout).toMatchObject({ eligible: false, percent: 10, halted: false });
+    expect(fs.existsSync(path.join(dir, 'state', 'updates', '0.0.6'))).toBe(false); // nothing downloaded
+
+    const manual = await u.checkAndStage({ manual: true });
+    expect(manual.state).toBe('ready');
+  });
+
+  it('an install in the current stage updates in the background', async () => {
+    const exe = installedBinary('0.0.5');
+    release('0.0.6', { 'AirBridge-linux-x64': fakeBinary('0.0.6'), 'rollout.json': policy() });
+    const u = makeUpdater(exe, { installId: idInBucket(0, 10), now: () => published + HOUR });
+    expect((await u.checkAndStage()).state).toBe('ready');
+  });
+
+  it('a version that was rolled back on this computer is not retried automatically', async () => {
+    const state = path.join(dir, 'state');
+    fs.mkdirSync(state, { recursive: true });
+    const exe = installedBinary('0.0.6');
+    fs.writeFileSync(`${exe}.previous`, fakeBinary('0.0.5'));
+    fs.writeFileSync(path.join(state, 'update-pending.json'), JSON.stringify({ from: '0.0.5', to: '0.0.6', target: exe, previous: `${exe}.previous`, appBundle: false, attempts: 3 }));
+    expect(resolvePendingUpdate(state, '0.0.6', () => {})).toBe('rolled-back');
+    expect(readBadVersions(state)).toEqual(['0.0.6']);
+
+    release('0.0.6', { 'AirBridge-linux-x64': fakeBinary('0.0.6') });
+    const u = makeUpdater(exe);
+    const status = await u.checkAndStage();
+    expect(status.state).toBe('deferred');
+    expect(status.rollout?.reason).toMatch(/rolled back/);
+
+    release('0.0.7', { 'AirBridge-linux-x64': fakeBinary('0.0.7') });
+    expect((await u.checkAndStage()).state).toBe('ready'); // a newer fix is fine
+  });
+
+  it('the install id is random, private and persistent', () => {
+    const state = path.join(dir, 'state-id');
+    const a = loadOrCreateInstallId(state);
+    expect(a).toMatch(/^[0-9a-f]{32}$/);
+    expect(loadOrCreateInstallId(state)).toBe(a);
+    expect(fs.statSync(path.join(state, 'install-id')).mode & 0o077).toBe(0);
   });
 });

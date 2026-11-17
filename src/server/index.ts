@@ -41,6 +41,7 @@ import { REVERSE_CONNECT_PORT, isValidPairCode, normalizePairCode, type HostFire
 import { firewallKey, readMacFirewall } from './macFirewall.js';
 import { addShellSubscriber, shellSubscriberCount } from './shellEvents.js';
 import { buildDiagnostics } from './diagnostics.js';
+import { sendCrashReport, type CrashStore, type Dsn } from './crashReports.js';
 import type { Updater } from './updater.js';
 import {
   ReverseConnector,
@@ -102,6 +103,10 @@ export interface AirBridgeServerOptions {
   version?: string;
   /** Self-updater (packaged desktop builds only); enables /api/update. */
   updater?: Updater | null;
+  /** Local crash reports (see crashReports.ts); reviewed and sent from the UI. */
+  crashStore?: CrashStore | null;
+  /** Sentry-compatible endpoint for crash reports; null = prefilled GitHub issue. */
+  crashDsn?: Dsn | null;
   /**
    * How often to re-read network interfaces (ms). When the computer joins a
    * hotspot or gets a new DHCP lease, the TLS leaf is re-issued to cover the
@@ -566,6 +571,7 @@ export async function createAirBridgeServer(
       connectedDevices: hub.describeClients(),
       shellSubscribers: shellSubscriberCount(),
       update: options.updater ? options.updater.getStatus() : { supported: false },
+      crashes: options.crashStore ? options.crashStore.list().slice(0, 10) : [],
     }));
   });
 
@@ -577,14 +583,48 @@ export async function createAirBridgeServer(
   });
   app.post('/api/update/check', asyncRoute(async (req, res) => {
     if (!localOnly(req, res)) return;
+    // Web pages open on this computer must not trigger it (CSRF).
+    if (!isSameOriginRequest(req)) { res.status(403).json({ error: 'Cross-origin request refused' }); return; }
     if (!updater) { res.status(404).json({ supported: false }); return; }
-    res.json(await updater.checkAndStage());
+    // A user-initiated check: offered even before the staged rollout reaches this computer.
+    res.json(await updater.checkAndStage({ manual: true }));
   }));
   app.post('/api/update/install', asyncRoute(async (req, res) => {
     if (!localOnly(req, res)) return;
+    // Web pages open on this computer must not trigger it (CSRF).
+    if (!isSameOriginRequest(req)) { res.status(403).json({ error: 'Cross-origin request refused' }); return; }
     if (!updater) { res.status(404).json({ supported: false }); return; }
     res.json(await updater.install());
   }));
+
+  // Crash reports: listed and previewed in full, sent only on request.
+  const crashStore = options.crashStore ?? null;
+  app.get('/api/crashes', (req, res) => {
+    if (!localOnly(req, res)) return;
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ supported: Boolean(crashStore), sendVia: options.crashDsn ? 'sentry' : 'github', reports: crashStore?.list() ?? [] });
+  });
+  app.get('/api/crashes/:id', (req, res) => {
+    if (!localOnly(req, res)) return;
+    const report = crashStore?.get(req.params.id);
+    if (!report) { res.status(404).json({ error: 'No such report' }); return; }
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(report);
+  });
+  app.post('/api/crashes/:id/send', asyncRoute(async (req, res) => {
+    if (!localOnly(req, res)) return;
+    if (!isSameOriginRequest(req)) { res.status(403).json({ error: 'Cross-origin request refused' }); return; }
+    const report = crashStore?.get(req.params.id);
+    if (!report || !crashStore) { res.status(404).json({ error: 'No such report' }); return; }
+    const result = await sendCrashReport(report, { dsn: options.crashDsn ?? null });
+    crashStore.markSent(report.id, { at: new Date().toISOString(), via: result.via, ref: result.via === 'sentry' ? result.eventId : 'github-issue' });
+    res.json(result);
+  }));
+  app.delete('/api/crashes/:id', (req, res) => {
+    if (!localOnly(req, res)) return;
+    if (!isSameOriginRequest(req)) { res.status(403).json({ error: 'Cross-origin request refused' }); return; }
+    res.json({ deleted: crashStore?.delete(req.params.id) ?? false });
+  });
 
   // Reject remote callers before any raw body parser can allocate a large
   // buffer, not after an unauthorized upload has already occupied memory.

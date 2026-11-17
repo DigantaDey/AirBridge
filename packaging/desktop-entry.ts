@@ -26,7 +26,8 @@ import {
   type AirBridgeServerOptions,
 } from '../src/server/index.ts';
 import { createCliBeamSession } from '../src/server/cliSendSession.ts';
-import { installLogCapture, startEventLoopMonitor } from '../src/server/diagnostics.ts';
+import { installLogCapture, recentLogs, startEventLoopMonitor } from '../src/server/diagnostics.ts';
+import { CrashStore, beginRun, buildCrashReport, endRunCleanly, loadCrashDsn } from '../src/server/crashReports.ts';
 import { Updater, appBundleForExecutable, confirmUpdateHealthy, isScriptRuntime, resolvePendingUpdate } from '../src/server/updater.ts';
 import { emitShellEvent } from '../src/server/shellEvents.ts';
 import { DEFAULT_RELAY_PORT, RELAY_ENDPOINT_FILE, parseRelayEndpoint, startRelayServer } from '../src/server/relay.ts';
@@ -401,9 +402,17 @@ async function main(): Promise<void> {
   }
 
   // Default: daemon / app mode
-  installDaemonSafetyNets();
   const stateDir = path.join(os.homedir(), '.airbridge');
   fs.mkdirSync(stateDir, { recursive: true });
+  const crashStore = new CrashStore(path.join(stateDir, 'crashes'));
+  installDaemonSafetyNets(crashStore);
+  // A previous run that never shut down cleanly (native crash, out of
+  // memory, killed by the watchdog) becomes a local crash report.
+  const previousCrash = beginRun(stateDir, crashStore, VERSION);
+  if (previousCrash) console.warn(`[airbridge] the previous run ended unexpectedly; a crash report is ready to review (${previousCrash.id})`);
+  process.on('exit', (code) => {
+    if (code === 0 || code === RESTART_EXIT_STATUS) endRunCleanly(stateDir);
+  });
   // A just-installed update that keeps failing to come up is rolled back here.
   const pending = resolvePendingUpdate(stateDir, VERSION);
   if (pending === 'rolled-back') {
@@ -433,6 +442,8 @@ async function main(): Promise<void> {
     mode: 'production',
     version: VERSION,
     updater,
+    crashStore,
+    crashDsn: loadCrashDsn(stateDir),
     clientAssets: clientAssets as Record<string, string>,
     ...tlsOptions,
     daemonConfig: {
@@ -499,6 +510,19 @@ async function main(): Promise<void> {
     });
   };
   updater?.start();
+
+  // Quitting (Ctrl+C, the macOS app, launchctl/systemctl stop) is a clean
+  // shutdown, not a crash. A hung process cannot run this and is SIGKILLed
+  // by its supervisor, so that case is still reported at the next start.
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    endRunCleanly(stateDir);
+    setTimeout(() => process.exit(0), 3_000).unref();
+    void server.close().catch(() => {}).finally(() => process.exit(0));
+  };
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.once(signal, shutdown);
 }
 
 /**
@@ -510,16 +534,28 @@ async function main(): Promise<void> {
  *  - event-loop stalls are logged, so anything that blocks /api/health is
  *    visible in ~/.airbridge/server.log instead of a silent restart.
  */
-function installDaemonSafetyNets(): void {
+function installDaemonSafetyNets(crashStore: CrashStore): void {
   const recent: number[] = [];
-  const onFatal = (kind: string) => (err: unknown) => {
+  const startedAt = Date.now();
+  const onFatal = (kind: 'uncaught exception' | 'unhandled rejection') => (err: unknown) => {
     const now = Date.now();
     recent.push(now);
     while (recent.length && now - recent[0]! > 60_000) recent.shift();
     const detail = err instanceof Error ? err.stack || err.message : String(err);
     console.error(`[airbridge] ${new Date().toISOString()} ${kind}: ${detail}`);
+    try {
+      crashStore.recordSync(buildCrashReport(err, kind === 'uncaught exception' ? 'uncaught-exception' : 'unhandled-rejection', {
+        version: VERSION,
+        startedAt,
+        logTail: recentLogs(80).map((l) => `${l.t} ${l.level} ${l.msg}`),
+      }));
+    } catch {
+      // Reporting must never make a crash worse.
+    }
     if (recent.length > 20) {
       console.error('[airbridge] too many unexpected errors in one minute; exiting for a clean restart');
+      // Already reported above; do not add an "ended unexpectedly" report too.
+      endRunCleanly(path.join(os.homedir(), '.airbridge'));
       process.exit(70);
     }
   };

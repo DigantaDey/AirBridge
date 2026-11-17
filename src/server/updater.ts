@@ -20,8 +20,19 @@ import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import {
+  decideRollout,
+  loadOrCreateInstallId,
+  markVersionBad,
+  parseRolloutPolicy,
+  readBadVersions,
+  type RolloutDecision,
+  type RolloutPolicy,
+} from './rollout.js';
 
-export type UpdateState = 'idle' | 'checking' | 'downloading' | 'ready' | 'installing' | 'installed' | 'error' | 'up-to-date';
+export type UpdateState = 'idle' | 'checking' | 'downloading' | 'ready' | 'installing' | 'installed' | 'error' | 'up-to-date'
+  /** A newer version exists but the staged rollout has not reached this computer yet (Install still works). */
+  | 'deferred';
 
 export interface UpdateStatus {
   supported: boolean;
@@ -36,6 +47,8 @@ export interface UpdateStatus {
   notes: string | null;
   asset: string | null;
   autoCheck: boolean;
+  /** Staged-rollout decision for `latest` (null until checked). */
+  rollout: RolloutDecision | null;
 }
 
 export interface ReleaseInfo {
@@ -65,10 +78,14 @@ export interface UpdaterOptions {
   runVersion?: (binary: string) => Promise<string | null>;
   extractZip?: (zip: string, destDir: string) => Promise<void>;
   verifyBundle?: (bundle: string) => Promise<boolean>;
+  /** Rollout bucketing id (default: ~/.airbridge/install-id, never sent anywhere). */
+  installId?: string;
+  now?: () => number;
   /** Called after a successful install; should restart the service. */
   onInstalled?: (info: { version: string; appBundle: boolean }) => void;
   log?: (msg: string) => void;
 }
+
 
 const GITHUB_HOSTS = [
   'api.github.com',
@@ -176,7 +193,7 @@ function moveSync(from: string, to: string): void {
 }
 
 export class Updater {
-  private readonly o: Required<Omit<UpdaterOptions, 'appBundlePath' | 'onInstalled' | 'log' | 'fetchImpl'>> & UpdaterOptions;
+  private readonly o: Required<Omit<UpdaterOptions, 'appBundlePath' | 'onInstalled' | 'log' | 'fetchImpl' | 'installId' | 'now'>> & UpdaterOptions;
   private status: UpdateStatus;
   private release: ReleaseInfo | null = null;
   private staged: { version: string; path: string } | null = null;
@@ -218,7 +235,29 @@ export class Updater {
       notes: null,
       asset,
       autoCheck: this.o.autoCheck,
+      rollout: null,
     };
+  }
+
+  private get installId(): string {
+    return (this.cachedInstallId ??= this.o.installId ?? loadOrCreateInstallId(this.o.stateDir));
+  }
+  private cachedInstallId: string | null = null;
+
+  /** Fetches and validates the release's rollout.json; null when absent or unusable. */
+  private async fetchRolloutPolicy(release: ReleaseInfo): Promise<RolloutPolicy | null> {
+    const asset = release.assets.find((a) => a.name === 'rollout.json');
+    if (!asset) return null;
+    try {
+      const res = await this.fetchChecked(asset.url);
+      if (!res.ok) return null;
+      const text = await res.text();
+      if (text.length > 16_384) return null;
+      return parseRolloutPolicy(JSON.parse(text), release.version);
+    } catch {
+      // Unreadable policy: behave like a release without one.
+      return null;
+    }
   }
 
   private log(msg: string): void {
@@ -298,8 +337,20 @@ export class Updater {
       this.status.notes = this.release.notes || null;
       this.status.available = compareVersions(this.release.version, this.o.currentVersion) > 0;
       this.status.lastChecked = new Date().toISOString();
+      this.status.rollout = null;
+      if (this.status.available) {
+        const policy = await this.fetchRolloutPolicy(this.release);
+        const decision = decideRollout(policy, this.installId, this.o.currentVersion, (this.o.now ?? Date.now)());
+        if (readBadVersions(this.o.stateDir).includes(this.release.version) && !decision.forced) {
+          decision.eligible = false;
+          decision.eligibleAt = null;
+          decision.reason = `${this.release.version} failed to start on this computer and was rolled back; waiting for a newer release`;
+        }
+        this.status.rollout = decision;
+      }
       if (!this.status.available) this.status.state = 'up-to-date';
-      else this.status.state = this.staged?.version === this.release.version ? 'ready' : 'idle';
+      else if (this.staged?.version === this.release.version) this.status.state = 'ready';
+      else this.status.state = this.status.rollout?.eligible === false ? 'deferred' : 'idle';
     } catch (err) {
       this.status.state = 'error';
       this.status.error = (err as Error).message;
@@ -307,12 +358,17 @@ export class Updater {
     return this.getStatus();
   }
 
-  /** Check, then download + verify (stage) a newer release. Never installs. */
-  async checkAndStage(): Promise<UpdateStatus> {
+  /**
+   * Check, then download + verify (stage) a newer release. Never installs.
+   * Background checks respect the staged rollout; `manual` (the user asked)
+   * skips it, like "Check for updates" in a browser.
+   */
+  async checkAndStage(opts: { manual?: boolean } = {}): Promise<UpdateStatus> {
     if (this.busy) { await this.busy.catch(() => {}); return this.getStatus(); }
     const job = (async () => {
       await this.check();
-      if (this.status.available && this.status.state !== 'ready' && this.status.state !== 'error') await this.stage();
+      const waiting = this.status.state === 'deferred' && !opts.manual;
+      if (this.status.available && !waiting && this.status.state !== 'ready' && this.status.state !== 'error') await this.stage();
       return this.getStatus();
     })();
     this.busy = job;
@@ -404,7 +460,7 @@ export class Updater {
 
   /** Swap the staged build in and restart. Stages first if needed. */
   async install(): Promise<UpdateStatus> {
-    if (!this.staged) await this.checkAndStage();
+    if (!this.staged) await this.checkAndStage({ manual: true });
     const staged = this.staged;
     if (!staged) return this.getStatus();
     this.status.state = 'installing';
@@ -497,6 +553,7 @@ export function resolvePendingUpdate(stateDir: string, currentVersion: string, l
     moveSync(pending.target, failed);
     moveSync(pending.previous, pending.target);
     log(`[airbridge] update: ${pending.to} did not start correctly; rolled back to ${pending.from}`);
+    markVersionBad(stateDir, pending.to);
   } catch (err) {
     log(`[airbridge] update: rollback failed: ${(err as Error).message}`);
   }
