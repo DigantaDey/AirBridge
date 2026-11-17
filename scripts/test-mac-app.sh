@@ -26,8 +26,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fail() { echo "FAIL: $*"; echo "--- server.log"; tail -n 60 "$HOME/.airbridge/server.log" 2>/dev/null || true; exit 1; }
-ok() { echo "  ok: $*"; }
+fail() { echo "FAIL: $*"; [ -n "${GITHUB_ACTIONS:-}" ] && echo "::error title=mac-app supervisor::$*"; echo "--- server.log"; tail -n 60 "$HOME/.airbridge/server.log" 2>/dev/null || true; exit 1; }
+ok() { echo "  ok: $*"; [ -n "${GITHUB_ACTIONS:-}" ] && echo "::notice title=mac-app supervisor::$*" || true; }
 
 health() { curl --noproxy '*' -fsS --max-time 2 "http://localhost:$PORT/api/health" 2>/dev/null || true; }
 field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const v=j[process.argv[1]];process.stdout.write(v===undefined?"":String(v))}catch{}})' "$1"; }
