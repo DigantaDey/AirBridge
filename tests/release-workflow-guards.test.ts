@@ -21,6 +21,8 @@ describe("Release workflow guards", () => {
     // Both Android jobs (APK + AAB) need full history for a real count.
     const fetchDepthZero = release.match(/fetch-depth: 0/g) ?? [];
     expect(fetchDepthZero.length).toBeGreaterThanOrEqual(2);
+    const ci = fs.readFileSync(".github/workflows/ci.yml", "utf8");
+    expect(ci.slice(ci.indexOf("  android:"))).toMatch(/uses: actions\/checkout@v4\s+with:\s+fetch-depth: 0/);
   });
 
   it("refuses to mint a version code from a shallow clone", () => {
