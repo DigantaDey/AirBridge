@@ -21,7 +21,7 @@ export const COMPARE = {
     {
       id: 'how-to-read',
       h2: 'How to read this comparison',
-      html: `        <p>Features and licences in this space change often, so treat the table as a starting point and confirm details with each project’s own documentation. AirBridge rows describe the current release (v${'2.5.0'}) and come from this repository; competitor rows describe the general shape of each product, not a specific version.</p>
+      html: `        <p>Features and licences in this space change often, so treat the table as a starting point and confirm details with each project’s own documentation. AirBridge rows describe the current release (v${SITE.version}) and come from this repository; competitor rows describe the general shape of each product, not a specific version.</p>
         <p>None of these tools is invulnerable, and none is a substitute for device security. AirBridge makes no claim to be audited by a third party; it publishes its own threat model in <a href="${SITE.repoUrl}/blob/main/SECURITY.md">SECURITY.md</a>.</p>`,
     },
     {

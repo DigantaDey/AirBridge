@@ -32,7 +32,7 @@
   {"@context":"https://schema.org","@type":"WebSite","name":"AirBridge","url":"https://airbridge.fyi/","description":"Open-source, end-to-end encrypted Android ↔ Mac, Windows and Linux file transfer, clipboard sync, screen sharing and phone connectivity.","inLanguage":"en","publisher":{"@type":"Person","name":"Diganta Dey","url":"https://github.com/DigantaDey"}}
   </script>
   <script type="application/ld+json">
-  {"@context":"https://schema.org","@type":"SoftwareApplication","name":"AirBridge","applicationCategory":"UtilitiesApplication","operatingSystem":"Android, macOS, Windows, Linux","description":"Private encrypted file transfer, bidirectional photo and text clipboard sync, persistent contacts, optional two-way call audio bridge, and consent-based H.264 visual screen sharing between Android and computers.","url":"https://airbridge.fyi/","downloadUrl":"https://github.com/DigantaDey/AirBridge/releases/latest","softwareVersion":"2.5.0","author":{"@type":"Person","name":"Diganta Dey","url":"https://github.com/DigantaDey"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"sameAs":["https://github.com/DigantaDey/AirBridge"]}
+  {"@context":"https://schema.org","@type":"SoftwareApplication","name":"AirBridge","applicationCategory":"UtilitiesApplication","operatingSystem":"Android, macOS, Windows, Linux","description":"Private encrypted file transfer, bidirectional photo and text clipboard sync, persistent contacts, optional two-way call audio bridge, and consent-based H.264 visual screen sharing between Android and computers.","url":"https://airbridge.fyi/","downloadUrl":"https://github.com/DigantaDey/AirBridge/releases/latest","softwareVersion":"2.5.1","author":{"@type":"Person","name":"Diganta Dey","url":"https://github.com/DigantaDey"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"sameAs":["https://github.com/DigantaDey/AirBridge"]}
   </script>
   <script type="application/ld+json">
   {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Can AirBridge stream smooth video during Android screen sharing?","acceptedAnswer":{"@type":"Answer","text":"Yes. Android encodes the approved display with hardware MediaCodec H.264 and SPS/PPS codec headers, while macOS/desktop decodes frames with WebCodecs (avcC), PLI keyframe recovery, and requestAnimationFrame pacing. AirBridge is consent-based visual sharing — optional per-session playback audio is off by default, and DRM-protected video remains blank by design."}},{"@type":"Question","name":"Can I answer calls and speak/hear through my MacBook like Apple Continuity?","acceptedAnswer":{"@type":"Answer","text":"Yes. AirBridge saves your synced contacts locally while your paired device stays connected, lets you place or answer calls from your MacBook, and includes an optional speakerphone-assisted two-way encrypted call audio bridge between Android and MacBook when you enable microphone access on both devices."}},{"@type":"Question","name":"Does photo and text clipboard sync work from MacBook to Android?","acceptedAnswer":{"@type":"Answer","text":"Yes. On macOS, native NSPasteboard capture reads copied photos cleanly and syncs images and text over E2EE without corrupted binary noise or echo loops."}},{"@type":"Question","name":"Does AirBridge need Accessibility access?","acceptedAnswer":{"@type":"Answer","text":"No. AirBridge does not use Android Accessibility services or notification-listener access. Use Android Share, Process Text, the Quick Settings tile, or the in-app Paste action for reliable clipboard sends."}}]}
@@ -56,7 +56,7 @@
   <nav class="nav wrap" aria-label="Main navigation">
     <div class="brand-group">
       <a class="brand" href="#top" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a>
-      <span class="version-pill">v2.5.0</span>
+      <span class="version-pill">v2.5.1</span>
     </div>
     <div class="nav-links">
       <a href="#features">Capabilities</a>
@@ -80,7 +80,7 @@
       <p class="hero-description">The open-source AirDrop alternative for Android and computers. Move multi-gigabyte files, copy photos &amp; text across clipboards, answer phone calls on your MacBook with two-way audio, keep contacts synced while connected, and mirror your screen cleanly at 30fps H.264 — all end-to-end encrypted without a cloud account.</p>
       <div class="hero-actions">
         <a class="button button-dark" href="#setup">Install AirBridge <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
-        <a class="button button-secondary" href="https://github.com/DigantaDey/AirBridge/releases/latest">Releases v2.5.0 <span aria-hidden="true">↗</span></a>
+        <a class="button button-secondary" href="https://github.com/DigantaDey/AirBridge/releases/latest">Releases v2.5.1 <span aria-hidden="true">↗</span></a>
       </div>
       <div class="pill-row">
         <span class="trust-pill"><svg class="icon" aria-hidden="true"><use href="#lock"/></svg> SPAKE2 + AES-256-GCM</span>
@@ -144,7 +144,7 @@
 
   <div class="marquee" aria-hidden="true">
     <div class="wrap marquee-inner">
-      <span>CAPABILITIES IN v2.5.0</span>
+      <span>CAPABILITIES IN v2.5.1</span>
       <div class="marquee-items">
         <span>H.264 VIDEO SCREEN SHARE</span><b>/</b>
         <span>PHOTO + TEXT CLIPBOARD</span><b>/</b>
@@ -279,7 +279,7 @@
         <p class="section-label"><span>SCREENS</span> THE REAL APP</p>
         <h2>Actual AirBridge,<br><em>mid-transfer.</em></h2>
       </div>
-      <p>These are screenshots of the v2.5.0 build you download — no mockups and no invented features.</p>
+      <p>These are real screenshots of AirBridge on a Mac and an Android phone — no mockups and no invented features.</p>
     </div>
 
     <div class="shot-grid">
@@ -316,7 +316,7 @@
         <thead>
           <tr>
             <th>Capability</th>
-            <th class="airbridge-col">AirBridge v2.5.0</th>
+            <th class="airbridge-col">AirBridge v2.5.1</th>
             <th>Apple AirDrop / Continuity</th>
             <th>LocalSend</th>
             <th>KDE Connect</th>
@@ -437,7 +437,7 @@
         <h2>Up and running<br>in <em>two minutes.</em></h2>
         <p>Install the companion on macOS, Windows, or Linux, then pair the Android app by scanning the QR code or entering the 6-character code. Building from source requires Node.js 20+, npm, and Git.</p>
         <div class="setup-actions">
-          <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.0 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+          <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.1 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
           <a class="button button-secondary" href="privacy.html">Privacy policy</a>
         </div>
         <a class="underlined-link" href="download.html">All platform downloads &amp; checksums <span aria-hidden="true">↗</span></a><br>
@@ -497,11 +497,11 @@ cd AirBridge &amp;&amp; npm ci &amp;&amp; npm run dev</code></pre>
       </details>
       <details>
         <summary>Will copying a photo on MacBook send gibberish text to Android?<span aria-hidden="true">＋</span></summary>
-        <p>No — in v2.5.0 macOS inspects native <code>NSPasteboard</code> image types first instead of piping raw binary pasteboard data through text capture. Copied PNG/TIFF/JPEG images arrive as crisp clipboard images on Android with SHA-256 echo suppression.</p>
+        <p>No — since v2.5.0 macOS inspects native <code>NSPasteboard</code> image types first instead of piping raw binary pasteboard data through text capture. Copied PNG/TIFF/JPEG images arrive as crisp clipboard images on Android with SHA-256 echo suppression.</p>
       </details>
       <details>
         <summary>Why don’t long file transfers drop mid-stream or near completion anymore?<span aria-hidden="true">＋</span></summary>
-        <p>v2.5.0 upgrades the server relay to 3-strike heartbeats that count active TCP <code>bytesWritten</code> progress, throttles saturated sockets before reaching the 64 MiB safety cap, disables short HTTP request timeouts on chunk uploads, retries transient loopback writes, keeps resume identity matched across ephemeral session key refreshes, and re-sends final completion ACKs automatically.</p>
+        <p>Since v2.5.0, the server relay uses 3-strike heartbeats that count active TCP <code>bytesWritten</code> progress, throttles saturated sockets before reaching the 64 MiB safety cap, disables short HTTP request timeouts on chunk uploads, retries transient loopback writes, keeps resume identity matched across ephemeral session key refreshes, and re-sends final completion ACKs automatically.</p>
       </details>
       <details>
         <summary>Can I cast Netflix, Hotstar, or DRM-protected streams?<span aria-hidden="true">＋</span></summary>
@@ -535,7 +535,7 @@ cd AirBridge &amp;&amp; npm ci &amp;&amp; npm run dev</code></pre>
         </div>
       </div>
       <div class="contact-meta-card">
-        <strong>AirBridge v2.5.0 · Local-First Continuity</strong>
+        <strong>AirBridge v2.5.1 · Local-First Continuity</strong>
         <p>MIT/Apache-style open source repository at <code>DigantaDey/AirBridge</code>. Commercial/enterprise use requires prior written consent per <code>LICENSE</code> and <code>README.md</code>.</p>
       </div>
     </div>
@@ -557,7 +557,7 @@ cd AirBridge &amp;&amp; npm ci &amp;&amp; npm run dev</code></pre>
     </div>
   </div>
   <div class="footer-bottom">
-    <span>AIRBRIDGE v2.5.0 · END-TO-END ENCRYPTED</span>
+    <span>AIRBRIDGE v2.5.1 · END-TO-END ENCRYPTED</span>
     <span>ANDROID ↔ MACOS · WINDOWS · LINUX</span>
     <a href="#top">BACK TO TOP ↑</a>
   </div>

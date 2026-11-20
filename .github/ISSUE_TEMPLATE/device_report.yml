@@ -26,7 +26,7 @@ body:
     id: desktop
     attributes:
       label: Desktop OS and AirBridge version
-      placeholder: "macOS 15.2, AirBridge 2.5.0"
+      placeholder: "macOS 15.2, AirBridge 2.5.1"
     validations:
       required: true
   - type: textarea

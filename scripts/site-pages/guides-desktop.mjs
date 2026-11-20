@@ -26,7 +26,7 @@ export const MAC = {
   imageAlt:
     'AirBridge for macOS sending a 1.68 GB video file to a paired Android phone, showing upload speed, remaining time and SHA-256 verification in the footer',
   imageCaption:
-    'AirBridge v2.5.0 on macOS mid-transfer: a 1.68 GB video to a paired Android phone, with live speed and remaining time.',
+    'AirBridge on macOS mid-transfer: a 1.68 GB video to a paired Android phone, with live speed and remaining time.',
   sections: [
     {
       id: 'problem',

@@ -32,7 +32,7 @@ body:
     attributes:
       label: AirBridge version
       description: Shown in the app's top bar, the macOS menu, About AirBridge, or `airbridge --version`.
-      placeholder: "2.5.0"
+      placeholder: "2.5.1"
     validations:
       required: true
   - type: dropdown

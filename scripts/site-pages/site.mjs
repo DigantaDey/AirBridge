@@ -1,5 +1,10 @@
 /** Shared site constants for the generated airbridge.fyi pages. */
+import { readFileSync } from 'node:fs';
+
+const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+
 export const SITE = {
+  version: pkg.version,
   baseUrl: 'https://airbridge.fyi',
   repoUrl: 'https://github.com/DigantaDey/AirBridge',
   releasesUrl: 'https://github.com/DigantaDey/AirBridge/releases/latest',

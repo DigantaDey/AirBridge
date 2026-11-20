@@ -24,7 +24,7 @@ e2ee  privacy  open-source  airdrop-alternative  cross-platform  kotlin  typescr
 
 Upload `.github/social-preview.png` (1200 × 630) under
 **Settings → Social preview**. It is the same image the website uses for Open
-Graph and Twitter/X cards, and it is built from a real screenshot of v2.5.0.
+Graph and Twitter/X cards, and it is built from a real screenshot of the app.
 
 ## Commands (require repository admin rights)
 

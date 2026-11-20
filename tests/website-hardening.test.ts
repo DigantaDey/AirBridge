@@ -77,12 +77,12 @@ describe("Website Revamp, Horizontal Overflow Prevention & Hardening", () => {
     expect(styles).not.toContain(".nav-links{display:none}");
   });
 
-  it("showcases all AirBridge v2.5.0 capabilities, comparison table, honest platform disclosures, and creator About section", () => {
+  it("showcases all AirBridge v2.5.1 capabilities, comparison table, honest platform disclosures, and creator About section", () => {
     expect(indexHtml).toContain('<a class="skip-link" href="#main">');
     expect(indexHtml).toContain('<main id="main">');
     expect(indexHtml).toContain('class="hero-visual" role="img"');
-    expect(indexHtml).toContain('"softwareVersion":"2.5.0"');
-    expect(indexHtml).toContain("v2.5.0");
+    expect(indexHtml).toContain('"softwareVersion":"2.5.1"');
+    expect(indexHtml).toContain("v2.5.1");
     expect(indexHtml).toContain("MediaCodec");
     expect(indexHtml).toContain("avcC");
     expect(indexHtml).toContain("NSPasteboard");

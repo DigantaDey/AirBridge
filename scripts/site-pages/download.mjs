@@ -69,7 +69,7 @@ export const DOWNLOAD = {
       id: 'stable-vs-dev',
       h2: 'Stable releases vs development builds',
       html: `        <ul>
-          <li><strong>Stable:</strong> the latest <a href="${SITE.releasesUrl}">GitHub release</a> (tagged <code>v2.5.0</code> today). This is what the installers and the desktop self-updater use. Updates reach computers gradually — 10%, 50%, then 100% — and a bad release can be paused.</li>
+          <li><strong>Stable:</strong> the latest <a href="${SITE.releasesUrl}">GitHub release</a> (tagged <code>v${SITE.version}</code> today). This is what the installers and the desktop self-updater use. Updates reach computers gradually — 10%, 50%, then 100% — and a bad release can be paused.</li>
           <li><strong>Development:</strong> builds from <code>main</code> and CI workflow artefacts. Useful for testing a fix, not for a machine you rely on. Build one yourself with <code>npm ci &amp;&amp; npm run build:desktop</code>.</li>
           <li><strong>Android:</strong> the published APK is an installable testing/sideload build produced by the release workflow. The Play-ready App Bundle is a separate, signed upload path gated on a private key — see <a href="${SITE.repoUrl}/blob/main/docs/PLAY_STORE_RELEASE.md">docs/PLAY_STORE_RELEASE.md</a>. No unsigned substitute is ever published as a “release”.</li>
         </ul>`,
