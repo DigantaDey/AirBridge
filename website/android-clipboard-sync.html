@@ -50,7 +50,7 @@
   <nav class="nav wrap" aria-label="Main navigation">
     <div class="brand-group">
       <a class="brand" href="index.html" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a>
-      <span class="version-pill">v2.5.1</span>
+      <span class="version-pill">v2.5.2</span>
     </div>
     <div class="nav-links">
       <a href="index.html#features">Capabilities</a>
@@ -99,7 +99,7 @@
         </ul>
         <p>Every item is encrypted with the same AES-256-GCM session keys as file chunks. Nothing is routed through an AirBridge server, and clipboard content is not uploaded anywhere.</p>
 
-      <h2 id="limits">The Android limits AirBridge does not hide</h2>
+      <h2 id="limits">Android clipboard limits</h2>
         <ul>
           <li><strong>Automatic phone-side capture can be blocked by Android.</strong> If you copy text inside another app and AirBridge is in the background, the system may not let it read the clipboard. The reliable path is an explicit send: Share, Process text, the Quick Settings tile, or Paste in AirBridge. This is why AirBridge does not promise a seamless two-way mirror of every copy.</li>
           <li><strong>No Accessibility service, no notification listener.</strong> Those permissions would make background capture easier and are deliberately absent; the Play-safe permission surface is documented in <a href="https://github.com/DigantaDey/AirBridge/blob/main/docs/PLAY_STORE_RELEASE.md">docs/PLAY_STORE_RELEASE.md</a>.</li>
@@ -146,7 +146,7 @@
         <p>Official builds for macOS, Windows and Linux live on the GitHub releases page, next to the Android APK and the <code>SHA256SUMS.txt</code> checksums. Nothing needs an account.</p>
       </div>
       <div class="guide-cta-actions">
-        <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.1 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+        <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.2 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
         <a class="button button-secondary" href="download.html">All platforms</a>
       </div>
     </aside>

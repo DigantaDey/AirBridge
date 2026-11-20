@@ -41,10 +41,29 @@ android {
             }.standardOutput.asText.get().trim().toIntOrNull()
         }.getOrNull() ?: 0
 
+        // A shallow clone undercounts the commit history, which would mint a
+        // version code lower than any real build and trip
+        // INSTALL_FAILED_VERSION_DOWNGRADE on the next install. Fail loudly
+        // instead; CI checks out with fetch-depth: 0. (No git at all — e.g. an
+        // exported source tarball — is not shallow and keeps building.)
+        if (configuredVersionCode == null) {
+            val shallow = runCatching {
+                providers.exec {
+                    commandLine("git", "rev-parse", "--is-shallow-repository")
+                }.standardOutput.asText.get().trim()
+            }.getOrNull()
+            if (shallow == "true") {
+                throw GradleException(
+                    "Shallow git clone: versionCode needs the full commit history. " +
+                        "Run 'git fetch --unshallow' or set AIRBRIDGE_VERSION_CODE explicitly."
+                )
+            }
+        }
+
         // A stable production floor prevents a local Play bundle from going
         // backwards from the old CI-generated sideload version codes.
         versionCode = configuredVersionCode ?: 2_300_000 + gitCommitCount
-        versionName = "2.5.1"
+        versionName = "2.5.2"
     }
 
     signingConfigs {

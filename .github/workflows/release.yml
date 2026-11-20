@@ -99,6 +99,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the Android version code is derived from the commit
+          # count (see android/app/build.gradle.kts), and a shallow checkout
+          # would undercount it.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -134,7 +139,10 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          export AIRBRIDGE_VERSION_CODE=$((2300000 + GITHUB_RUN_NUMBER))
+          # Same formula as a local build (2_300_000 + git commit count) so the
+          # published APK never looks like a downgrade next to a local one.
+          export AIRBRIDGE_VERSION_CODE=$((2300000 + $(git rev-list --count HEAD)))
+          echo "AIRBRIDGE_VERSION_CODE=$AIRBRIDGE_VERSION_CODE"
           gradle -p android :engine:check :app:testDebugUnitTest :app:assembleDebug --no-daemon 2>&1 | tee gradle-build.log || {
             diagnostics="$(grep -E '(^e: |error:|What went wrong|Execution failed|Caused by:|Compilation error| FAILED)' gradle-build.log | tail -n 40)"
             if [ -z "$diagnostics" ]; then diagnostics="$(tail -c 3500 gradle-build.log)"; fi
@@ -188,6 +196,9 @@ jobs:
           echo "configured=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         if: ${{ steps.signing.outputs.configured == 'true' }}
+        with:
+          # Full history: the version code is derived from the commit count.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         if: ${{ steps.signing.outputs.configured == 'true' }}
         with:
@@ -233,7 +244,9 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          export AIRBRIDGE_VERSION_CODE=$((2300000 + GITHUB_RUN_NUMBER))
+          # Same formula as a local build (2_300_000 + git commit count).
+          export AIRBRIDGE_VERSION_CODE=$((2300000 + $(git rev-list --count HEAD)))
+          echo "AIRBRIDGE_VERSION_CODE=$AIRBRIDGE_VERSION_CODE"
           gradle -p android :engine:check --no-daemon 2>&1 | tee gradle-build.log && \
           gradle -p android :app:bundleRelease :app:assembleRelease --no-daemon 2>&1 | tee -a gradle-build.log || {
             echo "::error title=Android App Bundle build failed::$(tail -n 40 gradle-build.log | tr '\n' '|' | cut -c1-3000)"

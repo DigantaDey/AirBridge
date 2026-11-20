@@ -71,7 +71,7 @@ The release includes the installable **debug APK** (`AirBridge-android-debug.apk
 for direct testing and sideloading. No signed Play App Bundle is attached: the
 AAB is built only when the private Play upload key is configured, and it is
 uploaded to Play rather than offered as a download. See
-[PLAY_STORE_RELEASE.md](PLAY_STORE_RELEASE.md).
+[PLAY_STORE_RELEASE.md](https://github.com/DigantaDey/AirBridge/blob/v2.5.1/docs/PLAY_STORE_RELEASE.md).
 
 ## Unchanged
 

@@ -14,7 +14,7 @@ export const COMPARE = {
   description:
     'An honest comparison of AirBridge with LocalSend, KDE Connect, AirDroid, LinkMyMac, Quick Share and Apple AirDrop — including where another tool is the better choice.',
   kicker: 'COMPARISON',
-  h1: 'AirBridge and the alternatives, compared honestly',
+  h1: 'Compare AirBridge with other transfer apps',
   lede:
     'Every tool on this page is good at something. This comparison is written to help you pick, not to win a table: it separates what AirBridge does from what other projects do better, and it says where AirBridge is the wrong answer.',
   sections: [
@@ -147,7 +147,7 @@ export const COMPARE = {
     },
     {
       id: 'airbridge-strengths',
-      h2: 'Where AirBridge is genuinely a good fit',
+      h2: 'When to use AirBridge',
       html: `        <ul>
           <li><strong>Android plus a Mac, without an account.</strong> That combination is the gap AirBridge was built for: Apple’s tools exclude Android, and most Android-first tools treat macOS as a second-class client.</li>
           <li><strong>One verified session for several jobs.</strong> Files, clipboard, screen view, contacts and calls share the same pairing and the same encryption, instead of five different tools and three accounts.</li>
@@ -172,7 +172,7 @@ export const COMPARE = {
     },
     {
       id: 'disclosure',
-      h2: 'AirBridge’s own limitations, stated up front',
+      h2: 'AirBridge’s limitations',
       html: `        <ul>
           <li><strong>No iOS, no browser-based account, no cloud.</strong> That is the design, and it is also a real limitation for some workflows.</li>
           <li><strong>The licence is not OSI-approved.</strong> Source is public, but commercial use needs written consent. See <a href="${SITE.repoUrl}/blob/main/LICENSE">LICENSE</a>.</li>

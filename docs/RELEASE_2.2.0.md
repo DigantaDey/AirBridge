@@ -55,7 +55,7 @@ SHA-256, and prove clipboard traffic can flow during blocked publication.
 The reported “256kbps” cannot be reproduced without the original device/network;
 there is no configured rate limiter, but a particular maximum speed is not
 promised. Screen-off, MediaStore, URI-provider and OEM battery behavior still
-need the [device acceptance checklist](ANDROID_VALIDATION.md).
+need the [device acceptance checklist](https://github.com/DigantaDey/AirBridge/blob/v2.2.0/docs/ANDROID_VALIDATION.md).
 
 Android 10+ can deny automatic clipboard reads even with Accessibility enabled;
 use the explicit Share/text action in that case. Force-stop, reboot, the Stop

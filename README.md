@@ -9,7 +9,7 @@
 <h3 align="center">Android ↔ Mac, Windows &amp; Linux. Privately.</h3>
 
 <p align="center">
-  <strong>An open-source AirDrop alternative for Android and computers.</strong><br>
+  <strong>A source-available AirDrop alternative for Android and computers.</strong><br>
   Transfer files, sync your clipboard, share your Android screen, and connect your phone to your computer —<br>
   end-to-end encrypted, with no account and no cloud storage.
 </p>
@@ -35,7 +35,7 @@
 
 ## Download
 
-Stable builds come from the [latest GitHub release](https://github.com/DigantaDey/AirBridge/releases/latest). No store account, purchase, or trial: install, pair, transfer.
+Download builds from the [latest GitHub release](https://github.com/DigantaDey/AirBridge/releases/latest). Personal, non-commercial use is free. You do not need an account.
 
 | Platform | Get it | Notes |
 | :--- | :--- | :--- |
@@ -60,7 +60,7 @@ powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.c
 
 Both installers verify the download against the release checksums before running it. `--autostart` / `-Autostart` registers a per-user login item. Building from source is covered under [development](#development).
 
-> **Honest signing note:** the macOS build is ad-hoc signed (not notarised) and the Windows EXE is unsigned, because vendor certificates are paid subscriptions this project does not buy. Integrity comes from `SHA256SUMS.txt`, Sigstore attestations, and the desktop self-updater, which refuses an artefact that fails verification. A browser-downloaded macOS app needs one right-click → *Open*; the `curl` installer avoids the quarantine flag entirely.
+> **Before you install:** the macOS build is ad-hoc signed (not notarised) and the Windows EXE is unsigned, because vendor certificates are paid subscriptions this project does not buy. Integrity comes from `SHA256SUMS.txt`, Sigstore attestations, and the desktop self-updater, which refuses an artefact that fails verification. A browser-downloaded macOS app needs one right-click → *Open*; the `curl` installer avoids the quarantine flag entirely.
 
 ---
 
@@ -83,7 +83,7 @@ More screens and per-task walkthroughs: **[airbridge.fyi/guides.html](https://ai
 
 ## What AirBridge is
 
-AirBridge is an open-source bridge between **Android** and **macOS, Windows and Linux**. It gives you the parts of Apple Continuity that Android users otherwise never get — instant file transfer, a shared clipboard, the phone's screen on your desktop, contacts and calls — over your own network, with the content encrypted end to end.
+AirBridge connects **Android** with **macOS, Windows and Linux**. Send files, share a clipboard, view your phone’s screen, and use contacts and calls from your computer. Content is encrypted end to end. The source is public under a Fair-Use & Non-Commercial licence; commercial or organisational use needs written consent.
 
 - **Who it is for:** people who keep an Android phone and a Mac, Windows PC or Linux desktop, and do not want a cloud account in the middle of every file.
 - **What problem it solves:** Android has no AirDrop, and most cross-platform tools stop at file transfer. AirBridge puts files, clipboard, screen, contacts and calls in one verified session.
@@ -103,7 +103,7 @@ AirBridge is an open-source bridge between **Android** and **macOS, Windows and 
 | 📶 | **QR / 6-character pairing** — plus phone-hotspot handoff and a self-hostable relay for networks with no direct path. |
 | 🧩 | **macOS, Windows and Linux companions** — plus a CLI, a headless daemon and a relay. |
 | ☁️ | **No account, no cloud storage, no analytics SDK** in the Android app. |
-| 🧾 | **Open source** — the server, clients, Android app, macOS shell, installers and release workflows are all in this repository. |
+| 🧾 | **Source available** — the server, clients, Android app, macOS shell, installers and release workflows are all in this repository. |
 
 ### Why AirBridge
 
@@ -111,7 +111,7 @@ AirBridge is an open-source bridge between **Android** and **macOS, Windows and 
 - **A real AirDrop alternative for Android** where Apple's tools simply refuse to participate, without pretending to speak Apple protocols.
 - **Private file transfer** that never parks your files in an account you cannot audit.
 - **Cross-platform device connectivity** including screen sharing and clipboard sync — not just a send button.
-- **Open-source and self-hostable** — read the protocol, run your own relay, keep your data on your devices.
+- **Source-available and self-hostable** — read the protocol, run your own relay, keep your data on your devices.
 
 ---
 

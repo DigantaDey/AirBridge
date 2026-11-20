@@ -1,12 +1,12 @@
 {
   "name": "AirBridge — File transfer",
   "short_name": "AirBridge",
-  "description": "Encrypted file transfer between Android and macOS.",
+  "description": "Encrypted file transfer between Android, macOS, Windows and Linux.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#ffffff",
+  "background_color": "#0F1222",
+  "theme_color": "#0F1222",
   "orientation": "any",
   "icons": [
     {

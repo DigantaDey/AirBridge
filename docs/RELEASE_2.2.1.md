@@ -70,7 +70,7 @@ GitHub CI additionally packages the Android APK and gates the pull request.
 **No physical-phone throughput or OEM screen-off measurements were made here.**
 There is no configured bandwidth limiter, but maximum device-supported speed is
 not guaranteed. Validate on the original phone/network using the
-[device checklist](ANDROID_VALIDATION.md).
+[device checklist](https://github.com/DigantaDey/AirBridge/blob/v2.2.1/docs/ANDROID_VALIDATION.md).
 
 Android 10+ may deny automatic background clipboard reads **even with
 Accessibility enabled**. A foreground service provides execution continuity,
@@ -81,7 +81,7 @@ process killing can end the service; process-death resume is not promised.
 Native Android/desktop staging verifies before publication. The browser File
 System Access fallback has platform limitations: out-of-order writes need a
 post-close read-back hash and remove mismatches best-effort; external processes
-can race its filename selection. See [security notes](../SECURITY.md).
+can race its filename selection. See [security notes](https://github.com/DigantaDey/AirBridge/blob/v2.2.1/SECURITY.md).
 
 Use only official release assets/checksums: the public sideload key preserves
 upgrade compatibility, not publisher authenticity.

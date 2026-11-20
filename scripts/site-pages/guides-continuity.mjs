@@ -54,7 +54,7 @@ export const CLIPBOARD = {
     },
     {
       id: 'limits',
-      h2: 'The Android limits AirBridge does not hide',
+      h2: 'Android clipboard limits',
       html: `        <ul>
           <li><strong>Automatic phone-side capture can be blocked by Android.</strong> If you copy text inside another app and AirBridge is in the background, the system may not let it read the clipboard. The reliable path is an explicit send: Share, Process text, the Quick Settings tile, or Paste in AirBridge. This is why AirBridge does not promise a seamless two-way mirror of every copy.</li>
           <li><strong>No Accessibility service, no notification listener.</strong> Those permissions would make background capture easier and are deliberately absent; the Play-safe permission surface is documented in <a href="${SITE.repoUrl}/blob/main/docs/PLAY_STORE_RELEASE.md">docs/PLAY_STORE_RELEASE.md</a>.</li>
@@ -105,7 +105,7 @@ export const SCREEN = {
   description:
     'View your Android screen on a computer with consent-based H.264 streaming: end-to-end encrypted, approved per session, protected content stays blank, no account needed.',
   kicker: 'SCREEN SHARING',
-  h1: 'Android screen sharing to your computer, with consent in the middle',
+  h1: 'View your Android screen on your computer',
   lede:
     'Showing a phone screen on a laptop usually means a Chromecast, a commercial remote-support tool, or a screenshot thread. AirBridge streams the display as low-latency H.264 over the paired, encrypted session — and only after you approve that specific session on the phone.',
   image: 'screenshots/desktop-calls.png',
@@ -155,7 +155,7 @@ export const SCREEN = {
     },
     {
       id: 'limits',
-      h2: 'Honest limits',
+      h2: 'Screen sharing limits',
       html: `        <ul>
           <li><strong>Latency is your network’s latency.</strong> A congested 2.4 GHz link or a battery-saver throttle shows up as fewer frames; AirBridge does not claim a fixed millisecond budget.</li>
           <li><strong>No audio unless you opt in per session</strong>, and only where Android permits playback capture.</li>
@@ -198,7 +198,7 @@ export const OPEN_SOURCE = {
   description:
     'AirBridge is a source-available AirDrop alternative for Android, macOS, Windows and Linux: auditable encryption, a self-hostable relay, no accounts — and an honest licence note.',
   kicker: 'OPEN SOURCE',
-  h1: 'An open-source AirDrop alternative — including the parts most projects leave out',
+  h1: 'Looking for an open-source AirDrop alternative? Start with the licence',
   lede:
     'Open source matters most where it is least convenient: the pairing protocol, the encryption, the update path, and the licence that governs whether you may use it at work. Here is what AirBridge publishes, what you can verify yourself, and what the licence actually says.',
   image: 'screenshots/desktop-clipboard.png',
@@ -211,7 +211,7 @@ export const OPEN_SOURCE = {
   sections: [
     {
       id: 'what-open-means',
-      h2: 'What “open source” means for AirBridge — precisely',
+      h2: 'AirBridge’s source and licence',
       html: `        <p>The full source is public on GitHub: the TypeScript server, the React client, the Kotlin Android app and engine, the Swift menu-bar shell, the CLI, the installers and the release workflows. Anyone can read the pairing protocol, the AES-GCM framing and the TLS pinning code, and run the test suite.</p>
         <p><strong>The licence is not an OSI-approved licence.</strong> AirBridge uses a Fair-Use &amp; Non-Commercial licence: free for personal, non-commercial use on your own devices, with commercial or organisational use requiring prior written consent from the author. If your definition of open source requires OSI approval, this project does not meet it — <a href="${SITE.repoUrl}/blob/main/LICENSE">LICENSE</a> is short and worth reading before you rely on it.</p>`,
     },

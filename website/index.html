@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'">
   <meta name="theme-color" content="#f7f8f7">
-  <meta name="description" content="AirBridge is an open-source AirDrop alternative for Android: end-to-end encrypted file transfer to Mac, Windows and Linux, clipboard sync and screen sharing, with no account.">
+  <meta name="description" content="AirBridge is a source-available AirDrop alternative for Android: end-to-end encrypted file transfer to Mac, Windows and Linux, clipboard sync and screen sharing, with no account.">
   <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1">
   <link rel="canonical" href="https://airbridge.fyi/">
   <meta property="og:type" content="website">
@@ -32,7 +32,7 @@
   {"@context":"https://schema.org","@type":"WebSite","name":"AirBridge","url":"https://airbridge.fyi/","description":"Open-source, end-to-end encrypted Android ↔ Mac, Windows and Linux file transfer, clipboard sync, screen sharing and phone connectivity.","inLanguage":"en","publisher":{"@type":"Person","name":"Diganta Dey","url":"https://github.com/DigantaDey"}}
   </script>
   <script type="application/ld+json">
-  {"@context":"https://schema.org","@type":"SoftwareApplication","name":"AirBridge","applicationCategory":"UtilitiesApplication","operatingSystem":"Android, macOS, Windows, Linux","description":"Private encrypted file transfer, bidirectional photo and text clipboard sync, persistent contacts, optional two-way call audio bridge, and consent-based H.264 visual screen sharing between Android and computers.","url":"https://airbridge.fyi/","downloadUrl":"https://github.com/DigantaDey/AirBridge/releases/latest","softwareVersion":"2.5.1","author":{"@type":"Person","name":"Diganta Dey","url":"https://github.com/DigantaDey"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"sameAs":["https://github.com/DigantaDey/AirBridge"]}
+  {"@context":"https://schema.org","@type":"SoftwareApplication","name":"AirBridge","applicationCategory":"UtilitiesApplication","operatingSystem":"Android, macOS, Windows, Linux","description":"Private encrypted file transfer, bidirectional photo and text clipboard sync, persistent contacts, optional two-way call audio bridge, and consent-based H.264 visual screen sharing between Android and computers.","url":"https://airbridge.fyi/","downloadUrl":"https://github.com/DigantaDey/AirBridge/releases/latest","softwareVersion":"2.5.2","author":{"@type":"Person","name":"Diganta Dey","url":"https://github.com/DigantaDey"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"sameAs":["https://github.com/DigantaDey/AirBridge"]}
   </script>
   <script type="application/ld+json">
   {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Can AirBridge stream smooth video during Android screen sharing?","acceptedAnswer":{"@type":"Answer","text":"Yes. Android encodes the approved display with hardware MediaCodec H.264 and SPS/PPS codec headers, while macOS/desktop decodes frames with WebCodecs (avcC), PLI keyframe recovery, and requestAnimationFrame pacing. AirBridge is consent-based visual sharing — optional per-session playback audio is off by default, and DRM-protected video remains blank by design."}},{"@type":"Question","name":"Can I answer calls and speak/hear through my MacBook like Apple Continuity?","acceptedAnswer":{"@type":"Answer","text":"Yes. AirBridge saves your synced contacts locally while your paired device stays connected, lets you place or answer calls from your MacBook, and includes an optional speakerphone-assisted two-way encrypted call audio bridge between Android and MacBook when you enable microphone access on both devices."}},{"@type":"Question","name":"Does photo and text clipboard sync work from MacBook to Android?","acceptedAnswer":{"@type":"Answer","text":"Yes. On macOS, native NSPasteboard capture reads copied photos cleanly and syncs images and text over E2EE without corrupted binary noise or echo loops."}},{"@type":"Question","name":"Does AirBridge need Accessibility access?","acceptedAnswer":{"@type":"Answer","text":"No. AirBridge does not use Android Accessibility services or notification-listener access. Use Android Share, Process Text, the Quick Settings tile, or the in-app Paste action for reliable clipboard sends."}}]}
@@ -56,7 +56,7 @@
   <nav class="nav wrap" aria-label="Main navigation">
     <div class="brand-group">
       <a class="brand" href="#top" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a>
-      <span class="version-pill">v2.5.1</span>
+      <span class="version-pill">v2.5.2</span>
     </div>
     <div class="nav-links">
       <a href="#features">Capabilities</a>
@@ -77,17 +77,18 @@
     <div class="hero-copy">
       <div class="eyebrow"><span class="status-dot" aria-hidden="true"></span> ANDROID ↔ MACBOOK · WINDOWS · LINUX</div>
       <h1>Your devices.<br><span>Working as one.</span></h1>
-      <p class="hero-description">The open-source AirDrop alternative for Android and computers. Move multi-gigabyte files, copy photos &amp; text across clipboards, answer phone calls on your MacBook with two-way audio, keep contacts synced while connected, and mirror your screen cleanly at 30fps H.264 — all end-to-end encrypted without a cloud account.</p>
+      <p class="hero-description">AirBridge is a source-available AirDrop alternative for Android and computers. Send multi-gigabyte files, copy photos and text between clipboards, answer phone calls on your MacBook with two-way audio, keep your contacts synced, and watch your phone screen at 30fps H.264. Content is end-to-end encrypted. No account or cloud storage.</p>
       <div class="hero-actions">
         <a class="button button-dark" href="#setup">Install AirBridge <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
-        <a class="button button-secondary" href="https://github.com/DigantaDey/AirBridge/releases/latest">Releases v2.5.1 <span aria-hidden="true">↗</span></a>
+        <a class="button button-secondary" href="https://github.com/DigantaDey/AirBridge/releases/latest">Releases v2.5.2 <span aria-hidden="true">↗</span></a>
       </div>
       <div class="pill-row">
         <span class="trust-pill"><svg class="icon" aria-hidden="true"><use href="#lock"/></svg> SPAKE2 + AES-256-GCM</span>
         <span class="trust-pill"><svg class="icon" aria-hidden="true"><use href="#devices"/></svg> H.264 Screen Video</span>
         <span class="trust-pill"><svg class="icon" aria-hidden="true"><use href="#phone"/></svg> Calls &amp; Contacts Continuity</span>
       </div>
-      <p class="hero-note"><span>Open-source by <a href="#about">Diganta Dey</a></span><span>Zero accounts</span><span>Android, macOS, Windows &amp; Linux</span></p>
+      <p>Google Play Store app — coming soon. For now, use the Android APK from GitHub Releases.</p>
+      <p class="hero-note"><span>Source available · by <a href="#about">Diganta Dey</a></span><span>No account needed</span><span>Android, macOS, Windows &amp; Linux</span></p>
     </div>
 
     <div class="hero-visual" role="img" aria-label="AirBridge continuity showcase showing multi-gigabyte file transfer, photo clipboard sync, saved contacts, Mac call audio, and H.264 screen sharing between MacBook and Android">
@@ -105,16 +106,16 @@
           <div class="stage-mac-body">
             <div class="stage-tile">
               <div class="stage-tile-head"><span>macOS Image Clipboard</span><span class="stage-tag">Synced ✓</span></div>
-              <small>Screenshot PNG captured cleanly — shared to Android as photo, never binary noise</small>
+              <small>Copied on Mac, pasted as a photo on Android</small>
             </div>
             <div class="stage-tile stage-tile-mint">
               <div class="stage-tile-head"><span>4K-footage.mov · 2.4 GB</span><span class="stage-tag">SHA-256 ✓</span></div>
-              <small>Direct-to-disk · Resumed cleanly across Wi-Fi dips</small>
+              <small>Streams to disk. Resumes if Wi-Fi drops.</small>
               <div class="stage-progress"><span></span></div>
             </div>
             <div class="stage-tile">
               <div class="stage-tile-head"><span>Active Call · Ada Lovelace</span><span class="stage-tag">Mac Audio On</span></div>
-              <small>16 kHz encrypted duplex call audio + permanently saved contacts</small>
+              <small>Two-way call audio. Contacts stay saved.</small>
             </div>
           </div>
         </div>
@@ -144,7 +145,7 @@
 
   <div class="marquee" aria-hidden="true">
     <div class="wrap marquee-inner">
-      <span>CAPABILITIES IN v2.5.1</span>
+      <span>CAPABILITIES IN v2.5.2</span>
       <div class="marquee-items">
         <span>H.264 VIDEO SCREEN SHARE</span><b>/</b>
         <span>PHOTO + TEXT CLIPBOARD</span><b>/</b>
@@ -160,7 +161,7 @@
       <div class="stat-card"><strong>SPAKE2 + AES-GCM</strong><span>RFC 9382 zero-knowledge code proof paired with per-frame AES-256-GCM encryption.</span></div>
       <div class="stat-card"><strong>Multi-GB Safe</strong><span>Direct-to-disk `.part` journals, TCP backpressure, and identity-proven reconnect resume.</span></div>
       <div class="stat-card"><strong>30fps H.264</strong><span>ISO `avcC` WebCodecs playback with automatic PLI keyframe recovery for video streaming.</span></div>
-      <div class="stat-card"><strong>Zero Cloud</strong><span>100% local-first software — no accounts, no tracking, and redacted on-device diagnostics.</span></div>
+      <div class="stat-card"><strong>Zero Cloud</strong><span>No account or cloud storage. Diagnostics stay on your device unless you choose to share them.</span></div>
     </div>
   </section>
 
@@ -194,7 +195,7 @@
           <p>Stream multi-gigabyte videos and up to 100 mixed files straight to disk via `.part` append-only journals. Backpressure pacing, 3-strike heartbeat tolerance, transient daemon retries, and verified-identity resume prevent mid-transfer or near-completion drops — verified by SHA-256 before saving.</p>
           <div class="file-visual" aria-hidden="true">
             <div class="file-thumb">✓</div>
-            <div><strong>Direct-to-Disk &amp; Resumable</strong><small>Zero whole-file RAM buffering · Identity-proven resume</small></div>
+            <div><strong>Direct-to-Disk &amp; Resumable</strong><small>Streams to disk · Resumes with the same verified peer</small></div>
             <span>SHA-256</span>
           </div>
         </article>
@@ -316,7 +317,7 @@
         <thead>
           <tr>
             <th>Capability</th>
-            <th class="airbridge-col">AirBridge v2.5.1</th>
+            <th class="airbridge-col">AirBridge v2.5.2</th>
             <th>Apple AirDrop / Continuity</th>
             <th>LocalSend</th>
             <th>KDE Connect</th>
@@ -394,15 +395,15 @@
     <div class="future-copy">
       <p class="section-label"><span>04</span> SECURITY &amp; PRIVACY</p>
       <h2>Zero accounts.<br><em>Encrypted locally.</em></h2>
-      <p>Your pairing code never leaves your room in plaintext or hashes: AirBridge authenticates peers via SPAKE2 (RFC 9382), derives ephemeral ECDH P-256 shared secrets, encrypts every file chunk, clipboard photo, audio packet, and video frame with AES-256-GCM, and verifies SHA-256 digests before touching your Downloads folder.</p>
-      <p class="future-disclaimer"><strong>Honest platform disclosures:</strong> Screen sharing requires explicit approval per session and respects Android DRM (`FLAG_SECURE` content stays blank). Call audio routing uses an opt-in speakerphone-assisted bridge because standard unrooted Android blocks raw cellular uplink injection. Background clipboard never abuses Android Accessibility Services.</p>
+      <p>AirBridge uses SPAKE2 (RFC 9382) to check that both devices know the pairing code without sending the code itself. ECDH P-256 and HKDF derive session keys. AES-256-GCM encrypts file chunks, clipboard items, call audio and screen frames. Received files are checked with SHA-256 before they appear in Downloads.</p>
+      <p class="future-disclaimer"><strong>Platform limits:</strong> Screen sharing requires explicit approval per session and respects Android DRM (`FLAG_SECURE` content stays blank). Call audio routing uses an opt-in speakerphone-assisted bridge because standard unrooted Android blocks raw cellular uplink injection. Background clipboard never abuses Android Accessibility Services.</p>
       <a class="underlined-link" href="privacy.html">Read our privacy policy <span aria-hidden="true">↗</span></a>
     </div>
 
     <div class="future-panel" aria-hidden="true">
       <div class="future-panel-top">
         <img src="icon.svg" alt="">
-        <span>ZERO-TRUST PIPELINE</span>
+        <span>HOW CONTENT IS PROTECTED</span>
       </div>
       <div class="crypto-chain">
         <div class="crypto-step">
@@ -437,7 +438,7 @@
         <h2>Up and running<br>in <em>two minutes.</em></h2>
         <p>Install the companion on macOS, Windows, or Linux, then pair the Android app by scanning the QR code or entering the 6-character code. Building from source requires Node.js 20+, npm, and Git.</p>
         <div class="setup-actions">
-          <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.1 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+          <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.2 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
           <a class="button button-secondary" href="privacy.html">Privacy policy</a>
         </div>
         <a class="underlined-link" href="download.html">All platform downloads &amp; checksums <span aria-hidden="true">↗</span></a><br>
@@ -517,7 +518,7 @@ cd AirBridge &amp;&amp; npm ci &amp;&amp; npm run dev</code></pre>
       </details>
       <details>
         <summary>Does AirBridge use Apple AirDrop?<span aria-hidden="true">＋</span></summary>
-        <p>No. AirBridge is an independent open-source project and does not implement proprietary Apple protocols. AirDrop and Continuity are Apple trademarks; AirBridge is not affiliated with Apple or Google.</p>
+        <p>No. AirBridge is an independent, source-available project and does not implement proprietary Apple protocols. AirDrop and Continuity are Apple trademarks; AirBridge is not affiliated with Apple or Google.</p>
       </details>
     </div>
   </section>
@@ -526,7 +527,7 @@ cd AirBridge &amp;&amp; npm ci &amp;&amp; npm run dev</code></pre>
     <div class="contact">
       <div class="contact-content">
         <p class="section-label"><span>07</span> ABOUT AIRBRIDGE</p>
-        <h2>Built open-source by<br><em>Diganta Dey.</em></h2>
+        <h2>Built by<br><em>Diganta Dey.</em></h2>
         <p>Designed to make everyday work across Android, macOS, Windows, and Linux fast, private, and frustration-free — with clean local diagnostics, honest permissions, and zero cloud lock-in.</p>
         <div class="contact-actions">
           <a class="contact-email" href="mailto:hello@airbridge.fyi">hello@airbridge.fyi <span aria-hidden="true">↗</span></a>
@@ -535,8 +536,8 @@ cd AirBridge &amp;&amp; npm ci &amp;&amp; npm run dev</code></pre>
         </div>
       </div>
       <div class="contact-meta-card">
-        <strong>AirBridge v2.5.1 · Local-First Continuity</strong>
-        <p>MIT/Apache-style open source repository at <code>DigantaDey/AirBridge</code>. Commercial/enterprise use requires prior written consent per <code>LICENSE</code> and <code>README.md</code>.</p>
+        <strong>AirBridge v2.5.2 · Local-First Continuity</strong>
+        <p>The source is public at <code>DigantaDey/AirBridge</code> under the Fair-Use &amp; Non-Commercial License, not an OSI-approved open-source licence. Personal, non-commercial use is free. Commercial or organisational use requires prior written consent. See <a href="https://github.com/DigantaDey/AirBridge/blob/main/LICENSE">LICENSE</a>.</p>
       </div>
     </div>
   </section>
@@ -557,7 +558,7 @@ cd AirBridge &amp;&amp; npm ci &amp;&amp; npm run dev</code></pre>
     </div>
   </div>
   <div class="footer-bottom">
-    <span>AIRBRIDGE v2.5.1 · END-TO-END ENCRYPTED</span>
+    <span>AIRBRIDGE v2.5.2 · END-TO-END ENCRYPTED</span>
     <span>ANDROID ↔ MACOS · WINDOWS · LINUX</span>
     <a href="#top">BACK TO TOP ↑</a>
   </div>

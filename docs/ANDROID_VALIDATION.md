@@ -1,6 +1,6 @@
 # Android validation and remaining device checks
 
-## Architecture being validated (2.5.1)
+## Architecture being validated (2.5.2)
 
 `ConnectionService` owns a single `NativeEngineHost` / Kotlin `AirBridgeEngine`.
 The native Jetpack Compose UI attaches a state subscriber; suspending, destroying

@@ -50,7 +50,7 @@
   <nav class="nav wrap" aria-label="Main navigation">
     <div class="brand-group">
       <a class="brand" href="index.html" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a>
-      <span class="version-pill">v2.5.1</span>
+      <span class="version-pill">v2.5.2</span>
     </div>
     <div class="nav-links">
       <a href="index.html#features">Capabilities</a>
@@ -74,7 +74,7 @@
     </ol>
   </nav>
       <p class="section-label"><span>GUIDE</span> SCREEN SHARING</p>
-      <h1>Android screen sharing to your computer, with consent in the middle</h1>
+      <h1>View your Android screen on your computer</h1>
       <p class="guide-lede">Showing a phone screen on a laptop usually means a Chromecast, a commercial remote-support tool, or a screenshot thread. AirBridge streams the display as low-latency H.264 over the paired, encrypted session — and only after you approve that specific session on the phone.</p>
       <figure class="guide-figure">
         <img src="screenshots/desktop-calls.png" width="1600" height="916" alt="AirBridge desktop panel with Contacts, Calls and Screen tabs, a paired device selector, phone battery status and a dialler" loading="lazy" decoding="async">
@@ -113,7 +113,7 @@
         <pre><code>powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.ps1 -UseBasicParsing | iex"</code></pre>
         <p>Pair the phone, open <em>Screen</em> on the computer, and approve the request on Android. The phone battery level is shown in the panel so you know when to plug in during a long demo.</p>
 
-      <h2 id="limits">Honest limits</h2>
+      <h2 id="limits">Screen sharing limits</h2>
         <ul>
           <li><strong>Latency is your network’s latency.</strong> A congested 2.4 GHz link or a battery-saver throttle shows up as fewer frames; AirBridge does not claim a fixed millisecond budget.</li>
           <li><strong>No audio unless you opt in per session</strong>, and only where Android permits playback capture.</li>
@@ -153,7 +153,7 @@
         <p>Official builds for macOS, Windows and Linux live on the GitHub releases page, next to the Android APK and the <code>SHA256SUMS.txt</code> checksums. Nothing needs an account.</p>
       </div>
       <div class="guide-cta-actions">
-        <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.1 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+        <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.2 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
         <a class="button button-secondary" href="download.html">All platforms</a>
       </div>
     </aside>

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { buildLinuxLauncherEntry } from "../src/server/desktopLauncher.js";
 
 describe("Version Consistency & Updated About AirBridge Across All Platforms", () => {
-  it("aligns version 2.5.1 across package manifests, Android Gradle, website, and docs", () => {
+  it("aligns version 2.5.2 across package manifests, Android Gradle, website, and docs", () => {
     const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")) as { version: string };
     const lock = JSON.parse(fs.readFileSync("package-lock.json", "utf8")) as {
       version: string;
@@ -15,14 +15,14 @@ describe("Version Consistency & Updated About AirBridge Across All Platforms", (
     const androidDoc = fs.readFileSync("docs/ANDROID_VALIDATION.md", "utf8");
     const playDoc = fs.readFileSync("docs/PLAY_STORE_RELEASE.md", "utf8");
 
-    expect(pkg.version).toBe("2.5.1");
-    expect(lock.version).toBe("2.5.1");
-    expect(lock.packages[""]?.version).toBe("2.5.1");
-    expect(appGradle).toContain('versionName = "2.5.1"');
-    expect(websiteIndex).toContain('"softwareVersion":"2.5.1"');
-    expect(websiteIndex).toContain("v2.5.1");
-    expect(androidDoc).toContain("(2.5.1)");
-    expect(playDoc).toContain("AirBridge 2.5.1");
+    expect(pkg.version).toBe("2.5.2");
+    expect(lock.version).toBe("2.5.2");
+    expect(lock.packages[""]?.version).toBe("2.5.2");
+    expect(appGradle).toContain('versionName = "2.5.2"');
+    expect(websiteIndex).toContain('"softwareVersion":"2.5.2"');
+    expect(websiteIndex).toContain("v2.5.2");
+    expect(androidDoc).toContain("(2.5.2)");
+    expect(playDoc).toContain("AirBridge 2.5.2");
   });
 
   it("includes updated About AirBridge details in the Web UI, macOS app, Android Compose Settings, and Linux launcher", () => {
@@ -59,9 +59,9 @@ describe("Version Consistency & Updated About AirBridge Across All Platforms", (
 
     const desktopEntry = buildLinuxLauncherEntry({
       executable: "/usr/local/bin/airbridge",
-      version: "2.5.1",
+      version: "2.5.2",
     });
-    expect(desktopEntry).toContain("Comment=AirBridge 2.5.1");
+    expect(desktopEntry).toContain("Comment=AirBridge 2.5.2");
     expect(desktopEntry).toContain("Diganta Dey");
     expect(desktopEntry).toContain("H.264 screen sharing");
   });

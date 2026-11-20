@@ -41,7 +41,7 @@ export const DOWNLOAD = {
               <tr>
                 <td><strong>Android</strong><br>8.0 (API 26)+</td>
                 <td><code>AirBridge-android-debug.apk</code></td>
-                <td>Sideload the APK, then pair with the desktop QR code.</td>
+                <td>Google Play Store app — coming soon. For now, sideload the APK, then pair with the desktop QR code.</td>
               </tr>
               <tr>
                 <td><strong>Any OS with Node 20+</strong></td>
