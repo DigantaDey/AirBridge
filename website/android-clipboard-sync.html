@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="theme-color" content="#f7f8f7">
+  <meta name="description" content="Copy text and photos on Android and paste them on your computer — and back. Encrypted clipboard sync with echo suppression, no Accessibility access and no account.">
+  <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://airbridge.fyi/android-clipboard-sync.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="AirBridge">
+  <meta property="og:locale" content="en">
+  <meta property="og:title" content="Android Clipboard Sync with Mac, Windows &amp; Linux — AirBridge">
+  <meta property="og:description" content="Copy text and photos on Android and paste them on your computer — and back. Encrypted clipboard sync with echo suppression, no Accessibility access and no account.">
+  <meta property="og:url" content="https://airbridge.fyi/android-clipboard-sync.html">
+  <meta property="og:image" content="https://airbridge.fyi/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Android Clipboard Sync with Mac, Windows &amp; Linux — AirBridge">
+  <meta name="twitter:description" content="Copy text and photos on Android and paste them on your computer — and back. Encrypted clipboard sync with echo suppression, no Accessibility access and no account.">
+  <meta name="twitter:image" content="https://airbridge.fyi/og.png">
+  <meta name="twitter:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebPage","name":"Android Clipboard Sync with Mac, Windows & Linux — AirBridge","description":"Copy text and photos on Android and paste them on your computer — and back. Encrypted clipboard sync with echo suppression, no Accessibility access and no account.","url":"https://airbridge.fyi/android-clipboard-sync.html","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"AirBridge","url":"https://airbridge.fyi/"},"about":{"@type":"SoftwareApplication","name":"AirBridge","applicationCategory":"UtilitiesApplication","operatingSystem":"Android, macOS, Windows, Linux","url":"https://airbridge.fyi/","downloadUrl":"https://github.com/DigantaDey/AirBridge/releases/latest"},"primaryImageOfPage":{"@type":"ImageObject","url":"https://airbridge.fyi/screenshots/phone-clipboard.png"}}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"AirBridge","item":"https://airbridge.fyi/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://airbridge.fyi/guides.html"},{"@type":"ListItem","position":3,"name":"Android clipboard sync","item":"https://airbridge.fyi/android-clipboard-sync.html"}]}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Does clipboard sync work when the app or browser tab is closed?","acceptedAnswer":{"@type":"Answer","text":"Yes. The desktop companion runs a background peer that keeps the encrypted session, and the Android app uses its own foreground service for incoming items. The browser window is only the UI."}},{"@type":"Question","name":"Why does copying text in another Android app not always sync automatically?","acceptedAnswer":{"@type":"Answer","text":"Android 10 and newer block hidden clipboard reads. AirBridge will not add an Accessibility service or notification listener to work around that rule, so use Share → AirBridge, Process text → AirBridge, the Quick Settings tile, or the Paste button for a deliberate send."}},{"@type":"Question","name":"Can I sync clipboard photos on Windows or Linux?","acceptedAnswer":{"@type":"Answer","text":"Photo capture is implemented against macOS’s native pasteboard and is macOS-only. On Windows and Linux the desktop clipboard bridge carries text through the system clipboard tools."}},{"@type":"Question","name":"Is clipboard content encrypted in transit?","acceptedAnswer":{"@type":"Answer","text":"Yes. Clipboard text and images use the same AES-256-GCM session keys as file chunks, over the paired, key-verified session. Nothing is written to an AirBridge server."}}]}
+  </script>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <title>Android Clipboard Sync with Mac, Windows &amp; Linux — AirBridge</title>
+</head>
+<body id="top">
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2"/></symbol>
+  <symbol id="devices" viewBox="0 0 24 24"><rect x="3" y="4" width="13" height="11" rx="1.5"/><path d="M2 18h15"/><rect x="17" y="9" width="5" height="10" rx="1"/></symbol>
+</svg>
+<header class="header">
+  <nav class="nav wrap" aria-label="Main navigation">
+    <div class="brand-group">
+      <a class="brand" href="index.html" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a>
+      <span class="version-pill">v2.5.0</span>
+    </div>
+    <div class="nav-links">
+      <a href="index.html#features">Capabilities</a>
+      <a href="guides.html">Guides</a>
+      <a href="compare.html">Compare</a>
+      <a href="index.html#security">Security</a>
+      <a href="download.html">Download</a>
+      <a href="index.html#faq">FAQ</a>
+    </div>
+    <a class="nav-cta" href="https://github.com/DigantaDey/AirBridge">GitHub <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+  </nav>
+</header>
+
+<main class="legal wrap guide" id="main">
+    <article class="legal-card">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li><a href="index.html">AirBridge</a></li>
+      <li><a href="guides.html">Guides</a></li>
+      <li><span aria-current="page">Android clipboard sync</span></li>
+    </ol>
+  </nav>
+      <p class="section-label"><span>GUIDE</span> CLIPBOARD SYNC</p>
+      <h1>Clipboard sync between Android and your computer, without Accessibility workarounds</h1>
+      <p class="guide-lede">Universal Clipboard is an Apple-only feature, so copying a link on a phone and pasting it on a laptop usually means sending it to yourself. AirBridge carries clipboard text in both directions, photos from macOS to Android, and is explicit about the Android restrictions it will not bypass.</p>
+      <figure class="guide-figure guide-figure-phone">
+        <img src="screenshots/phone-clipboard.png" width="720" height="1600" alt="AirBridge Android clipboard screen showing a text box, Beam, Image and Paste buttons, a background sync note, and a clipboard feed with an incoming item" loading="lazy" decoding="async">
+        <figcaption>The Android clipboard tab: pick a target, beam text or an image, or use Paste — with the honest note about Android’s hidden-clipboard rules.</figcaption>
+      </figure>
+      <div class="guide-body">
+      <h2 id="problem">Why the clipboard stops at the phone’s edge</h2>
+        <ul>
+          <li><strong>Universal Clipboard requires Apple hardware</strong> and an Apple ID on both devices, so Android phones are excluded entirely.</li>
+          <li><strong>Sending it to yourself</strong> means an email draft or a chat thread, an upload, a search, and a stale copy left in the cloud.</li>
+          <li><strong>Vendor integrations are partial.</strong> Some manufacturer-and-PC combinations sync the clipboard, but only for those specific devices and bundled apps.</li>
+          <li><strong>Android 10+ restricts background clipboard reads.</strong> Apps cannot silently read another app’s clipboard while hidden, and the workarounds some tools use — Accessibility services or notification listeners — are exactly the permissions AirBridge refuses to request.</li>
+        </ul>
+
+      <h2 id="how-it-works">How AirBridge syncs the clipboard</h2>
+        <p>A background peer runs inside the desktop companion and inside the Android foreground service, holding the same encrypted session used for file transfers. Neither needs a browser tab open.</p>
+        <ul>
+          <li><strong>Computer → phone:</strong> copy text and, on macOS, copy a screenshot or photo; AirBridge captures it natively (macOS <code>NSPasteboard</code> image types) and delivers it to Android’s clipboard. Images up to about 5 MiB, text up to 256,000 characters.</li>
+          <li><strong>Phone → computer:</strong> text travels both ways. On Android, send deliberately with <em>Share → AirBridge</em>, <em>Process text → AirBridge</em>, the Quick Settings tile, or the <em>Paste</em> button — or leave auto-beam on and let AirBridge capture what Android permits it to read.</li>
+          <li><strong>No echo loops:</strong> SHA-256 hashes of recent clipboard payloads suppress the item bouncing back and forth between the two devices.</li>
+          <li><strong>No gibberish:</strong> macOS image pasteboard types are inspected before anything is sent, so a copied photo arrives as a photo instead of a stream of scrambled bytes.</li>
+        </ul>
+        <p>Every item is encrypted with the same AES-256-GCM session keys as file chunks. Nothing is routed through an AirBridge server, and clipboard content is not uploaded anywhere.</p>
+
+      <h2 id="limits">The Android limits AirBridge does not hide</h2>
+        <ul>
+          <li><strong>Automatic phone-side capture can be blocked by Android.</strong> If you copy text inside another app and AirBridge is in the background, the system may not let it read the clipboard. The reliable path is an explicit send: Share, Process text, the Quick Settings tile, or Paste in AirBridge. This is why AirBridge does not promise a seamless two-way mirror of every copy.</li>
+          <li><strong>No Accessibility service, no notification listener.</strong> Those permissions would make background capture easier and are deliberately absent; the Play-safe permission surface is documented in <a href="https://github.com/DigantaDey/AirBridge/blob/main/docs/PLAY_STORE_RELEASE.md">docs/PLAY_STORE_RELEASE.md</a>.</li>
+          <li><strong>Password-manager clips are excluded.</strong> Payloads Android marks as sensitive are skipped rather than synced.</li>
+          <li><strong>Desktop clipboard images are macOS-only.</strong> On Windows the bridge uses the built-in PowerShell clipboard cmdlets and carries text; on Linux it uses <code>wl-clipboard</code> (Wayland) or <code>xclip</code>/<code>xsel</code> (X11) and also carries text. Install one of those tools if the Linux bridge reports itself unsupported.</li>
+          <li><strong>Size bounds:</strong> 512 KB of clipboard text is read per background capture on the desktop, 256,000 characters per clipboard message on the wire, and about 5 MiB per clipboard image.</li>
+        </ul>
+
+      <h2 id="install">Turn it on</h2>
+        <p>macOS and Linux:</p>
+        <pre><code>curl -fsSL https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.sh | bash</code></pre>
+        <p>Windows PowerShell:</p>
+        <pre><code>powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.ps1 -UseBasicParsing | iex"</code></pre>
+        <p>Pair the Android app with the QR code, then open the clipboard tab on either side. <em>Auto-beam copied text</em> and <em>Receive clipboard beams</em> are separate switches, so you can choose one direction without enabling the other. If a device is untrusted, clipboard items are not delivered until you accept it.</p>
+
+      <h2 id="privacy">What clipboard sync keeps private</h2>
+        <p>Clipboard payloads are only decrypted on paired devices, and the history stays local — there is no clipboard account and no cloud sync. Received items can be cleared from the clipboard feed at any time. Read <a href="private-file-transfer.html">the privacy guide</a> for the full model, including what an observer on the same network can still see.</p>
+      </div>
+<section class="faq-block" aria-labelledby="questions">
+      <h2 id="questions">Questions about this guide</h2>
+      <div class="faq-list">
+      <details>
+        <summary>Does clipboard sync work when the app or browser tab is closed?<span aria-hidden="true">＋</span></summary>
+        <p>Yes. The desktop companion runs a background peer that keeps the encrypted session, and the Android app uses its own foreground service for incoming items. The browser window is only the UI.</p>
+      </details>
+      <details>
+        <summary>Why does copying text in another Android app not always sync automatically?<span aria-hidden="true">＋</span></summary>
+        <p>Android 10 and newer block hidden clipboard reads. AirBridge will not add an Accessibility service or notification listener to work around that rule, so use Share → AirBridge, Process text → AirBridge, the Quick Settings tile, or the Paste button for a deliberate send.</p>
+      </details>
+      <details>
+        <summary>Can I sync clipboard photos on Windows or Linux?<span aria-hidden="true">＋</span></summary>
+        <p>Photo capture is implemented against macOS’s native pasteboard and is macOS-only. On Windows and Linux the desktop clipboard bridge carries text through the system clipboard tools.</p>
+      </details>
+      <details>
+        <summary>Is clipboard content encrypted in transit?<span aria-hidden="true">＋</span></summary>
+        <p>Yes. Clipboard text and images use the same AES-256-GCM session keys as file chunks, over the paired, key-verified session. Nothing is written to an AirBridge server.</p>
+      </details>
+      </div>
+    </section>
+<aside class="guide-cta" aria-label="Download AirBridge">
+      <div>
+        <p class="section-label"><span>GET AIRBRIDGE</span> FREE FOR PERSONAL USE</p>
+        <h2>Install on your computer, then pair your phone.</h2>
+        <p>Official builds for macOS, Windows and Linux live on the GitHub releases page, next to the Android APK and the <code>SHA256SUMS.txt</code> checksums. Nothing needs an account.</p>
+      </div>
+      <div class="guide-cta-actions">
+        <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.0 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+        <a class="button button-secondary" href="download.html">All platforms</a>
+      </div>
+    </aside>
+<section class="related-block" aria-labelledby="related">
+      <h2 id="related">Related AirBridge guides</h2>
+      <ul class="related-list">
+        <li><a href="android-to-mac-file-transfer.html"><strong>Android to Mac file transfer</strong><span>Wi-Fi file transfer from Android to macOS with resume, SHA-256 checks and no cloud upload.</span></a></li>
+        <li><a href="android-screen-sharing.html"><strong>Android screen sharing</strong><span>Consent-based H.264 viewing of your phone on a Mac, Windows or Linux desktop.</span></a></li>
+        <li><a href="private-file-transfer.html"><strong>Private file transfer</strong><span>No account, no cloud copy — and an honest list of what can still be observed.</span></a></li>
+        <li><a href="compare.html"><strong>Honest comparison</strong><span>AirBridge next to LocalSend, KDE Connect, AirDroid, LinkMyMac, Quick Share and AirDrop.</span></a></li>
+      </ul>
+    </section>
+    </article>
+</main>
+<footer class="legal-footer"><div class="wrap">
+    <p class="footer-guide-links"><strong>Guides</strong></p>
+    <div class="footer-guide-grid">
+      <a href="android-to-mac-file-transfer.html">Android to Mac file transfer</a>
+      <a href="android-to-windows-file-transfer.html">Android to Windows file transfer</a>
+      <a href="android-to-linux-file-transfer.html">Android to Linux file transfer</a>
+      <a href="android-airdrop-alternative.html">Android AirDrop alternative</a>
+      <a href="android-clipboard-sync.html">Android clipboard sync</a>
+      <a href="android-screen-sharing.html">Android screen sharing</a>
+      <a href="download.html">Download &amp; install</a>
+      <a href="compare.html">Honest comparison</a>
+      <a href="privacy.html">Privacy policy</a>
+    </div>
+    <p>© AirBridge · <a href="index.html">Home</a> · <a href="https://github.com/DigantaDey/AirBridge">Source code on GitHub</a> · <a href="https://github.com/DigantaDey/AirBridge#readme">README</a></p>
+  </div></footer>
+</body>
+</html>

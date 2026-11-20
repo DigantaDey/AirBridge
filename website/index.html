@@ -5,26 +5,39 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'">
   <meta name="theme-color" content="#f7f8f7">
-  <meta name="description" content="AirBridge v2.5.0: end-to-end encrypted multi-gigabyte file transfers, bidirectional photo and text clipboard sync, persistent contacts, two-way Mac call audio, and H.264 screen sharing between Android and your computer.">
+  <meta name="description" content="AirBridge is an open-source AirDrop alternative for Android: end-to-end encrypted file transfer to Mac, Windows and Linux, clipboard sync and screen sharing, with no account.">
   <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1">
   <link rel="canonical" href="https://airbridge.fyi/">
-  <meta property="og:title" content="AirBridge — Continuity & Encrypted Sharing for Android and Mac">
-  <meta property="og:description" content="Direct, E2EE file transfers, bidirectional photo & text clipboard sync, saved contacts, two-way MacBook call audio, and smooth H.264 screen sharing.">
   <meta property="og:type" content="website">
+  <meta property="og:site_name" content="AirBridge">
+  <meta property="og:locale" content="en">
+  <meta property="og:title" content="AirBridge — Android ↔ Mac, Windows &amp; Linux. Privately.">
+  <meta property="og:description" content="Open-source AirDrop alternative for Android and computers: end-to-end encrypted file transfer, clipboard sync, screen sharing and phone connectivity without an account or cloud storage.">
   <meta property="og:url" content="https://airbridge.fyi/">
-  <meta property="og:image" content="https://airbridge.fyi/icon.svg">
-  <meta name="twitter:card" content="summary">
-  <meta name="twitter:title" content="AirBridge — Continuity & Encrypted Sharing for Android and Mac">
-  <meta name="twitter:description" content="Direct, E2EE file transfers, bidirectional photo & text clipboard sync, saved contacts, two-way MacBook call audio, and smooth H.264 screen sharing.">
+  <meta property="og:image" content="https://airbridge.fyi/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="AirBridge for Android, macOS, Windows and Linux: encrypted file transfer, clipboard sync and screen sharing">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="AirBridge — Android ↔ Mac, Windows &amp; Linux. Privately.">
+  <meta name="twitter:description" content="Open-source AirDrop alternative for Android and computers: end-to-end encrypted file transfer, clipboard sync and screen sharing without an account.">
+  <meta name="twitter:image" content="https://airbridge.fyi/og.png">
+  <meta name="twitter:image:alt" content="AirBridge for Android, macOS, Windows and Linux: encrypted file transfer, clipboard sync and screen sharing">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="stylesheet" href="styles.css">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebSite","name":"AirBridge","url":"https://airbridge.fyi/","description":"Open-source, end-to-end encrypted Android ↔ Mac, Windows and Linux file transfer, clipboard sync, screen sharing and phone connectivity.","inLanguage":"en","publisher":{"@type":"Person","name":"Diganta Dey","url":"https://github.com/DigantaDey"}}
+  </script>
   <script type="application/ld+json">
   {"@context":"https://schema.org","@type":"SoftwareApplication","name":"AirBridge","applicationCategory":"UtilitiesApplication","operatingSystem":"Android, macOS, Windows, Linux","description":"Private encrypted file transfer, bidirectional photo and text clipboard sync, persistent contacts, optional two-way call audio bridge, and consent-based H.264 visual screen sharing between Android and computers.","url":"https://airbridge.fyi/","downloadUrl":"https://github.com/DigantaDey/AirBridge/releases/latest","softwareVersion":"2.5.0","author":{"@type":"Person","name":"Diganta Dey","url":"https://github.com/DigantaDey"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"sameAs":["https://github.com/DigantaDey/AirBridge"]}
   </script>
   <script type="application/ld+json">
   {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Can AirBridge stream smooth video during Android screen sharing?","acceptedAnswer":{"@type":"Answer","text":"Yes. Android encodes the approved display with hardware MediaCodec H.264 and SPS/PPS codec headers, while macOS/desktop decodes frames with WebCodecs (avcC), PLI keyframe recovery, and requestAnimationFrame pacing. AirBridge is consent-based visual sharing — optional per-session playback audio is off by default, and DRM-protected video remains blank by design."}},{"@type":"Question","name":"Can I answer calls and speak/hear through my MacBook like Apple Continuity?","acceptedAnswer":{"@type":"Answer","text":"Yes. AirBridge saves your synced contacts locally while your paired device stays connected, lets you place or answer calls from your MacBook, and includes an optional speakerphone-assisted two-way encrypted call audio bridge between Android and MacBook when you enable microphone access on both devices."}},{"@type":"Question","name":"Does photo and text clipboard sync work from MacBook to Android?","acceptedAnswer":{"@type":"Answer","text":"Yes. On macOS, native NSPasteboard capture reads copied photos cleanly and syncs images and text over E2EE without corrupted binary noise or echo loops."}},{"@type":"Question","name":"Does AirBridge need Accessibility access?","acceptedAnswer":{"@type":"Answer","text":"No. AirBridge does not use Android Accessibility services or notification-listener access. Use Android Share, Process Text, the Quick Settings tile, or the in-app Paste action for reliable clipboard sends."}}]}
   </script>
-  <title>AirBridge — Private Android ↔ MacBook Continuity &amp; Sharing</title>
+  <title>AirBridge — Android to Mac, Windows &amp; Linux File Transfer</title>
 </head>
 <body id="top">
 <a class="skip-link" href="#main">Skip to main content</a>
@@ -47,6 +60,8 @@
     </div>
     <div class="nav-links">
       <a href="#features">Capabilities</a>
+      <a href="guides.html">Guides</a>
+      <a href="download.html">Download</a>
       <a href="#compare">Compare</a>
       <a href="#security">Security</a>
       <a href="#setup">Install</a>
@@ -62,7 +77,7 @@
     <div class="hero-copy">
       <div class="eyebrow"><span class="status-dot" aria-hidden="true"></span> ANDROID ↔ MACBOOK · WINDOWS · LINUX</div>
       <h1>Your devices.<br><span>Working as one.</span></h1>
-      <p class="hero-description">Move multi-gigabyte files, copy photos &amp; text across clipboards, answer phone calls on your MacBook with two-way audio, keep contacts synced while connected, and mirror your screen cleanly at 30fps H.264 — all end-to-end encrypted without a cloud account.</p>
+      <p class="hero-description">The open-source AirDrop alternative for Android and computers. Move multi-gigabyte files, copy photos &amp; text across clipboards, answer phone calls on your MacBook with two-way audio, keep contacts synced while connected, and mirror your screen cleanly at 30fps H.264 — all end-to-end encrypted without a cloud account.</p>
       <div class="hero-actions">
         <a class="button button-dark" href="#setup">Install AirBridge <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
         <a class="button button-secondary" href="https://github.com/DigantaDey/AirBridge/releases/latest">Releases v2.5.0 <span aria-hidden="true">↗</span></a>
@@ -258,6 +273,36 @@
     </div>
   </section>
 
+  <section class="section wrap" id="screens">
+    <div class="section-heading">
+      <div>
+        <p class="section-label"><span>SCREENS</span> THE REAL APP</p>
+        <h2>Actual AirBridge,<br><em>mid-transfer.</em></h2>
+      </div>
+      <p>These are screenshots of the v2.5.0 build you download — no mockups and no invented features.</p>
+    </div>
+
+    <div class="shot-grid">
+      <figure class="shot-card">
+        <img src="screenshots/desktop-file-transfer.jpg" width="1600" height="967" alt="AirBridge on macOS sending a 1.68 GB video to a paired Android phone at 22.7 MB/s with 62 seconds remaining" loading="lazy" decoding="async">
+        <figcaption><strong>File transfer in progress</strong><span>macOS sending a 1.68 GB video: live speed, remaining time and cancel, with SHA-256 verification before the file is saved.</span></figcaption>
+      </figure>
+      <figure class="shot-card">
+        <img src="screenshots/desktop-clipboard.png" width="1600" height="905" alt="AirBridge clipboard panel with auto-beam options, a paste box for links and 2FA codes, and a list of recent clipboard beams" loading="lazy" decoding="async">
+        <figcaption><strong>Clipboard beams</strong><span>Text, links and 2FA codes to the paired device, encrypted with the same session keys as file transfers. Photos beam as well on macOS.</span></figcaption>
+      </figure>
+      <figure class="shot-card shot-card-tall">
+        <img src="screenshots/phone-transfers.jpg" width="720" height="1600" alt="AirBridge on Android receiving a 1.68 GB file at 27.5 MB/s with a progress bar and verified peer fingerprint" loading="lazy" decoding="async">
+        <figcaption><strong>The phone side</strong><span>1.68 GB arriving at 27.5 MB/s, with the verified peer fingerprint under the progress bar.</span></figcaption>
+      </figure>
+      <figure class="shot-card">
+        <img src="screenshots/desktop-calls.png" width="1600" height="916" alt="AirBridge Calls panel with device selector, phone battery level, numeric keypad and Call from phone button" loading="lazy" decoding="async">
+        <figcaption><strong>Calls &amp; battery</strong><span>Dial from the computer, watch the phone’s battery, and opt into Mac call audio per call.</span></figcaption>
+      </figure>
+    </div>
+    <p class="shot-note"><a class="underlined-link" href="guides.html">Browse all guides <span aria-hidden="true">↗</span></a></p>
+  </section>
+
   <section class="section wrap" id="compare">
     <div class="section-heading">
       <div>
@@ -325,6 +370,26 @@
     </div>
   </section>
 
+  <section class="section wrap" id="guides">
+    <div class="section-heading">
+      <div>
+        <p class="section-label"><span>GUIDES</span> PICK YOUR WORKFLOW</p>
+        <h2>Set it up for<br><em>your devices.</em></h2>
+      </div>
+      <p>Focused guides for each task: what AirBridge actually does on that platform, how pairing and encryption work, and where another tool may fit you better.</p>
+    </div>
+    <ul class="related-list related-list-wide">
+      <li><a href="android-to-mac-file-transfer.html"><strong>Android to Mac file transfer</strong><span>Wi-Fi transfers with resume and SHA-256 checks, no cloud upload.</span></a></li>
+      <li><a href="android-to-windows-file-transfer.html"><strong>Android to Windows file transfer</strong><span>A portable EXE, no admin rights, no USB drivers.</span></a></li>
+      <li><a href="android-to-linux-file-transfer.html"><strong>Android to Linux file transfer</strong><span>Per-user install, static glibc/musl builds, XDG launcher.</span></a></li>
+      <li><a href="android-airdrop-alternative.html"><strong>Android AirDrop alternative</strong><span>What can honestly replace AirDrop, and what cannot.</span></a></li>
+      <li><a href="android-clipboard-sync.html"><strong>Android clipboard sync</strong><span>Text both ways, photos on macOS, Android’s limits explained.</span></a></li>
+      <li><a href="android-screen-sharing.html"><strong>Android screen sharing</strong><span>Consent-based H.264 viewing on your computer screen.</span></a></li>
+      <li><a href="open-source-airdrop-alternative.html"><strong>Open-source alternative</strong><span>The licence, the self-hosted relay and what you can verify.</span></a></li>
+      <li><a href="private-file-transfer.html"><strong>Private file transfer</strong><span>No account, no cloud copy — and what can still be observed.</span></a></li>
+    </ul>
+  </section>
+
   <section class="future section wrap" id="security">
     <div class="future-copy">
       <p class="section-label"><span>04</span> SECURITY &amp; PRIVACY</p>
@@ -361,7 +426,7 @@
           <small>Partials never enter Downloads unless byte counts and digests match 100%.</small>
         </div>
       </div>
-      <span class="future-caption">OPEN SOURCE · AUDITED HARDENING &amp; REDACTED DIAGNOSTICS</span>
+      <span class="future-caption">OPEN SOURCE · HARDENED BY DESIGN &amp; REDACTED DIAGNOSTICS</span>
     </div>
   </section>
 
@@ -375,6 +440,7 @@
           <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.0 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
           <a class="button button-secondary" href="privacy.html">Privacy policy</a>
         </div>
+        <a class="underlined-link" href="download.html">All platform downloads &amp; checksums <span aria-hidden="true">↗</span></a><br>
         <a class="underlined-link" href="https://github.com/DigantaDey/AirBridge">Browse source on GitHub <span aria-hidden="true">↗</span></a>
       </div>
 
@@ -481,6 +547,9 @@ cd AirBridge &amp;&amp; npm ci &amp;&amp; npm run dev</code></pre>
     <a class="brand" href="#top"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a>
     <p>A bridge across ecosystems — by Diganta Dey.</p>
     <div>
+      <a href="download.html">Download</a>
+      <a href="guides.html">Guides</a>
+      <a href="compare.html">Compare</a>
       <a href="https://github.com/DigantaDey/AirBridge">GitHub ↗</a>
       <a href="https://github.com/DigantaDey/AirBridge/releases/latest">Releases ↗</a>
       <a href="privacy.html">Privacy</a>

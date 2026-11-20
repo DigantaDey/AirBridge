@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="theme-color" content="#f7f8f7">
+  <meta name="description" content="Transfer files from Android to a Mac over your own Wi-Fi: end-to-end encrypted, resumable multi-gigabyte sends, SHA-256 verified before saving, no account or cloud upload.">
+  <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://airbridge.fyi/android-to-mac-file-transfer.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="AirBridge">
+  <meta property="og:locale" content="en">
+  <meta property="og:title" content="Android to Mac File Transfer Without a Cable or Cloud — AirBridge">
+  <meta property="og:description" content="Transfer files from Android to a Mac over your own Wi-Fi: end-to-end encrypted, resumable multi-gigabyte sends, SHA-256 verified before saving, no account or cloud upload.">
+  <meta property="og:url" content="https://airbridge.fyi/android-to-mac-file-transfer.html">
+  <meta property="og:image" content="https://airbridge.fyi/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Android to Mac File Transfer Without a Cable or Cloud — AirBridge">
+  <meta name="twitter:description" content="Transfer files from Android to a Mac over your own Wi-Fi: end-to-end encrypted, resumable multi-gigabyte sends, SHA-256 verified before saving, no account or cloud upload.">
+  <meta name="twitter:image" content="https://airbridge.fyi/og.png">
+  <meta name="twitter:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebPage","name":"Android to Mac File Transfer Without a Cable or Cloud — AirBridge","description":"Transfer files from Android to a Mac over your own Wi-Fi: end-to-end encrypted, resumable multi-gigabyte sends, SHA-256 verified before saving, no account or cloud upload.","url":"https://airbridge.fyi/android-to-mac-file-transfer.html","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"AirBridge","url":"https://airbridge.fyi/"},"about":{"@type":"SoftwareApplication","name":"AirBridge","applicationCategory":"UtilitiesApplication","operatingSystem":"Android, macOS, Windows, Linux","url":"https://airbridge.fyi/","downloadUrl":"https://github.com/DigantaDey/AirBridge/releases/latest"},"primaryImageOfPage":{"@type":"ImageObject","url":"https://airbridge.fyi/screenshots/desktop-file-transfer.jpg"}}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"AirBridge","item":"https://airbridge.fyi/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://airbridge.fyi/guides.html"},{"@type":"ListItem","position":3,"name":"Android to Mac file transfer","item":"https://airbridge.fyi/android-to-mac-file-transfer.html"}]}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Do I need Google Drive, iCloud or Dropbox to send files from Android to Mac?","acceptedAnswer":{"@type":"Answer","text":"No. Files move directly between the phone and the Mac over your local network (or through a relay you can self-host if no direct path exists). There is no AirBridge account, no cloud copy and no upload step."}},{"@type":"Question","name":"How large can a transfer be?","acceptedAnswer":{"@type":"Answer","text":"Up to 100 files per session. The protocol caps a manifest at 262,144 chunks, which is roughly 256 GiB at the default 1 MiB chunk size — an allocation guard rather than a bandwidth limit. The native Mac app streams straight to disk, so a file never has to fit in memory; a browser-only receiver is capped at 128 MiB."}},{"@type":"Question","name":"Does AirBridge work without internet access?","acceptedAnswer":{"@type":"Answer","text":"Yes. A shared Wi-Fi network, or the phone’s own hotspot joined by the Mac, is enough. The optional relay exists for phones and computers that cannot reach each other directly; it is only needed when no direct path exists, and it only ever carries ciphertext."}},{"@type":"Question","name":"Where do received files go on the Mac?","acceptedAnswer":{"@type":"Answer","text":"By default to ~/Downloads/AirBridge. You can change the receive folder in AirBridge Settings or set AIRBRIDGE_DOWNLOAD_DIR. Files are only published there after the SHA-256 digest matches."}},{"@type":"Question","name":"Is AirBridge available on the Mac App Store?","acceptedAnswer":{"@type":"Answer","text":"No. It is distributed as an ad-hoc signed app through install.sh and the release zips, which keeps it free of Apple Developer fees. The trade-off is that a browser-downloaded copy needs one right-click → Open on first launch."}}]}
+  </script>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <title>Android to Mac File Transfer Without a Cable or Cloud — AirBridge</title>
+</head>
+<body id="top">
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2"/></symbol>
+  <symbol id="devices" viewBox="0 0 24 24"><rect x="3" y="4" width="13" height="11" rx="1.5"/><path d="M2 18h15"/><rect x="17" y="9" width="5" height="10" rx="1"/></symbol>
+</svg>
+<header class="header">
+  <nav class="nav wrap" aria-label="Main navigation">
+    <div class="brand-group">
+      <a class="brand" href="index.html" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a>
+      <span class="version-pill">v2.5.0</span>
+    </div>
+    <div class="nav-links">
+      <a href="index.html#features">Capabilities</a>
+      <a href="guides.html">Guides</a>
+      <a href="compare.html">Compare</a>
+      <a href="index.html#security">Security</a>
+      <a href="download.html">Download</a>
+      <a href="index.html#faq">FAQ</a>
+    </div>
+    <a class="nav-cta" href="https://github.com/DigantaDey/AirBridge">GitHub <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+  </nav>
+</header>
+
+<main class="legal wrap guide" id="main">
+    <article class="legal-card">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li><a href="index.html">AirBridge</a></li>
+      <li><a href="guides.html">Guides</a></li>
+      <li><span aria-current="page">Android to Mac file transfer</span></li>
+    </ol>
+  </nav>
+      <p class="section-label"><span>GUIDE</span> ANDROID → MACOS</p>
+      <h1>Android to Mac file transfer without a cable, an account, or an upload</h1>
+      <p class="guide-lede">AirDrop stops at Apple’s own devices, so Android phones are left out. AirBridge is an open-source bridge for the other direction: install the macOS companion, pair your phone with a QR code, and files travel directly between the two devices on your network, end-to-end encrypted.</p>
+      <figure class="guide-figure">
+        <img src="screenshots/desktop-file-transfer.jpg" width="1600" height="967" alt="AirBridge for macOS sending a 1.68 GB video file to a paired Android phone, showing upload speed, remaining time and SHA-256 verification in the footer" loading="lazy" decoding="async">
+        <figcaption>AirBridge v2.5.0 on macOS mid-transfer: a 1.68 GB video to a paired Android phone, with live speed and remaining time.</figcaption>
+      </figure>
+      <div class="guide-body">
+      <h2 id="problem">Why Android to Mac file transfer is still awkward</h2>
+        <ul>
+          <li><strong>AirDrop and Universal Clipboard are Apple-only.</strong> They rely on proprietary protocols and Apple IDs, so an Android phone cannot join even when it is sitting next to the Mac.</li>
+          <li><strong>USB copy is a cable, an app and a protocol.</strong> Android File Transfer and MTP mounts work until they don’t: large videos stall, the phone unmounts, and macOS updates break the helper app.</li>
+          <li><strong>Cloud drives mean two uploads.</strong> The file leaves your devices, costs quota, needs an account on both sides, and is usually no faster than your Wi-Fi link.</li>
+          <li><strong>Chat apps compress media</strong> and cap attachment sizes, which defeats the point when you are moving a 2 GB video.</li>
+          <li><strong>Bluetooth is far too slow</strong> for anything beyond a contact card or a small photo.</li>
+        </ul>
+        <p>AirBridge solves the specific case of “my file is on my phone and I need it on my Mac, now, without sending it through somebody’s data centre.”</p>
+
+      <h2 id="how-it-works">How AirBridge moves a file from Android to macOS</h2>
+        <p>AirBridge runs a native menu-bar app on the Mac and a native Android app on the phone. The desktop service owns the encrypted session; the window you see on the Mac is a view over it.</p>
+        <ol>
+          <li><strong>Pair once.</strong> Open AirBridge on the Mac, scan the QR code from the Android app (or type the six-character pairing code). The code is never transmitted — not even as a hash — because pairing uses SPAKE2 (RFC 9382).</li>
+          <li><strong>Choose the files.</strong> Either use <em>Share → AirBridge</em> from any Android app, or pick files inside AirBridge. Up to 100 files go into a single transfer session.</li>
+          <li><strong>Accept on the Mac.</strong> The receiving side sees the manifest and accepts (a trusted device can auto-accept). Nothing is decrypted or written before you accept.</li>
+          <li><strong>Stream straight to disk.</strong> A binary windowed pipeline with TCP backpressure writes into a private <code>.part</code> journal, so a multi-gigabyte video never has to fit in RAM. Chunks default to 1 MiB (16 KiB–1 MiB supported).</li>
+          <li><strong>Verify, then save.</strong> The incremental and final SHA-256 digests must match before the file is renamed into <code>~/Downloads/AirBridge</code> (configurable in Settings or with <code>AIRBRIDGE_DOWNLOAD_DIR</code>). <em>Reveal</em> opens Finder at the file.</li>
+        </ol>
+        <p>If the Wi-Fi link wobbles, the sender resumes inside the same running session: consent stays tied to the same encrypted peer key and the same manifest. A force-stopped process or a changed identity starts a fresh, verified send instead of pretending the old one is valid.</p>
+
+      <h2 id="encryption">What is encrypted, and what you can verify yourself</h2>
+        <p>Pairing proves knowledge of the code without revealing it (SPAKE2). Session keys come from ephemeral ECDH P-256 plus HKDF; every file chunk, clipboard item, call audio frame and screen frame is sealed with AES-256-GCM. On first contact both devices show a six-digit SAS fingerprint you can compare out loud — that is the step that defeats a man-in-the-middle.</p>
+        <p>The Android app also pins your Mac’s local TLS certificate authority and refuses to silently fall back to plaintext. Host-only actions — writing the Mac clipboard, saving into the receive folder, opening Finder — are loopback-only, so a paired phone cannot ask the Mac to run arbitrary commands.</p>
+        <p>The project publishes its own threat model and audit notes in <a href="https://github.com/DigantaDey/AirBridge/blob/main/SECURITY.md">SECURITY.md</a>. Those notes are the maintainer’s review, not a third-party security audit, and the site does not claim otherwise.</p>
+
+      <h2 id="install">Step 1 — install the macOS companion</h2>
+        <p>One command installs the prebuilt app without sudo, Xcode or an Apple Developer account:</p>
+        <pre><code>curl -fsSL https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.sh | bash</code></pre>
+        <p>The script puts <code>AirBridge.app</code> in <code>~/Applications</code>, links the <code>AirBridge</code> command into <code>~/.local/bin</code>, and can register a login item with <code>--autostart</code>. Prefer a manual download? Use <code>AirBridge-macOS-arm64.zip</code> or <code>AirBridge-macOS-x64.zip</code> from the release, or the single-file <code>AirBridge-darwin-arm64</code> / <code>AirBridge-darwin-x64</code> binaries.</p>
+        <p><strong>Honest caveat:</strong> the Mac build is ad-hoc signed, not notarised, because notarisation requires a paid Apple Developer account. Installed through <code>curl</code> there is no quarantine flag and Gatekeeper stays quiet; if you download a zip in a browser instead, right-click → <em>Open</em> the first time. macOS may also ask you to allow AirBridge on the local network — that prompt is the transfer service, and declining it stops discovery.</p>
+
+      <h2 id="install-android">Step 2 — install the Android app and pair</h2>
+        <p>The Android side is a native Jetpack Compose app for Android 8.0 (API 26) and newer. The release page carries <a href="https://github.com/DigantaDey/AirBridge/releases/latest/download/AirBridge-android-debug.apk">AirBridge-android-debug.apk</a>, an installable testing/sideload build; the Play-ready release flow is documented in <a href="https://github.com/DigantaDey/AirBridge/blob/main/docs/PLAY_STORE_RELEASE.md">docs/PLAY_STORE_RELEASE.md</a>.</p>
+        <p>After installing, scan the QR code on the Mac and compare the six-digit verification code. Every continuity permission — contacts, phone calls, call microphone, screen capture — is off until you enable that specific feature in <em>Settings → Phone on your computer</em>.</p>
+
+      <h2 id="network">If the phone and Mac are not on the same Wi-Fi</h2>
+        <ul>
+          <li><strong>Phone hotspot handoff.</strong> Tap <em>Use this phone’s hotspot</em> in the Android app and approve the join on the Mac. The sealed Wi-Fi credentials travel over the encrypted session — or over Bluetooth LE on the macOS app when there is no connection at all yet.</li>
+          <li><strong>Self-hostable relay.</strong> When a direct path is impossible (different networks, client isolation, CGNAT), the phone can route through a relay you run with <code>airbridge relay --listen 0.0.0.0:47391</code>. TLS stays end to end and pinned, so the relay only ever sees ciphertext, and the session switches back to a direct path when one appears.</li>
+        </ul>
+
+      <h2 id="limits">Limits worth knowing before you install</h2>
+        <ul>
+          <li><strong>No iOS app.</strong> AirBridge connects Android to macOS, Windows and Linux. iPhone-to-Android is not supported.</li>
+          <li><strong>Both apps are required</strong> for the full experience. A browser tab can receive files, but a browser-only receiver is memory-capped (128 MiB) — use the native app or the daemon for large files.</li>
+          <li><strong>Resume is per running session.</strong> Android force-stop, reboot or a revoked file permission ends it; the next attempt is a normal, freshly verified transfer.</li>
+          <li><strong>No remote control.</strong> Screen sharing is viewing only; AirBridge does not inject taps or keystrokes into your phone.</li>
+          <li><strong>Aggressive battery management</strong> on some Android OEM builds can stop long screen-off transfers. AirBridge documents the setting to change instead of promising it cannot happen.</li>
+        </ul>
+      </div>
+<section class="faq-block" aria-labelledby="questions">
+      <h2 id="questions">Questions about this guide</h2>
+      <div class="faq-list">
+      <details>
+        <summary>Do I need Google Drive, iCloud or Dropbox to send files from Android to Mac?<span aria-hidden="true">＋</span></summary>
+        <p>No. Files move directly between the phone and the Mac over your local network (or through a relay you can self-host if no direct path exists). There is no AirBridge account, no cloud copy and no upload step.</p>
+      </details>
+      <details>
+        <summary>How large can a transfer be?<span aria-hidden="true">＋</span></summary>
+        <p>Up to 100 files per session. The protocol caps a manifest at 262,144 chunks, which is roughly 256 GiB at the default 1 MiB chunk size — an allocation guard rather than a bandwidth limit. The native Mac app streams straight to disk, so a file never has to fit in memory; a browser-only receiver is capped at 128 MiB.</p>
+      </details>
+      <details>
+        <summary>Does AirBridge work without internet access?<span aria-hidden="true">＋</span></summary>
+        <p>Yes. A shared Wi-Fi network, or the phone’s own hotspot joined by the Mac, is enough. The optional relay exists for phones and computers that cannot reach each other directly; it is only needed when no direct path exists, and it only ever carries ciphertext.</p>
+      </details>
+      <details>
+        <summary>Where do received files go on the Mac?<span aria-hidden="true">＋</span></summary>
+        <p>By default to ~/Downloads/AirBridge. You can change the receive folder in AirBridge Settings or set AIRBRIDGE_DOWNLOAD_DIR. Files are only published there after the SHA-256 digest matches.</p>
+      </details>
+      <details>
+        <summary>Is AirBridge available on the Mac App Store?<span aria-hidden="true">＋</span></summary>
+        <p>No. It is distributed as an ad-hoc signed app through install.sh and the release zips, which keeps it free of Apple Developer fees. The trade-off is that a browser-downloaded copy needs one right-click → Open on first launch.</p>
+      </details>
+      </div>
+    </section>
+<aside class="guide-cta" aria-label="Download AirBridge">
+      <div>
+        <p class="section-label"><span>GET AIRBRIDGE</span> FREE FOR PERSONAL USE</p>
+        <h2>Install on your computer, then pair your phone.</h2>
+        <p>Official builds for macOS, Windows and Linux live on the GitHub releases page, next to the Android APK and the <code>SHA256SUMS.txt</code> checksums. Nothing needs an account.</p>
+      </div>
+      <div class="guide-cta-actions">
+        <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.0 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+        <a class="button button-secondary" href="download.html">All platforms</a>
+      </div>
+    </aside>
+<section class="related-block" aria-labelledby="related">
+      <h2 id="related">Related AirBridge guides</h2>
+      <ul class="related-list">
+        <li><a href="android-airdrop-alternative.html"><strong>Android AirDrop alternative</strong><span>What an AirDrop replacement for Android actually needs, and where AirBridge fits.</span></a></li>
+        <li><a href="android-to-windows-file-transfer.html"><strong>Android to Windows file transfer</strong><span>Portable Windows app, no admin rights, encrypted Wi-Fi transfers from Android.</span></a></li>
+        <li><a href="android-clipboard-sync.html"><strong>Android clipboard sync</strong><span>Text both ways, photos on macOS — without Accessibility access.</span></a></li>
+        <li><a href="private-file-transfer.html"><strong>Private file transfer</strong><span>No account, no cloud copy — and an honest list of what can still be observed.</span></a></li>
+      </ul>
+    </section>
+    </article>
+</main>
+<footer class="legal-footer"><div class="wrap">
+    <p class="footer-guide-links"><strong>Guides</strong></p>
+    <div class="footer-guide-grid">
+      <a href="android-to-mac-file-transfer.html">Android to Mac file transfer</a>
+      <a href="android-to-windows-file-transfer.html">Android to Windows file transfer</a>
+      <a href="android-to-linux-file-transfer.html">Android to Linux file transfer</a>
+      <a href="android-airdrop-alternative.html">Android AirDrop alternative</a>
+      <a href="android-clipboard-sync.html">Android clipboard sync</a>
+      <a href="android-screen-sharing.html">Android screen sharing</a>
+      <a href="download.html">Download &amp; install</a>
+      <a href="compare.html">Honest comparison</a>
+      <a href="privacy.html">Privacy policy</a>
+    </div>
+    <p>© AirBridge · <a href="index.html">Home</a> · <a href="https://github.com/DigantaDey/AirBridge">Source code on GitHub</a> · <a href="https://github.com/DigantaDey/AirBridge#readme">README</a></p>
+  </div></footer>
+</body>
+</html>

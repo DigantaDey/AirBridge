@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="theme-color" content="#f7f8f7">
+  <meta name="description" content="How AirBridge keeps transfers private: no account, no cloud copy, SPAKE2 pairing, AES-256-GCM payloads, SHA-256 verification and redacted, opt-in diagnostics.">
+  <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://airbridge.fyi/private-file-transfer.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="AirBridge">
+  <meta property="og:locale" content="en">
+  <meta property="og:title" content="Private, Encrypted File Transfer Between Phone and Computer — AirBridge">
+  <meta property="og:description" content="How AirBridge keeps transfers private: no account, no cloud copy, SPAKE2 pairing, AES-256-GCM payloads, SHA-256 verification and redacted, opt-in diagnostics.">
+  <meta property="og:url" content="https://airbridge.fyi/private-file-transfer.html">
+  <meta property="og:image" content="https://airbridge.fyi/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Private, Encrypted File Transfer Between Phone and Computer — AirBridge">
+  <meta name="twitter:description" content="How AirBridge keeps transfers private: no account, no cloud copy, SPAKE2 pairing, AES-256-GCM payloads, SHA-256 verification and redacted, opt-in diagnostics.">
+  <meta name="twitter:image" content="https://airbridge.fyi/og.png">
+  <meta name="twitter:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebPage","name":"Private, Encrypted File Transfer Between Phone and Computer — AirBridge","description":"How AirBridge keeps transfers private: no account, no cloud copy, SPAKE2 pairing, AES-256-GCM payloads, SHA-256 verification and redacted, opt-in diagnostics.","url":"https://airbridge.fyi/private-file-transfer.html","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"AirBridge","url":"https://airbridge.fyi/"},"about":{"@type":"SoftwareApplication","name":"AirBridge","applicationCategory":"UtilitiesApplication","operatingSystem":"Android, macOS, Windows, Linux","url":"https://airbridge.fyi/","downloadUrl":"https://github.com/DigantaDey/AirBridge/releases/latest"}}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"AirBridge","item":"https://airbridge.fyi/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://airbridge.fyi/guides.html"},{"@type":"ListItem","position":3,"name":"Private file transfer","item":"https://airbridge.fyi/private-file-transfer.html"}]}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Does AirBridge store my files anywhere?","acceptedAnswer":{"@type":"Answer","text":"No. Files are streamed between the paired devices and written to the receive folder you configured. There is no AirBridge account or storage service."}},{"@type":"Question","name":"Does the relay see file contents?","acceptedAnswer":{"@type":"Answer","text":"No. The relay forwards ciphertext inside an end-to-end TLS session that stays pinned between the devices. It can observe connection metadata such as addresses and timing, as any network hop can."}},{"@type":"Question","name":"Is there telemetry or analytics?","acceptedAnswer":{"@type":"Answer","text":"The Android app ships no advertising or analytics SDK, and the static website does not load tracking scripts. Diagnostics are generated locally and only shared when you click a share action."}},{"@type":"Question","name":"Has AirBridge been audited by a third party?","acceptedAnswer":{"@type":"Answer","text":"No. The maintainer publishes the threat model and audit notes in SECURITY.md, and the cryptographic primitives are audited libraries, but there is no independent third-party audit and the site does not claim one."}}]}
+  </script>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <title>Private, Encrypted File Transfer Between Phone and Computer — AirBridge</title>
+</head>
+<body id="top">
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2"/></symbol>
+  <symbol id="devices" viewBox="0 0 24 24"><rect x="3" y="4" width="13" height="11" rx="1.5"/><path d="M2 18h15"/><rect x="17" y="9" width="5" height="10" rx="1"/></symbol>
+</svg>
+<header class="header">
+  <nav class="nav wrap" aria-label="Main navigation">
+    <div class="brand-group">
+      <a class="brand" href="index.html" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a>
+      <span class="version-pill">v2.5.0</span>
+    </div>
+    <div class="nav-links">
+      <a href="index.html#features">Capabilities</a>
+      <a href="guides.html">Guides</a>
+      <a href="compare.html">Compare</a>
+      <a href="index.html#security">Security</a>
+      <a href="download.html">Download</a>
+      <a href="index.html#faq">FAQ</a>
+    </div>
+    <a class="nav-cta" href="https://github.com/DigantaDey/AirBridge">GitHub <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+  </nav>
+</header>
+
+<main class="legal wrap guide" id="main">
+    <article class="legal-card">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li><a href="index.html">AirBridge</a></li>
+      <li><a href="guides.html">Guides</a></li>
+      <li><span aria-current="page">Private file transfer</span></li>
+    </ol>
+  </nav>
+      <p class="section-label"><span>GUIDE</span> PRIVACY &amp; SECURITY</p>
+      <h1>Private file transfer between your phone and your computer</h1>
+      <p class="guide-lede">A private transfer means three things at once: the content is encrypted end to end, no third party keeps a copy, and you are told honestly what can still be observed. AirBridge is designed around all three, so this page lists both the protections and the limits.</p>
+
+      <div class="guide-body">
+      <h2 id="model">The model, in plain terms</h2>
+        <ul>
+          <li><strong>No account.</strong> There is nothing to sign up for, no identity server, and no device directory outside your own network.</li>
+          <li><strong>No cloud copy.</strong> Files are streamed between the two devices. The only optional server is a relay you can run yourself, and it forwards ciphertext.</li>
+          <li><strong>End-to-end encryption.</strong> Pairing is proven with SPAKE2 (RFC 9382); session keys come from ephemeral ECDH P-256 with HKDF; file chunks, clipboard items, call audio and screen frames are sealed with AES-256-GCM.</li>
+          <li><strong>Verified before saved.</strong> A received file is published only when its SHA-256 digest matches what the sender declared.</li>
+          <li><strong>No analytics in the app.</strong> The Android app contains no advertising or analytics SDK, and the marketing site is a static page with no tracking scripts.</li>
+        </ul>
+
+      <h2 id="threat-model">What an observer can still see</h2>
+        <p>Honest privacy writing names the gaps. Before pairing, devices on the same network can see that an AirBridge device exists, its device name and its public key — discovery is not trust. The network operator (or anyone who can watch the link) can see addresses, ports, timing and rough volume, even though the payload is ciphertext. A relay sees connection metadata and ciphertext, never session keys.</p>
+        <p>The pairing code itself is never transmitted, not even as a hash, and pairing attempts are rate-limited, so guessing the code is not a practical way in. A six-digit SAS code and a pinned TLS certificate authority let you detect a substituted key on first contact.</p>
+
+      <h2 id="host-boundary">The computer is a separate trust boundary</h2>
+        <p>The desktop service exposes host-level actions — writing the system clipboard, saving into the receive folder, revealing a file, opening a folder — only on loopback. A paired phone cannot ask your computer to run a shell command. Folder-open requests are constrained to the configured receive folder and use a fixed argument vector, not a shell.</p>
+        <p>On the Android side, the app declares no Accessibility service and no notification listener, requests no call-log permission, and disables Android backup so pairing state and TLS pins stay on the device. Every continuity permission — contacts, phone, microphone, screen capture — is off until you enable that specific feature.</p>
+
+      <h2 id="diagnostics">Diagnostics, crash reports and what leaves your device</h2>
+        <p>Diagnostics stay local. Bundles are bounded, and personal data is redacted — home paths and usernames, IP and MAC addresses, Wi-Fi SSIDs, pairing codes, tokens and cryptographic keys. Nothing is uploaded automatically: a report is only shared when you review it and click <strong>Copy diagnostics</strong>, <strong>Report on GitHub</strong> or <strong>Send report</strong>. The <a href="privacy.html">privacy policy</a> lists this in the same detail.</p>
+
+      <h2 id="limits">Limits and disclosures</h2>
+        <ul>
+          <li><strong>No independent audit.</strong> The project publishes its own threat model and audit notes in <a href="https://github.com/DigantaDey/AirBridge/blob/main/SECURITY.md">SECURITY.md</a>; it does not claim a third-party audit or absolute-security guarantees.</li>
+          <li><strong>Ad-hoc signed macOS binaries</strong> and unsigned Windows binaries mean Gatekeeper and SmartScreen friction; integrity comes from published checksums and Sigstore attestations rather than paid certificates.</li>
+          <li><strong>Screen sharing respects DRM</strong> and stays blank for protected content, and call audio routing uses an opt-in, speakerphone-assisted bridge because unrooted Android restricts raw cellular uplink injection.</li>
+          <li><strong>Local threats remain.</strong> A compromised device, malware with screen access, or someone who can read your unlocked phone are outside any app’s threat model.</li>
+        </ul>
+
+      <h2 id="verify">Verify a release, verify a device</h2>
+        <pre><code>gh attestation verify AirBridge-macOS-arm64.zip -R DigantaDey/AirBridge</code></pre>
+        <p>For the device side: compare the six-digit verification code on first pairing, keep an eye on the trusted-device list, and use <strong>Forget</strong> on the phone if a pinned certificate ever changes unexpectedly. A TLS error is never permission to downgrade to plaintext.</p>
+      </div>
+<section class="faq-block" aria-labelledby="questions">
+      <h2 id="questions">Questions about this guide</h2>
+      <div class="faq-list">
+      <details>
+        <summary>Does AirBridge store my files anywhere?<span aria-hidden="true">＋</span></summary>
+        <p>No. Files are streamed between the paired devices and written to the receive folder you configured. There is no AirBridge account or storage service.</p>
+      </details>
+      <details>
+        <summary>Does the relay see file contents?<span aria-hidden="true">＋</span></summary>
+        <p>No. The relay forwards ciphertext inside an end-to-end TLS session that stays pinned between the devices. It can observe connection metadata such as addresses and timing, as any network hop can.</p>
+      </details>
+      <details>
+        <summary>Is there telemetry or analytics?<span aria-hidden="true">＋</span></summary>
+        <p>The Android app ships no advertising or analytics SDK, and the static website does not load tracking scripts. Diagnostics are generated locally and only shared when you click a share action.</p>
+      </details>
+      <details>
+        <summary>Has AirBridge been audited by a third party?<span aria-hidden="true">＋</span></summary>
+        <p>No. The maintainer publishes the threat model and audit notes in SECURITY.md, and the cryptographic primitives are audited libraries, but there is no independent third-party audit and the site does not claim one.</p>
+      </details>
+      </div>
+    </section>
+<aside class="guide-cta" aria-label="Download AirBridge">
+      <div>
+        <p class="section-label"><span>GET AIRBRIDGE</span> FREE FOR PERSONAL USE</p>
+        <h2>Install on your computer, then pair your phone.</h2>
+        <p>Official builds for macOS, Windows and Linux live on the GitHub releases page, next to the Android APK and the <code>SHA256SUMS.txt</code> checksums. Nothing needs an account.</p>
+      </div>
+      <div class="guide-cta-actions">
+        <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.0 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+        <a class="button button-secondary" href="download.html">All platforms</a>
+      </div>
+    </aside>
+<section class="related-block" aria-labelledby="related">
+      <h2 id="related">Related AirBridge guides</h2>
+      <ul class="related-list">
+        <li><a href="open-source-airdrop-alternative.html"><strong>Open-source AirDrop alternative</strong><span>Auditable code, a self-hostable relay and an honest note about the licence.</span></a></li>
+        <li><a href="android-clipboard-sync.html"><strong>Android clipboard sync</strong><span>Text both ways, photos on macOS — without Accessibility access.</span></a></li>
+        <li><a href="android-to-mac-file-transfer.html"><strong>Android to Mac file transfer</strong><span>Wi-Fi file transfer from Android to macOS with resume, SHA-256 checks and no cloud upload.</span></a></li>
+        <li><a href="compare.html"><strong>Honest comparison</strong><span>AirBridge next to LocalSend, KDE Connect, AirDroid, LinkMyMac, Quick Share and AirDrop.</span></a></li>
+      </ul>
+    </section>
+    </article>
+</main>
+<footer class="legal-footer"><div class="wrap">
+    <p class="footer-guide-links"><strong>Guides</strong></p>
+    <div class="footer-guide-grid">
+      <a href="android-to-mac-file-transfer.html">Android to Mac file transfer</a>
+      <a href="android-to-windows-file-transfer.html">Android to Windows file transfer</a>
+      <a href="android-to-linux-file-transfer.html">Android to Linux file transfer</a>
+      <a href="android-airdrop-alternative.html">Android AirDrop alternative</a>
+      <a href="android-clipboard-sync.html">Android clipboard sync</a>
+      <a href="android-screen-sharing.html">Android screen sharing</a>
+      <a href="download.html">Download &amp; install</a>
+      <a href="compare.html">Honest comparison</a>
+      <a href="privacy.html">Privacy policy</a>
+    </div>
+    <p>© AirBridge · <a href="index.html">Home</a> · <a href="https://github.com/DigantaDey/AirBridge">Source code on GitHub</a> · <a href="https://github.com/DigantaDey/AirBridge#readme">README</a></p>
+  </div></footer>
+</body>
+</html>

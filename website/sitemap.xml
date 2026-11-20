@@ -2,8 +2,54 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
     <loc>https://airbridge.fyi/</loc>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>https://airbridge.fyi/download.html</loc>
+    <priority>0.9</priority>
+  </url>
+  <url>
+    <loc>https://airbridge.fyi/guides.html</loc>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://airbridge.fyi/android-to-mac-file-transfer.html</loc>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://airbridge.fyi/android-to-windows-file-transfer.html</loc>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://airbridge.fyi/android-to-linux-file-transfer.html</loc>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://airbridge.fyi/android-airdrop-alternative.html</loc>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://airbridge.fyi/android-clipboard-sync.html</loc>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://airbridge.fyi/android-screen-sharing.html</loc>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://airbridge.fyi/open-source-airdrop-alternative.html</loc>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://airbridge.fyi/private-file-transfer.html</loc>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://airbridge.fyi/compare.html</loc>
+    <priority>0.8</priority>
   </url>
   <url>
     <loc>https://airbridge.fyi/privacy.html</loc>
+    <priority>0.3</priority>
   </url>
 </urlset>

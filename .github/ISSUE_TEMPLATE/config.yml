@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Guides and troubleshooting (airbridge.fyi)
+    url: https://airbridge.fyi/guides.html
+    about: Per-platform guides for file transfer, clipboard sync, screen sharing and privacy.
+  - name: Security problem
+    url: https://github.com/DigantaDey/AirBridge/blob/main/SECURITY.md
+    about: Please report vulnerabilities privately instead of opening a public issue.
+  - name: Documentation and setup
+    url: https://github.com/DigantaDey/AirBridge#readme
+    about: Install commands, environment variables, architecture and platform support.

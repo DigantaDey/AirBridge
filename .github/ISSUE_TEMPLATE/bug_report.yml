@@ -1,0 +1,97 @@
+name: Bug report
+description: Something in AirBridge does not work as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please **redact** pairing codes, keys, IP/MAC
+        addresses, phone numbers and personal file names before pasting.
+        Security issues belong in [SECURITY.md](https://github.com/DigantaDey/AirBridge/blob/main/SECURITY.md), not here.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Include the exact wording of any error message.
+      placeholder: Sending a 2 GB video stalls at ~90% and the receiver shows "waiting".
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Pair Android 14 phone with macOS 15 desktop
+        2. Send a 2 GB video from the phone
+        3. Watch the transfer at ~90%
+        4. The transfer stops and never completes
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: AirBridge version
+      description: Shown in the app's top bar, the macOS menu, About AirBridge, or `airbridge --version`.
+      placeholder: "2.5.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: desktop
+    attributes:
+      label: Desktop platform
+      options:
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Windows (x64)
+        - Windows (ARM64)
+        - Linux (x64, glibc)
+        - Linux (arm64, glibc)
+        - Linux (musl)
+        - npm / npx (source)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: android
+    attributes:
+      label: Android device and version
+      description: Model plus Android version and OEM build if you know it.
+      placeholder: "Pixel 7, Android 15"
+    validations:
+      required: true
+  - type: dropdown
+    id: feature
+    attributes:
+      label: Which part of AirBridge?
+      options:
+        - Pairing / connection
+        - File transfer
+        - Clipboard sync
+        - Screen sharing
+        - Contacts / calls
+        - Installer / update
+        - CLI / daemon / relay
+        - Website or documentation
+        - Something else
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: How were the devices connected?
+      options:
+        - Same Wi-Fi network
+        - Phone hotspot joined by the computer
+        - Relay
+        - Not connected at all
+        - Not sure
+    validations:
+      required: false
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics (optional, redacted)
+      description: Settings → Copy diagnostics. The bundle is scrubbed automatically, but read it before posting.
+      render: text
+    validations:
+      required: false

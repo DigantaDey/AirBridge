@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="theme-color" content="#f7f8f7">
+  <meta name="description" content="Send files from Android to Windows over Wi-Fi with a portable app: no USB drivers, no admin rights, end-to-end encryption, resumable transfers and SHA-256 checks.">
+  <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://airbridge.fyi/android-to-windows-file-transfer.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="AirBridge">
+  <meta property="og:locale" content="en">
+  <meta property="og:title" content="Android to Windows File Transfer Over Wi-Fi — AirBridge">
+  <meta property="og:description" content="Send files from Android to Windows over Wi-Fi with a portable app: no USB drivers, no admin rights, end-to-end encryption, resumable transfers and SHA-256 checks.">
+  <meta property="og:url" content="https://airbridge.fyi/android-to-windows-file-transfer.html">
+  <meta property="og:image" content="https://airbridge.fyi/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Android to Windows File Transfer Over Wi-Fi — AirBridge">
+  <meta name="twitter:description" content="Send files from Android to Windows over Wi-Fi with a portable app: no USB drivers, no admin rights, end-to-end encryption, resumable transfers and SHA-256 checks.">
+  <meta name="twitter:image" content="https://airbridge.fyi/og.png">
+  <meta name="twitter:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebPage","name":"Android to Windows File Transfer Over Wi-Fi — AirBridge","description":"Send files from Android to Windows over Wi-Fi with a portable app: no USB drivers, no admin rights, end-to-end encryption, resumable transfers and SHA-256 checks.","url":"https://airbridge.fyi/android-to-windows-file-transfer.html","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"AirBridge","url":"https://airbridge.fyi/"},"about":{"@type":"SoftwareApplication","name":"AirBridge","applicationCategory":"UtilitiesApplication","operatingSystem":"Android, macOS, Windows, Linux","url":"https://airbridge.fyi/","downloadUrl":"https://github.com/DigantaDey/AirBridge/releases/latest"},"primaryImageOfPage":{"@type":"ImageObject","url":"https://airbridge.fyi/screenshots/phone-transfers.jpg"}}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"AirBridge","item":"https://airbridge.fyi/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://airbridge.fyi/guides.html"},{"@type":"ListItem","position":3,"name":"Android to Windows file transfer","item":"https://airbridge.fyi/android-to-windows-file-transfer.html"}]}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Do I need Google Quick Share or Nearby Share on Windows?","acceptedAnswer":{"@type":"Answer","text":"No. AirBridge has its own pairing and transport: a QR code or six-character code, then a direct encrypted link over your network. Quick Share is unrelated and can stay unused."}},{"@type":"Question","name":"Does the Windows install need administrator rights?","acceptedAnswer":{"@type":"Answer","text":"No. The installer writes to %LOCALAPPDATA%\\AirBridge and edits only your user PATH, plus an optional per-user Run key for autostart."}},{"@type":"Question","name":"Windows says the app is unsigned. Is that expected?","acceptedAnswer":{"@type":"Answer","text":"Yes. Release binaries are not Authenticode-signed. Verify the file against SHA256SUMS.txt on the release page (the installer does this automatically) and prefer the curl-based install command, which does not set Mark-of-the-Web."}},{"@type":"Question","name":"Does it work on Windows on ARM?","acceptedAnswer":{"@type":"Answer","text":"Yes — AirBridge-windows-arm64.exe is built and published with every release alongside the x64 build."}},{"@type":"Question","name":"Which port does AirBridge use?","acceptedAnswer":{"@type":"Answer","text":"Port 3000 by default for the HTTP/HTTPS signalling service. Set the PORT environment variable to change it; the local UI stays on http://localhost:3000 unless you change that too."}}]}
+  </script>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <title>Android to Windows File Transfer Over Wi-Fi — AirBridge</title>
+</head>
+<body id="top">
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2"/></symbol>
+  <symbol id="devices" viewBox="0 0 24 24"><rect x="3" y="4" width="13" height="11" rx="1.5"/><path d="M2 18h15"/><rect x="17" y="9" width="5" height="10" rx="1"/></symbol>
+</svg>
+<header class="header">
+  <nav class="nav wrap" aria-label="Main navigation">
+    <div class="brand-group">
+      <a class="brand" href="index.html" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a>
+      <span class="version-pill">v2.5.0</span>
+    </div>
+    <div class="nav-links">
+      <a href="index.html#features">Capabilities</a>
+      <a href="guides.html">Guides</a>
+      <a href="compare.html">Compare</a>
+      <a href="index.html#security">Security</a>
+      <a href="download.html">Download</a>
+      <a href="index.html#faq">FAQ</a>
+    </div>
+    <a class="nav-cta" href="https://github.com/DigantaDey/AirBridge">GitHub <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+  </nav>
+</header>
+
+<main class="legal wrap guide" id="main">
+    <article class="legal-card">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li><a href="index.html">AirBridge</a></li>
+      <li><a href="guides.html">Guides</a></li>
+      <li><span aria-current="page">Android to Windows file transfer</span></li>
+    </ol>
+  </nav>
+      <p class="section-label"><span>GUIDE</span> ANDROID → WINDOWS</p>
+      <h1>Android to Windows file transfer without USB drivers or an account</h1>
+      <p class="guide-lede">Windows and Android talk to each other only when an app is installed on both sides. AirBridge is that app: a portable Windows executable, a native Android app, and an encrypted direct connection over your own network instead of an upload queue.</p>
+      <figure class="guide-figure guide-figure-phone">
+        <img src="screenshots/phone-transfers.jpg" width="720" height="1600" alt="AirBridge on Android downloading a 1.68 GB file from a paired computer at 27.5 MB/s, with a progress bar and SHA-256 fingerprint" loading="lazy" decoding="async">
+        <figcaption>The Android side of the same transfer: 1.68 GB arriving at 27.5 MB/s from a paired computer, with the verified SHA-256 fingerprint shown under the progress bar.</figcaption>
+      </figure>
+      <div class="guide-body">
+      <h2 id="problem">Why Android to Windows file transfer is still fiddly</h2>
+        <ul>
+          <li><strong>Nearby sharing is not always available.</strong> Google’s Quick Share works on supported Windows PCs, but availability depends on device, region and how the feature is installed — and it is not open source.</li>
+          <li><strong>USB MTP needs drivers and patience.</strong> The phone appears as a camera-like device, large copies stall, and some OEM cable/driver combinations simply fail.</li>
+          <li><strong>Phone-link style apps have narrow scope.</strong> They are strongest at notifications, calls and recent photos rather than transferring an arbitrary 3 GB file into a folder you choose.</li>
+          <li><strong>Cloud drives need an account on both sides</strong> and upload the file before it can be downloaded, which is slower and leaves a copy outside your devices.</li>
+        </ul>
+
+      <h2 id="how-it-works">What AirBridge does on Windows</h2>
+        <p>The Windows build is a single portable executable. It starts the AirBridge transfer service, opens the app UI in your browser at <code>http://localhost:3000</code>, and keeps an encrypted background session open for clipboard sync and incoming offers.</p>
+        <ul>
+          <li><strong>Direct device-to-device transfer</strong> over your LAN using WebSockets, with WebRTC data channels when ICE succeeds.</li>
+          <li><strong>Resumable, verified file writes</strong> into a private <code>.part</code> journal, published to <code>Downloads\AirBridge</code> only after the SHA-256 digest matches.</li>
+          <li><strong>Clipboard sync</strong> of text in both directions. Windows clipboard reads use the system’s own PowerShell <code>Get-Clipboard</code>/<code>Set-Clipboard</code> worker, so no extra utility has to be installed.</li>
+          <li><strong>Phone on your computer:</strong> view the Android screen, browse contacts, see who is calling and place calls from the desktop.</li>
+          <li><strong>CLI and daemon</strong> — <code>npx airbridge daemon --dir D:\Inbox</code> for a headless receiver.</li>
+        </ul>
+
+      <h2 id="install">Install on Windows (no admin required)</h2>
+        <p>Run this in PowerShell:</p>
+        <pre><code>powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.ps1 -UseBasicParsing | iex"</code></pre>
+        <p>The installer downloads <code>AirBridge-windows-x64.exe</code> (or <code>AirBridge-windows-arm64.exe</code> on ARM64 machines) into <code>%LOCALAPPDATA%\AirBridge</code>, verifies it against the release’s <code>SHA256SUMS.txt</code>, adds that folder to your <em>user</em> PATH, and offers <code>-Autostart</code> through a per-user Run key. Nothing is installed system-wide and no administrator prompt is needed.</p>
+        <p><strong>Honest caveat:</strong> the Windows binary is not Authenticode-signed — a code-signing certificate is a paid subscription this project does not use. The installer downloads with the built-in <code>curl.exe</code>, which avoids the Mark-of-the-Web, so SmartScreen does not open on launch. If you grab the EXE in a browser instead, expect a “Windows protected your PC” sheet; compare the SHA-256 with the release notes before allowing it.</p>
+
+      <h2 id="pairing">Pair the phone, then transfer</h2>
+        <p>Install the Android app, open AirBridge on the PC and scan the QR code (or enter the six-character code). Pairing uses SPAKE2 so the code is never sent over the network, and both screens show a six-digit verification code you can compare. From then on the phone sees the PC as a trusted, verified peer.</p>
+        <p>The Windows Firewall may ask whether AirBridge can accept connections on private networks. That prompt matters: the transfer service listens on port 3000 by default (<code>PORT</code> changes it), and blocking it leaves discovery working while transfers fail.</p>
+
+      <h2 id="encryption">Security model in one paragraph</h2>
+        <p>Ephemeral ECDH P-256 key agreement plus HKDF-derived session keys, AES-256-GCM for every file chunk, clipboard item, call frame and screen frame, and a six-digit SAS to confirm the keys. Host-only actions — writing the clipboard, saving into the receive folder, opening Explorer — are loopback-only. Details, including what an attacker on the same network can still observe, are in <a href="private-file-transfer.html">the privacy guide</a> and <a href="https://github.com/DigantaDey/AirBridge/blob/main/SECURITY.md">SECURITY.md</a>.</p>
+
+      <h2 id="limits">Limits worth knowing</h2>
+        <ul>
+          <li><strong>No Store/MSIX package.</strong> AirBridge ships as a portable EXE, so there is no automatic Microsoft Store update path; the desktop build updates itself from signed release artefacts instead.</li>
+          <li><strong>Unsigned binaries</strong> mean SmartScreen friction for browser downloads, as described above.</li>
+          <li><strong>Clipboard images are macOS-only.</strong> On Windows the desktop clipboard bridge is text, powered by the built-in PowerShell clipboard cmdlets.</li>
+          <li><strong>View-only screen sharing.</strong> You can watch the phone screen; you cannot drive the phone from the PC.</li>
+          <li><strong>No iPhone or iPad support</strong> anywhere in the product.</li>
+        </ul>
+      </div>
+<section class="faq-block" aria-labelledby="questions">
+      <h2 id="questions">Questions about this guide</h2>
+      <div class="faq-list">
+      <details>
+        <summary>Do I need Google Quick Share or Nearby Share on Windows?<span aria-hidden="true">＋</span></summary>
+        <p>No. AirBridge has its own pairing and transport: a QR code or six-character code, then a direct encrypted link over your network. Quick Share is unrelated and can stay unused.</p>
+      </details>
+      <details>
+        <summary>Does the Windows install need administrator rights?<span aria-hidden="true">＋</span></summary>
+        <p>No. The installer writes to %LOCALAPPDATA%\AirBridge and edits only your user PATH, plus an optional per-user Run key for autostart.</p>
+      </details>
+      <details>
+        <summary>Windows says the app is unsigned. Is that expected?<span aria-hidden="true">＋</span></summary>
+        <p>Yes. Release binaries are not Authenticode-signed. Verify the file against SHA256SUMS.txt on the release page (the installer does this automatically) and prefer the curl-based install command, which does not set Mark-of-the-Web.</p>
+      </details>
+      <details>
+        <summary>Does it work on Windows on ARM?<span aria-hidden="true">＋</span></summary>
+        <p>Yes — AirBridge-windows-arm64.exe is built and published with every release alongside the x64 build.</p>
+      </details>
+      <details>
+        <summary>Which port does AirBridge use?<span aria-hidden="true">＋</span></summary>
+        <p>Port 3000 by default for the HTTP/HTTPS signalling service. Set the PORT environment variable to change it; the local UI stays on http://localhost:3000 unless you change that too.</p>
+      </details>
+      </div>
+    </section>
+<aside class="guide-cta" aria-label="Download AirBridge">
+      <div>
+        <p class="section-label"><span>GET AIRBRIDGE</span> FREE FOR PERSONAL USE</p>
+        <h2>Install on your computer, then pair your phone.</h2>
+        <p>Official builds for macOS, Windows and Linux live on the GitHub releases page, next to the Android APK and the <code>SHA256SUMS.txt</code> checksums. Nothing needs an account.</p>
+      </div>
+      <div class="guide-cta-actions">
+        <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.0 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+        <a class="button button-secondary" href="download.html">All platforms</a>
+      </div>
+    </aside>
+<section class="related-block" aria-labelledby="related">
+      <h2 id="related">Related AirBridge guides</h2>
+      <ul class="related-list">
+        <li><a href="android-to-mac-file-transfer.html"><strong>Android to Mac file transfer</strong><span>Wi-Fi file transfer from Android to macOS with resume, SHA-256 checks and no cloud upload.</span></a></li>
+        <li><a href="android-to-linux-file-transfer.html"><strong>Android to Linux file transfer</strong><span>No root, XDG launcher entry, static glibc/musl builds for x64 and arm64.</span></a></li>
+        <li><a href="android-airdrop-alternative.html"><strong>Android AirDrop alternative</strong><span>What an AirDrop replacement for Android actually needs, and where AirBridge fits.</span></a></li>
+        <li><a href="private-file-transfer.html"><strong>Private file transfer</strong><span>No account, no cloud copy — and an honest list of what can still be observed.</span></a></li>
+      </ul>
+    </section>
+    </article>
+</main>
+<footer class="legal-footer"><div class="wrap">
+    <p class="footer-guide-links"><strong>Guides</strong></p>
+    <div class="footer-guide-grid">
+      <a href="android-to-mac-file-transfer.html">Android to Mac file transfer</a>
+      <a href="android-to-windows-file-transfer.html">Android to Windows file transfer</a>
+      <a href="android-to-linux-file-transfer.html">Android to Linux file transfer</a>
+      <a href="android-airdrop-alternative.html">Android AirDrop alternative</a>
+      <a href="android-clipboard-sync.html">Android clipboard sync</a>
+      <a href="android-screen-sharing.html">Android screen sharing</a>
+      <a href="download.html">Download &amp; install</a>
+      <a href="compare.html">Honest comparison</a>
+      <a href="privacy.html">Privacy policy</a>
+    </div>
+    <p>© AirBridge · <a href="index.html">Home</a> · <a href="https://github.com/DigantaDey/AirBridge">Source code on GitHub</a> · <a href="https://github.com/DigantaDey/AirBridge#readme">README</a></p>
+  </div></footer>
+</body>
+</html>

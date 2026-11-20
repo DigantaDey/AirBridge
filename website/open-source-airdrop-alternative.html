@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="theme-color" content="#f7f8f7">
+  <meta name="description" content="AirBridge is a source-available AirDrop alternative for Android, macOS, Windows and Linux: auditable encryption, a self-hostable relay, no accounts — and an honest licence note.">
+  <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://airbridge.fyi/open-source-airdrop-alternative.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="AirBridge">
+  <meta property="og:locale" content="en">
+  <meta property="og:title" content="Open-Source AirDrop Alternative for Android and Computers — AirBridge">
+  <meta property="og:description" content="AirBridge is a source-available AirDrop alternative for Android, macOS, Windows and Linux: auditable encryption, a self-hostable relay, no accounts — and an honest licence note.">
+  <meta property="og:url" content="https://airbridge.fyi/open-source-airdrop-alternative.html">
+  <meta property="og:image" content="https://airbridge.fyi/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Open-Source AirDrop Alternative for Android and Computers — AirBridge">
+  <meta name="twitter:description" content="AirBridge is a source-available AirDrop alternative for Android, macOS, Windows and Linux: auditable encryption, a self-hostable relay, no accounts — and an honest licence note.">
+  <meta name="twitter:image" content="https://airbridge.fyi/og.png">
+  <meta name="twitter:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebPage","name":"Open-Source AirDrop Alternative for Android and Computers — AirBridge","description":"AirBridge is a source-available AirDrop alternative for Android, macOS, Windows and Linux: auditable encryption, a self-hostable relay, no accounts — and an honest licence note.","url":"https://airbridge.fyi/open-source-airdrop-alternative.html","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"AirBridge","url":"https://airbridge.fyi/"},"about":{"@type":"SoftwareApplication","name":"AirBridge","applicationCategory":"UtilitiesApplication","operatingSystem":"Android, macOS, Windows, Linux","url":"https://airbridge.fyi/","downloadUrl":"https://github.com/DigantaDey/AirBridge/releases/latest"},"primaryImageOfPage":{"@type":"ImageObject","url":"https://airbridge.fyi/screenshots/desktop-clipboard.png"}}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"AirBridge","item":"https://airbridge.fyi/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://airbridge.fyi/guides.html"},{"@type":"ListItem","position":3,"name":"Open-source AirDrop alternative","item":"https://airbridge.fyi/open-source-airdrop-alternative.html"}]}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is AirBridge OSI-approved open source?","acceptedAnswer":{"@type":"Answer","text":"No. The source is public, but the licence is a Fair-Use & Non-Commercial licence rather than an OSI-approved one. Personal use is free; commercial or organisational use needs written consent from the author."}},{"@type":"Question","name":"Can I use AirBridge at work?","acceptedAnswer":{"@type":"Answer","text":"Commercial, corporate or monetised use requires prior written consent from the author, per LICENSE. For personal devices the software is free."}},{"@type":"Question","name":"Can I self-host the relay?","acceptedAnswer":{"@type":"Answer","text":"Yes. airbridge relay --listen 0.0.0.0:47391 runs the relay on hardware you control, and computers can point at it with airbridge --relay. The relay forwards ciphertext; it does not receive session keys."}},{"@type":"Question","name":"Has the code been independently audited?","acceptedAnswer":{"@type":"Answer","text":"No third-party audit is claimed. The project publishes its own threat model and audit notes in SECURITY.md, and the cryptography is implemented with audited primitives (@noble/curves, @noble/hashes) inside readable TypeScript and Kotlin."}},{"@type":"Question","name":"Can I fork it and publish my own build?","acceptedAnswer":{"@type":"Answer","text":"The licence governs redistribution, and commercial use needs written consent. For personal experiments, the repository is complete: server, clients, Android app, installers and release workflows are all included."}}]}
+  </script>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <title>Open-Source AirDrop Alternative for Android and Computers — AirBridge</title>
+</head>
+<body id="top">
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2"/></symbol>
+  <symbol id="devices" viewBox="0 0 24 24"><rect x="3" y="4" width="13" height="11" rx="1.5"/><path d="M2 18h15"/><rect x="17" y="9" width="5" height="10" rx="1"/></symbol>
+</svg>
+<header class="header">
+  <nav class="nav wrap" aria-label="Main navigation">
+    <div class="brand-group">
+      <a class="brand" href="index.html" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a>
+      <span class="version-pill">v2.5.0</span>
+    </div>
+    <div class="nav-links">
+      <a href="index.html#features">Capabilities</a>
+      <a href="guides.html">Guides</a>
+      <a href="compare.html">Compare</a>
+      <a href="index.html#security">Security</a>
+      <a href="download.html">Download</a>
+      <a href="index.html#faq">FAQ</a>
+    </div>
+    <a class="nav-cta" href="https://github.com/DigantaDey/AirBridge">GitHub <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+  </nav>
+</header>
+
+<main class="legal wrap guide" id="main">
+    <article class="legal-card">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li><a href="index.html">AirBridge</a></li>
+      <li><a href="guides.html">Guides</a></li>
+      <li><span aria-current="page">Open-source AirDrop alternative</span></li>
+    </ol>
+  </nav>
+      <p class="section-label"><span>GUIDE</span> OPEN SOURCE</p>
+      <h1>An open-source AirDrop alternative — including the parts most projects leave out</h1>
+      <p class="guide-lede">Open source matters most where it is least convenient: the pairing protocol, the encryption, the update path, and the licence that governs whether you may use it at work. Here is what AirBridge publishes, what you can verify yourself, and what the licence actually says.</p>
+      <figure class="guide-figure">
+        <img src="screenshots/desktop-clipboard.png" width="1600" height="905" alt="AirBridge desktop clipboard panel with auto-beam and receive options, a send box and recent clipboard beams" loading="lazy" decoding="async">
+        <figcaption>The desktop companion ships in the same repository as the Android app, the server and the CLI — so the UI you audit matches the protocol you audit.</figcaption>
+      </figure>
+      <div class="guide-body">
+      <h2 id="what-open-means">What “open source” means for AirBridge — precisely</h2>
+        <p>The full source is public on GitHub: the TypeScript server, the React client, the Kotlin Android app and engine, the Swift menu-bar shell, the CLI, the installers and the release workflows. Anyone can read the pairing protocol, the AES-GCM framing and the TLS pinning code, and run the test suite.</p>
+        <p><strong>The licence is not an OSI-approved licence.</strong> AirBridge uses a Fair-Use &amp; Non-Commercial licence: free for personal, non-commercial use on your own devices, with commercial or organisational use requiring prior written consent from the author. If your definition of open source requires OSI approval, this project does not meet it — <a href="https://github.com/DigantaDey/AirBridge/blob/main/LICENSE">LICENSE</a> is short and worth reading before you rely on it.</p>
+
+      <h2 id="why-it-matters">Why the source being public matters for a transfer tool</h2>
+        <ul>
+          <li><strong>You can check the cryptography instead of trusting a badge.</strong> SPAKE2 (RFC 9382) pairing, HKDF key derivation, AES-256-GCM chunk and frame encryption, SHA-256 pre-publication checks and the SAS verification flow are all in the repository.</li>
+          <li><strong>You can see what is not collected.</strong> The Android app ships no advertising or analytics SDK, and the desktop diagnostics are scrubbed, bounded and only shared when you click.</li>
+          <li><strong>You can self-host the fallback.</strong> When a direct path is impossible, the relay is <code>airbridge relay</code> — run it on a box you control, and it still only ever sees ciphertext.</li>
+          <li><strong>You can build the binaries yourself</strong> from the same workflow definitions that produce the release artefacts, and compare checksums or Sigstore attestations.</li>
+          <li><strong>You are not locked in.</strong> Pairing state, files and clipboard history live on your devices.</li>
+        </ul>
+
+      <h2 id="alternatives">Where AirBridge sits among open-source transfer tools</h2>
+        <p>There is no single winner; the right tool depends on the devices in front of you.</p>
+        <ul>
+          <li><strong>LocalSend</strong> is MIT-licensed, cross-platform and wonderfully simple. If you only need to move files between devices that all run LocalSend, and a permissive licence matters to you or your employer, it is an excellent choice.</li>
+          <li><strong>KDE Connect</strong> is GPL-licensed and deeply integrated with KDE Plasma, including notification mirroring and remote input. On a Plasma desktop it is hard to beat; AirBridge focuses on Android ↔ macOS/Windows/Linux with its own encrypted pairing protocol.</li>
+          <li><strong>PairDrop / Snapdrop-style browser tools</strong> need no installation at all, which is their strength — and their limit, since a browser tab cannot own a background session, a native clipboard or a system screen capture.</li>
+          <li><strong>AirBridge</strong> targets the case where an Android phone and a Mac, Windows PC or Linux box must exchange multi-gigabyte files, clipboard items, a screen view, contacts and calls inside one verified session — with a CLI and daemon for automation.</li>
+        </ul>
+        <p>The full side-by-side, including commercial options, is on the <a href="compare.html">comparison page</a>.</p>
+
+      <h2 id="verify">How to verify a download</h2>
+        <p>Every release publishes <code>SHA256SUMS.txt</code> and keyless Sigstore build-provenance attestations. The desktop installer and self-updater enforce the checksums before installing anything.</p>
+        <pre><code>gh attestation verify AirBridge-linux-x64 -R DigantaDey/AirBridge</code></pre>
+        <p>The release page also lists the per-platform assets: <code>AirBridge-macOS-arm64.zip</code>, <code>AirBridge-macOS-x64.zip</code>, <code>AirBridge-windows-x64.exe</code>, <code>AirBridge-windows-arm64.exe</code>, <code>AirBridge-linux-x64</code>, <code>AirBridge-linux-arm64</code> and their musl variants, plus <code>AirBridge-android-debug.apk</code>.</p>
+
+      <h2 id="contribute">Contributing back</h2>
+        <p>Bug reports, device-specific findings and documentation fixes are genuinely useful — especially reports from OEM Android builds, because background behaviour varies. Start with <a href="https://github.com/DigantaDey/AirBridge/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>, follow the <a href="https://github.com/DigantaDey/AirBridge/blob/main/CODE_OF_CONDUCT.md">code of conduct</a>, and use the issue templates so a report includes the version and platform details that make it actionable.</p>
+        <p>Security issues should not be filed publicly: the process is in <a href="https://github.com/DigantaDey/AirBridge/blob/main/SECURITY.md">SECURITY.md</a>.</p>
+      </div>
+<section class="faq-block" aria-labelledby="questions">
+      <h2 id="questions">Questions about this guide</h2>
+      <div class="faq-list">
+      <details>
+        <summary>Is AirBridge OSI-approved open source?<span aria-hidden="true">＋</span></summary>
+        <p>No. The source is public, but the licence is a Fair-Use & Non-Commercial licence rather than an OSI-approved one. Personal use is free; commercial or organisational use needs written consent from the author.</p>
+      </details>
+      <details>
+        <summary>Can I use AirBridge at work?<span aria-hidden="true">＋</span></summary>
+        <p>Commercial, corporate or monetised use requires prior written consent from the author, per LICENSE. For personal devices the software is free.</p>
+      </details>
+      <details>
+        <summary>Can I self-host the relay?<span aria-hidden="true">＋</span></summary>
+        <p>Yes. airbridge relay --listen 0.0.0.0:47391 runs the relay on hardware you control, and computers can point at it with airbridge --relay. The relay forwards ciphertext; it does not receive session keys.</p>
+      </details>
+      <details>
+        <summary>Has the code been independently audited?<span aria-hidden="true">＋</span></summary>
+        <p>No third-party audit is claimed. The project publishes its own threat model and audit notes in SECURITY.md, and the cryptography is implemented with audited primitives (@noble/curves, @noble/hashes) inside readable TypeScript and Kotlin.</p>
+      </details>
+      <details>
+        <summary>Can I fork it and publish my own build?<span aria-hidden="true">＋</span></summary>
+        <p>The licence governs redistribution, and commercial use needs written consent. For personal experiments, the repository is complete: server, clients, Android app, installers and release workflows are all included.</p>
+      </details>
+      </div>
+    </section>
+<aside class="guide-cta" aria-label="Download AirBridge">
+      <div>
+        <p class="section-label"><span>GET AIRBRIDGE</span> FREE FOR PERSONAL USE</p>
+        <h2>Install on your computer, then pair your phone.</h2>
+        <p>Official builds for macOS, Windows and Linux live on the GitHub releases page, next to the Android APK and the <code>SHA256SUMS.txt</code> checksums. Nothing needs an account.</p>
+      </div>
+      <div class="guide-cta-actions">
+        <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.0 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+        <a class="button button-secondary" href="download.html">All platforms</a>
+      </div>
+    </aside>
+<section class="related-block" aria-labelledby="related">
+      <h2 id="related">Related AirBridge guides</h2>
+      <ul class="related-list">
+        <li><a href="android-airdrop-alternative.html"><strong>Android AirDrop alternative</strong><span>What an AirDrop replacement for Android actually needs, and where AirBridge fits.</span></a></li>
+        <li><a href="private-file-transfer.html"><strong>Private file transfer</strong><span>No account, no cloud copy — and an honest list of what can still be observed.</span></a></li>
+        <li><a href="compare.html"><strong>Honest comparison</strong><span>AirBridge next to LocalSend, KDE Connect, AirDroid, LinkMyMac, Quick Share and AirDrop.</span></a></li>
+        <li><a href="android-to-linux-file-transfer.html"><strong>Android to Linux file transfer</strong><span>No root, XDG launcher entry, static glibc/musl builds for x64 and arm64.</span></a></li>
+      </ul>
+    </section>
+    </article>
+</main>
+<footer class="legal-footer"><div class="wrap">
+    <p class="footer-guide-links"><strong>Guides</strong></p>
+    <div class="footer-guide-grid">
+      <a href="android-to-mac-file-transfer.html">Android to Mac file transfer</a>
+      <a href="android-to-windows-file-transfer.html">Android to Windows file transfer</a>
+      <a href="android-to-linux-file-transfer.html">Android to Linux file transfer</a>
+      <a href="android-airdrop-alternative.html">Android AirDrop alternative</a>
+      <a href="android-clipboard-sync.html">Android clipboard sync</a>
+      <a href="android-screen-sharing.html">Android screen sharing</a>
+      <a href="download.html">Download &amp; install</a>
+      <a href="compare.html">Honest comparison</a>
+      <a href="privacy.html">Privacy policy</a>
+    </div>
+    <p>© AirBridge · <a href="index.html">Home</a> · <a href="https://github.com/DigantaDey/AirBridge">Source code on GitHub</a> · <a href="https://github.com/DigantaDey/AirBridge#readme">README</a></p>
+  </div></footer>
+</body>
+</html>
