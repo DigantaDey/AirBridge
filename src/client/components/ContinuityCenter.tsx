@@ -737,20 +737,24 @@ function ContactsPanel({ client, peer, guidance, canCall, canReceive, shared, sa
                     {card.phones.map((p) => (
                       <span key={p.number} className="contact-value">
                         <span>{p.number}{p.label ? <small> · {p.label}</small> : null}</span>
-                        {canCall && dialableNumber(p.number) && (
-                          <button type="button" className="text-button" aria-label={`Call ${card.name} ${p.number}`} onClick={() => onCall(dialableNumber(p.number)!)}>Call</button>
-                        )}
                       </span>
                     ))}
                     {card.emails.map((e) => (
                       <span key={e.address} className="contact-value"><a href={`mailto:${e.address}`}>{e.address}</a></span>
                     ))}
                   </span>
-                  <span className="call-actions">
-                    <button type="button" className="text-button" aria-label={`Save ${card.name} as vCard`} onClick={() => downloadVCard(buildVCard(card), card.name)}>Save</button>
-                    {savedId && client.removeSavedContact && (
-                      <button type="button" className="text-button" aria-label={`Remove ${card.name}`} onClick={() => removeCard(card)}>Remove</button>
-                    )}
+                  <span className="contact-actions">
+                    <span className="contact-call-actions">
+                      {card.phones.map((p) => canCall && dialableNumber(p.number) && (
+                        <button key={p.number} type="button" className="text-button" aria-label={`Call ${card.name} ${p.number}`} onClick={() => onCall(dialableNumber(p.number)!)}>Call</button>
+                      ))}
+                    </span>
+                    <span className="call-actions">
+                      <button type="button" className="text-button" aria-label={`Save ${card.name} as vCard`} onClick={() => downloadVCard(buildVCard(card), card.name)}>Save</button>
+                      {savedId && client.removeSavedContact && (
+                        <button type="button" className="text-button" aria-label={`Remove ${card.name}`} onClick={() => removeCard(card)}>Remove</button>
+                      )}
+                    </span>
                   </span>
                 </li>
               );
