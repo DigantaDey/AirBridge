@@ -238,6 +238,9 @@ export function App() {
       recordScreenViewerStats: (stats: Parameters<AirBridgeClient["recordScreenViewerStats"]>[0]) => {
         clientRef.current?.recordScreenViewerStats(stats);
       },
+      recordCallAudioStats: (stats: Parameters<AirBridgeClient["recordCallAudioStats"]>[0]) => {
+        clientRef.current?.recordCallAudioStats(stats);
+      },
       subscribeScreenFrames: (sessionId: string, listener: Parameters<AirBridgeClient["subscribeScreenFrames"]>[1]) => {
         return clientRef.current?.subscribeScreenFrames(sessionId, listener) ?? (() => {});
       },

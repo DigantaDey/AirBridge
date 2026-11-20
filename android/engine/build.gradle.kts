@@ -107,6 +107,13 @@ val resilienceAndContinuityAudioTest = tasks.register<JavaExec>("resilienceAndCo
     mainClass = "com.airbridge.engine.ResilienceAndContinuityAudioTestKt"
     outputs.upToDateWhen { false }
 }
+val screenFramerateAndAudioContinuityTest = tasks.register<JavaExec>("screenFramerateAndAudioContinuityTest") {
+    group = "verification"
+    description = "Runs 30fps H.264 burst window, screen audio counters, and engine media telemetry checks"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "com.airbridge.engine.ScreenFramerateAndAudioContinuityTestKt"
+    outputs.upToDateWhen { false }
+}
 val milestone2Test = tasks.register<JavaExec>("milestone2Test") {
     group = "verification"
     description = "Runs Milestone 2 high-speed transfer pipeline, binary SACK, and loopback benchmark checks"
@@ -125,6 +132,7 @@ val milestone2Test = tasks.register<JavaExec>("milestone2Test") {
         webSocketResilienceTest,
         modelTest,
         resilienceAndContinuityAudioTest,
+        screenFramerateAndAudioContinuityTest,
     )
 }
 val interopClasspath = tasks.register("interopClasspath") {
@@ -156,6 +164,7 @@ tasks.named("check") {
         webSocketResilienceTest,
         modelTest,
         resilienceAndContinuityAudioTest,
+        screenFramerateAndAudioContinuityTest,
         milestone2Test,
         interopClasspath,
     )

@@ -505,7 +505,7 @@ export const SCREEN_DEFAULT_FPS = 15;
 export const SCREEN_MAX_FPS = 30;
 /** Frames in flight before the sender waits for an ack (latest-frame-wins). */
 export const SCREEN_MAX_INFLIGHT = 2;
-export const SCREEN_VIDEO_MAX_INFLIGHT = 6;
+export const SCREEN_VIDEO_MAX_INFLIGHT = 12;
 export const SCREEN_MAX_FRAME_BYTES = 3 * 1024 * 1024;
 /** No consent within this window = declined. */
 export const SCREEN_CONSENT_TIMEOUT_MS = 2 * 60_000;

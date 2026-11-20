@@ -139,6 +139,11 @@
             android:name=".ScreenShareService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection|microphone" />
+        <!-- Two-way call audio bridge to the paired computer while Mac call audio is active. -->
+        <service
+            android:name=".CallAudioService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
         <!--
           AirBridge deliberately does not declare an AccessibilityService or a
           NotificationListenerService. Clipboard sends from another app use

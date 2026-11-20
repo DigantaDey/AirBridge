@@ -476,6 +476,12 @@ class AirBridgeEngine(private val config: EngineConfig) {
             transferResumes = transferResumesCount.get(),
             transferInterruptions = transferInterruptionsCount.get(),
             outboundBatchFlushes = outboundBatchFlushesCount.get(),
+            screenFramesWindowRejected = continuity.screenFramesWindowRejectedCount.get(),
+            screenFramesSocketRejected = continuity.screenFramesSocketRejectedCount.get(),
+            screenAudioFramesSent = continuity.screenAudioFramesSentCount.get(),
+            screenAudioFramesDropped = continuity.screenAudioFramesDroppedCount.get(),
+            callAudioFramesSent = continuity.callAudioFramesSentCount.get(),
+            callAudioFramesReceived = continuity.callAudioFramesReceivedCount.get(),
         )
     }
 

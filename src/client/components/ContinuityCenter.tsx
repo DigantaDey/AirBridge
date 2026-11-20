@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { Maximize2, Mic, MicOff, Phone, PhoneIncoming, PhoneOff, ScreenShare, Search, Trash2, Upload, Download, UserPlus, Volume2 } from "lucide-react";
+import { Maximize2, Mic, MicOff, Minimize2, Phone, PhoneIncoming, PhoneOff, ScreenShare, Search, Trash2, Upload, Download, UserPlus, Volume2 } from "lucide-react";
 import {
   MAX_VCARD_LENGTH,
   buildVCard,
@@ -20,7 +20,8 @@ import {
   h264CodecFromAnnexB,
   prependSpsPpsIfMissing,
 } from "../engine/h264.js";
-import { CallAudioSession } from "../engine/callAudio.js";
+import { CallAudioSession, type CallAudioSessionStats } from "../engine/callAudio.js";
+import { ScreenAudioPlayer, type ScreenAudioPlayerStats } from "../engine/screenAudio.js";
 import type {
   CallAudioFrame,
   CallAudioStateView,
@@ -70,9 +71,22 @@ export interface ContinuityClient {
     decoderMode?: string | null;
     codec?: string | null;
     framesDecodedDelta?: number;
+    framesRenderedDelta?: number;
+    framesDroppedBeforeDrawDelta?: number;
     decodeErrorsDelta?: number;
     keyframesReceivedDelta?: number;
+    fullscreenMode?: string;
+    lastFullscreenError?: string | null;
+    audioContextState?: string;
+    audioFramesPlayedDelta?: number;
+    audioNonZeroFramesDelta?: number;
+    audioSilentFramesDelta?: number;
+    audioFramesPlayed?: number;
+    audioNonZeroFrames?: number;
+    audioSilentFrames?: number;
+    audioLastRms?: number;
   }): void;
+  recordCallAudioStats?(stats: CallAudioSessionStats): void;
   subscribeScreenFrames(sessionId: string, listener: (frame: ScreenFrame) => void): () => void;
   subscribeScreenVideo?(sessionId: string, listener: (frame: ScreenVideoFrame) => void): () => void;
   subscribeScreenAudio?(sessionId: string, listener: (frame: ScreenAudioFrame) => void): () => void;
@@ -385,7 +399,9 @@ function CallRow({
   const [pending, setPending] = useState<string | null>(null);
   const [localAudioActive, setLocalAudioActive] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [silenceHint, setSilenceHint] = useState<string | null>(null);
   const sessionRef = useRef<CallAudioSession | null>(null);
+  const startingAudioRef = useRef(false);
 
   const stopMacAudio = useCallback(async () => {
     const existing = sessionRef.current;
@@ -393,6 +409,7 @@ function CallRow({
     existing?.stop();
     setLocalAudioActive(false);
     setMuted(false);
+    setSilenceHint(null);
     if (client.stopCallAudio) {
       await client.stopCallAudio(call.peerId, call.callId).catch(() => {});
     }
@@ -403,6 +420,43 @@ function CallRow({
       queueMicrotask(() => { void stopMacAudio(); });
     }
   }, [call.state, stopMacAudio]);
+
+  useEffect(() => {
+    if (!callAudioState || startingAudioRef.current) return;
+    if (!callAudioState.active) {
+      const existing = sessionRef.current;
+      if (existing || localAudioActive) {
+        sessionRef.current = null;
+        existing?.stop();
+        queueMicrotask(() => {
+          setLocalAudioActive(false);
+          setMuted(false);
+          setSilenceHint(null);
+          if (callAudioState.reason) onError(callAudioState.reason);
+        });
+      }
+    } else {
+      queueMicrotask(() => {
+        setMuted(callAudioState.muted);
+      });
+    }
+  }, [callAudioState, localAudioActive, onError]);
+
+  const isAudioOn = callAudioState !== null ? callAudioState.active : localAudioActive;
+
+  useEffect(() => {
+    if (!isAudioOn) {
+      queueMicrotask(() => setSilenceHint(null));
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const stats = sessionRef.current?.getStats();
+      if (sessionRef.current && stats && stats.playbackNonZeroFrames === 0) {
+        setSilenceHint("No incoming call audio detected yet. Ensure the call is answered, phone microphone permission is allowed, and speakerphone is on.");
+      }
+    }, 2_500);
+    return () => window.clearTimeout(timer);
+  }, [isAudioOn]);
 
   useEffect(() => {
     return () => {
@@ -418,6 +472,8 @@ function CallRow({
   const startMacAudio = async () => {
     if (!client.startCallAudio || !client.sendCallAudio || !client.subscribeCallAudio) return;
     setPending("audio-start");
+    startingAudioRef.current = true;
+    setSilenceHint(null);
     onError(null);
     const session = new CallAudioSession({
       peerId: call.peerId,
@@ -427,6 +483,10 @@ function CallRow({
       },
       subscribeIncoming: (listener) => client.subscribeCallAudio?.(call.callId, listener) ?? (() => {}),
       onError: (msg) => onError(msg),
+      onStats: (stats) => {
+        client.recordCallAudioStats?.(stats);
+        if (stats.playbackNonZeroFrames > 0) setSilenceHint(null);
+      },
     });
     try {
       await session.start();
@@ -440,6 +500,7 @@ function CallRow({
       setLocalAudioActive(false);
       onError(err instanceof Error ? err.message : "Could not start Mac call audio.");
     } finally {
+      startingAudioRef.current = false;
       setPending(null);
     }
   };
@@ -468,7 +529,6 @@ function CallRow({
     }
   };
 
-  const isAudioOn = localAudioActive || Boolean(callAudioState?.active);
   const canRouteAudio = canCallAudio && (call.state === "active" || call.state === "dialing");
 
   return (
@@ -480,8 +540,11 @@ function CallRow({
           {callStatusLabel(call, now)} · {call.peerName}
           {isAudioOn ? " · Mac audio active" : ""}
         </small>
-        {callAudioState?.reason && !callAudioState.active && (
+        {callAudioState?.reason && (
           <small className="continuity-note">{callAudioState.reason}</small>
+        )}
+        {silenceHint && isAudioOn && !callAudioState?.reason && (
+          <small className="continuity-note">{silenceHint}</small>
         )}
       </span>
       <span className="call-actions">
@@ -864,30 +927,72 @@ export function screenEndedLabel(share: ScreenShareView): string {
   }
 }
 
+export function getActiveFullscreenElement(doc: Document = document): Element | null {
+  return doc.fullscreenElement ?? (doc as Document & { webkitFullscreenElement?: Element | null }).webkitFullscreenElement ?? null;
+}
+
+export async function requestStageFullscreen(
+  el: HTMLElement | null,
+): Promise<{ mode: "native" | "webkit" | "fallback"; error?: string }> {
+  if (!el) return { mode: "fallback", error: "Screen stage is not mounted." };
+  const webkitEl = el as HTMLElement & { webkitRequestFullscreen?: () => Promise<void> | void };
+  let lastError: string | undefined;
+  if (typeof el.requestFullscreen === "function") {
+    try {
+      await el.requestFullscreen();
+      return { mode: "native" };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  if (typeof webkitEl.webkitRequestFullscreen === "function") {
+    try {
+      await webkitEl.webkitRequestFullscreen();
+      return { mode: "webkit" };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  return { mode: "fallback", ...(lastError ? { error: lastError } : {}) };
+}
+
+export async function exitStageFullscreen(
+  mode: "native" | "webkit" | "fallback" | "none",
+  doc: Document = document,
+): Promise<void> {
+  if (mode === "fallback" || mode === "none") return;
+  const webkitDoc = doc as Document & {
+    webkitExitFullscreen?: () => Promise<void> | void;
+    webkitCancelFullScreen?: () => void;
+  };
+  if (!getActiveFullscreenElement(doc)) return;
+  try {
+    if (typeof doc.exitFullscreen === "function") {
+      await doc.exitFullscreen();
+    } else if (typeof webkitDoc.webkitExitFullscreen === "function") {
+      await webkitDoc.webkitExitFullscreen();
+    } else if (typeof webkitDoc.webkitCancelFullScreen === "function") {
+      webkitDoc.webkitCancelFullScreen();
+    }
+  } catch {
+    // Ignore exit failures when fullscreen was already exited by OS chrome
+  }
+}
+
 function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; share: ScreenShareView; onStop: () => void }) {
   const imgRef = useRef<HTMLImageElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
-  const contextRef = useRef<AudioContext | null>(null);
-  const playheadRef = useRef(0);
-  /** Maps Android's shared video/audio elapsed clock to this viewer's clock. */
-  const timelineRef = useRef<{ remotePtsMs: number; localMs: number } | null>(null);
-  const audioNodesRef = useRef(new Set<AudioBufferSourceNode>());
+  const playerRef = useRef<ScreenAudioPlayer | null>(null);
   const [hasFrame, setHasFrame] = useState(false);
   const [h264Active, setH264Active] = useState(false);
   const [videoError, setVideoError] = useState<string | null>(null);
   const [audioEnabled, setAudioEnabled] = useState(false);
   const [audioError, setAudioError] = useState<string | null>(null);
-  const mapSourceTime = (ptsMs: number): number => {
-    const now = performance.now();
-    const prior = timelineRef.current;
-    const delta = prior ? ((ptsMs - prior.remotePtsMs + 0x80000000) % 0x100000000 + 0x100000000) % 0x100000000 - 0x80000000 : 0;
-    if (!prior || Math.abs(delta) > 10_000) {
-      timelineRef.current = { remotePtsMs: ptsMs, localMs: now };
-      return now;
-    }
-    return prior.localMs + delta;
-  };
+  const [audioSilenceNotice, setAudioSilenceNotice] = useState(false);
+  const [fullscreenMode, setFullscreenMode] = useState<"none" | "native" | "webkit" | "fallback">("none");
+  const isFullscreen = fullscreenMode !== "none";
+
   useEffect(() => {
     let url: string | null = null;
     const unsubscribe = client.subscribeScreenFrames(share.sessionId, (frame) => {
@@ -958,7 +1063,7 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
             if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth;
             if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight;
             context.drawImage(frame as unknown as CanvasImageSource, 0, 0);
-            client.recordScreenViewerStats?.({ framesDecodedDelta: 1 });
+            client.recordScreenViewerStats?.({ framesDecodedDelta: 1, framesRenderedDelta: 1 });
             setH264Active(true);
             setHasFrame(true);
             setVideoError(null);
@@ -975,6 +1080,7 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
         return;
       }
       if (pendingDrawFrame) {
+        client.recordScreenViewerStats?.({ framesDroppedBeforeDrawDelta: 1 });
         try { pendingDrawFrame.close(); } catch { /* ignore */ }
       }
       pendingDrawFrame = frame;
@@ -1067,7 +1173,6 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
     const handleFrame = (frame: ScreenVideoFrame) => {
       if (disposed) return;
       lastFrameAt = Date.now();
-      mapSourceTime(frame.ptsMs);
       let accessUnit = frame.data;
       const foundSpsPps = extractSpsPps(accessUnit);
       if (foundSpsPps) {
@@ -1100,7 +1205,12 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
       if (frame.keyFrame) {
         const effectiveSpsPps = foundSpsPps ?? extractSpsPps(accessUnit);
         const detectedCodec = h264CodecFromAnnexB(accessUnit);
-        const targetKey = detectedCodec ? `${detectedCodec}:${effectiveSpsPps ? 'avcc' : 'annexb'}` : null;
+        const spsSig = effectiveSpsPps
+          ? `${effectiveSpsPps.sps.byteLength}:${effectiveSpsPps.pps.byteLength}:${effectiveSpsPps.sps[1] ?? 0}:${effectiveSpsPps.sps[2] ?? 0}:${effectiveSpsPps.sps[3] ?? 0}`
+          : 'none';
+        const targetKey = detectedCodec
+          ? `${detectedCodec}:${frame.width}x${frame.height}:${effectiveSpsPps ? 'avcc' : 'annexb'}:${spsSig}`
+          : null;
         if (detectedCodec && targetKey !== decoderConfigKey) {
           if (typeof api.VideoDecoder?.isConfigSupported !== 'function') {
             try {
@@ -1175,53 +1285,103 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
     };
   }, [client, share.sessionId]);
 
-  // The source sends timestamped, small PCM packets. Keep a bounded local
-  // jitter buffer and drop old packets rather than letting A/V drift grow.
+  const handleAudioStats = useCallback((stats: ScreenAudioPlayerStats) => {
+    client.recordScreenViewerStats?.({
+      audioContextState: stats.contextState,
+      audioFramesPlayed: stats.framesPlayed,
+      audioNonZeroFrames: stats.nonZeroFrames,
+      audioSilentFrames: stats.silentFrames,
+      audioLastRms: stats.lastRms,
+    });
+    if (stats.framesReceived >= 75 && stats.nonZeroFrames === 0) {
+      setAudioSilenceNotice(true);
+    } else if (stats.nonZeroFrames > 0) {
+      setAudioSilenceNotice(false);
+    }
+  }, [client]);
+
   useEffect(() => {
-    if (!audioEnabled || !client.subscribeScreenAudio || !contextRef.current) return;
-    const context = contextRef.current;
-    const audioNodes = audioNodesRef.current;
+    if (!audioEnabled || !client.subscribeScreenAudio) {
+      playerRef.current?.stop();
+      queueMicrotask(() => setAudioSilenceNotice(false));
+      return;
+    }
+    const player = playerRef.current ?? new ScreenAudioPlayer({ onStats: handleAudioStats });
+    playerRef.current = player;
     const unsubscribe = client.subscribeScreenAudio(share.sessionId, (frame) => {
-      // Video and AudioRecord carry the same elapsed-realtime PTS. Map that
-      // source clock once at arrival, then keep about 60 ms of jitter room.
-      const desired = context.currentTime + (mapSourceTime(frame.ptsMs) - performance.now()) / 1000 + 0.06;
-      if (desired < context.currentTime - 0.18) return;
-      const startAt = Math.max(context.currentTime + 0.015, Math.min(desired, context.currentTime + 0.2), playheadRef.current);
-      const buffer = context.createBuffer(frame.channels, frame.frames, frame.sampleRate);
-      for (let channel = 0; channel < frame.channels; channel += 1) {
-        const samples = buffer.getChannelData(channel);
-        for (let index = 0; index < frame.frames; index += 1) {
-          const byteOffset = (index * frame.channels + channel) * 2;
-          const value = frame.data[byteOffset] | (frame.data[byteOffset + 1] << 8);
-          samples[index] = (value & 0x8000 ? value - 0x10000 : value) / 0x8000;
-        }
-      }
-      const node = context.createBufferSource();
-      node.buffer = buffer;
-      node.connect(context.destination);
-      audioNodes.add(node);
-      node.onended = () => { audioNodes.delete(node); node.disconnect(); };
-      node.start(startAt);
-      playheadRef.current = startAt + buffer.duration;
+      player.playFrame(frame);
     });
     return () => {
       unsubscribe();
-      for (const node of audioNodes) { try { node.stop(); } catch { /* already stopped */ } }
-      audioNodes.clear();
-      playheadRef.current = 0;
-      timelineRef.current = null;
+      player.stop();
     };
-  }, [audioEnabled, client, share.sessionId]);
+  }, [audioEnabled, client, handleAudioStats, share.sessionId]);
 
-  useEffect(() => () => { void contextRef.current?.close(); }, []);
+  useEffect(() => () => {
+    playerRef.current?.dispose();
+    playerRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    const syncNativeExit = () => {
+      if (!getActiveFullscreenElement(document)) {
+        setFullscreenMode((cur) => {
+          if (cur === "native" || cur === "webkit") {
+            client.recordScreenViewerStats?.({ fullscreenMode: "none" });
+            return "none";
+          }
+          return cur;
+        });
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && fullscreenMode === "fallback") {
+        setFullscreenMode("none");
+        client.recordScreenViewerStats?.({ fullscreenMode: "none" });
+      }
+    };
+    document.addEventListener("fullscreenchange", syncNativeExit);
+    document.addEventListener("webkitfullscreenchange", syncNativeExit);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("fullscreenchange", syncNativeExit);
+      document.removeEventListener("webkitfullscreenchange", syncNativeExit);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [client, fullscreenMode]);
+
+  const toggleFullscreen = async () => {
+    if (isFullscreen) {
+      await exitStageFullscreen(fullscreenMode);
+      setFullscreenMode("none");
+      client.recordScreenViewerStats?.({ fullscreenMode: "none" });
+      return;
+    }
+    const result = await requestStageFullscreen(stageRef.current);
+    setFullscreenMode(result.mode);
+    client.recordScreenViewerStats?.({
+      fullscreenMode: result.mode,
+      lastFullscreenError: result.error ?? null,
+    });
+  };
 
   const toggleAudio = () => {
-    if (audioEnabled) { setAudioEnabled(false); return; }
-    const AudioContextCtor = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextCtor) { setAudioError("This browser cannot play the shared app audio."); return; }
-    const context = contextRef.current ?? new AudioContextCtor();
-    contextRef.current = context;
-    void context.resume().then(() => { setAudioError(null); setAudioEnabled(true); }).catch(() => setAudioError("Allow audio playback in this browser, then try again."));
+    if (audioEnabled) {
+      playerRef.current?.stop();
+      setAudioEnabled(false);
+      setAudioSilenceNotice(false);
+      return;
+    }
+    const player = playerRef.current ?? new ScreenAudioPlayer({ onStats: handleAudioStats });
+    playerRef.current = player;
+    void player.start()
+      .then(() => {
+        setAudioError(null);
+        setAudioEnabled(true);
+      })
+      .catch((err) => {
+        setAudioError(err instanceof Error ? err.message : "Allow audio playback in this browser, then try again.");
+      });
   };
 
   const status = share.state === "active"
@@ -1233,10 +1393,15 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
 
   return (
     <div className="screen-viewer">
-      <div ref={stageRef} className="screen-stage">
+      <div ref={stageRef} className={fullscreenMode === "fallback" ? "screen-stage is-expanded-fullscreen" : "screen-stage"}>
         <img ref={imgRef} alt={`${share.peerName} screen`} className={hasFrame && !h264Active ? "screen-frame" : "screen-frame is-empty"} />
         <canvas ref={canvasRef} aria-label={`${share.peerName} screen`} className={h264Active ? "screen-frame" : "screen-frame is-empty"} />
         {!hasFrame && <span className="screen-placeholder">{videoError ?? status}</span>}
+        {isFullscreen && (
+          <button type="button" className="screen-fullscreen-exit" aria-label="Exit full screen" onClick={() => { void toggleFullscreen(); }}>
+            <Minimize2 size={13} aria-hidden="true" /> Exit full screen
+          </button>
+        )}
       </div>
       <div className="screen-toolbar">
         <span className="quiet-count" aria-live="polite">{status} · {audioLabel}</span>
@@ -1244,14 +1409,15 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
           {share.audioAvailable && client.subscribeScreenAudio && <button type="button" className="quiet-button" onClick={toggleAudio} aria-pressed={audioEnabled}>
             <Volume2 size={13} aria-hidden="true" /> {audioEnabled ? "Mute app audio" : "Play app audio"}
           </button>}
-          <button type="button" className="quiet-button" aria-label="Full screen" disabled={!hasFrame} onClick={() => { void stageRef.current?.requestFullscreen?.(); }}>
-            <Maximize2 size={13} aria-hidden="true" /> Full screen
+          <button type="button" className="quiet-button" aria-label={isFullscreen ? "Exit full screen" : "Full screen"} aria-pressed={isFullscreen} disabled={!hasFrame} onClick={() => { void toggleFullscreen(); }}>
+            {isFullscreen ? <Minimize2 size={13} aria-hidden="true" /> : <Maximize2 size={13} aria-hidden="true" />} {isFullscreen ? "Exit full screen" : "Full screen"}
           </button>
           <button type="button" className="secondary-button" onClick={onStop}>Stop viewing</button>
         </span>
       </div>
       {videoError && <p className="clipboard-error" role="alert">{videoError}</p>}
       {audioError && <p className="clipboard-error" role="alert">{audioError}</p>}
+      {audioEnabled && audioSilenceNotice && !audioError && <p className="continuity-note" role="status">No sound detected from the phone yet — ensure media is playing unmuted on the phone and not blocked as DRM or protected content.</p>}
       {share.state === "active" && !share.audioAvailable && <small className="continuity-note">To share sound, stop and share again, select “Also share permitted app audio” in the phone’s consent, and allow Android’s optional audio-capture permission if asked. When audio becomes available, click “Play app audio” here. This captures app playback, not microphone audio; Android, the source app, or protected content may block it.</small>}
     </div>
   );

@@ -137,13 +137,28 @@ export class NativeClient implements AirBridgeClient {
       lastFinalizeDurationMs: null,
       screenShare: {
         activeSessions: 0,
+        targetFps: 0,
+        actualFps: 0,
+        actualKbps: 0,
         decoderMode: null,
         codec: null,
         framesDecoded: 0,
+        framesRendered: 0,
+        framesDroppedBeforeDraw: 0,
         decodeErrors: 0,
         keyframesReceived: 0,
         pliSent: 0,
         pliReceived: 0,
+        fullscreenMode: 'none',
+        lastFullscreenError: null,
+        audioContextState: 'uninitialized',
+        audioFramesReceived: 0,
+        audioFramesPlayed: 0,
+        audioNonZeroFrames: 0,
+        audioSilentFrames: 0,
+        audioFramesDroppedStale: 0,
+        audioFramesDroppedDecrypt: 0,
+        audioLastRms: 0,
       },
       contacts: {
         savedCount: this.snapshot.continuity?.savedContacts?.length ?? 0,
@@ -158,6 +173,16 @@ export class NativeClient implements AirBridgeClient {
         framesReceived: 0,
         packetsDropped: 0,
         lastError: null,
+        captureMode: 'none',
+        audioContextState: 'uninitialized',
+        audioContextSampleRate: 0,
+        micFramesCaptured: 0,
+        micNonZeroFrames: 0,
+        micLastRms: 0,
+        playbackFramesScheduled: 0,
+        playbackNonZeroFrames: 0,
+        playbackSilentFrames: 0,
+        playbackLastRms: 0,
       },
       clipboardBridge: {
         imagesSent: 0,
@@ -228,6 +253,7 @@ export class NativeClient implements AirBridgeClient {
   stopScreenShare(): void {}
   requestScreenKeyframe(): void {}
   recordScreenViewerStats(): void {}
+  recordCallAudioStats(): void {}
   subscribeScreenFrames(): () => void { return () => {}; }
   subscribeScreenVideo(): () => void { return () => {}; }
   subscribeScreenAudio(): () => void { return () => {}; }

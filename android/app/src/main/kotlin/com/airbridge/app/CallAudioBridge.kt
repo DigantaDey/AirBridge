@@ -14,6 +14,8 @@ import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.Process
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -49,6 +51,7 @@ class CallAudioBridge(
 
     private val lock = Any()
     private val running = AtomicBoolean(false)
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
     @Volatile private var activePeerId: String? = null
     @Volatile private var activeCallId: String? = null
@@ -59,6 +62,7 @@ class CallAudioBridge(
     private var aec: AcousticEchoCanceler? = null
     private var ns: NoiseSuppressor? = null
     private var captureThread: Thread? = null
+    private var speakerReassertRunnable: Runnable? = null
 
     private var priorAudioMode: Int? = null
     private var priorSpeakerphone: Boolean? = null
@@ -85,10 +89,11 @@ class CallAudioBridge(
     }
 
     override fun onIncomingAudio(frame: CallAudioFrame) {
-        if (!running.get() || activeCallId != frame.callId || activePeerId != frame.peerId) return
+        if (!running.get() || activeCallId != frame.callId || activePeerId != frame.peerId || muted) return
         val track = synchronized(lock) { audioTrack } ?: return
         runCatching {
             val written = track.write(frame.data, 0, frame.data.size, AudioTrack.WRITE_NON_BLOCKING)
+            AndroidDiagnostics.recordCallAudioTrackWrite(written)
             if (written > 0) {
                 AndroidDiagnostics.recordCallAudioFrameReceived()
             }
@@ -114,6 +119,21 @@ class CallAudioBridge(
         }
         stopAll()
 
+        CallAudioService.onStopRequested = {
+            val peer = synchronized(lock) { activePeerId }
+            val activeCall = synchronized(lock) { activeCallId }
+            stopAll()
+            if (peer != null && activeCall != null) {
+                onStateChanged?.invoke(peer, activeCall, CallAudioState(active = false, muted = false, route = "phone"))
+            }
+        }
+        val (fgsOk, fgsErr) = CallAudioService.start(context)
+
+        val audioManager = context.getSystemService(AudioManager::class.java)
+        val detectedMode = audioManager?.mode ?: AudioManager.MODE_NORMAL
+        val inCellularCall = detectedMode == AudioManager.MODE_IN_CALL
+        AndroidDiagnostics.callAudioAndroidMode = audioModeLabel(detectedMode)
+
         val sampleRate = requestedRate.coerceIn(8_000, 48_000)
         val frameSamples = ((sampleRate / 50).coerceAtLeast(160)).coerceAtMost(Continuity.CALL_AUDIO_MAX_FRAMES)
         val frameBytes = frameSamples * 2
@@ -122,68 +142,110 @@ class CallAudioBridge(
         val minPlayBuf = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
             .coerceAtLeast(frameBytes * 4)
 
-        val record = runCatching {
-            AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                sampleRate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                minRecBuf * 2,
-            )
-        }.onFailure {
-            AndroidDiagnostics.callAudioLastError = it.message
-            Log.w(TAG, "AudioRecord create failed: ${it.message}")
-        }.getOrNull()
-
-        if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
-            runCatching { record?.release() }
-            val reason = "Could not open phone microphone for call audio."
-            AndroidDiagnostics.callAudioLastError = reason
-            return CallAudioState(active = false, muted = false, route = "phone", reason = reason)
+        var record: AudioRecord? = null
+        var chosenSource = -1
+        for (source in selectCaptureSources(inCellularCall)) {
+            val candidate = runCatching {
+                AudioRecord(
+                    source,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    minRecBuf * 2,
+                )
+            }.onFailure {
+                AndroidDiagnostics.callAudioLastError = it.message
+                Log.w(TAG, "AudioRecord create failed for ${audioSourceLabel(source)}: ${it.message}")
+            }.getOrNull()
+            if (candidate != null && candidate.state == AudioRecord.STATE_INITIALIZED) {
+                record = candidate
+                chosenSource = source
+                break
+            }
+            runCatching { candidate?.release() }
         }
 
-        val track = runCatching {
-            AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build(),
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(sampleRate)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                        .build(),
-                )
-                .setBufferSizeInBytes(minPlayBuf * 2)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
-        }.onFailure {
-            AndroidDiagnostics.callAudioLastError = it.message
-            Log.w(TAG, "AudioTrack create failed: ${it.message}")
-        }.getOrNull()
+        if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
+            CallAudioService.stop(context)
+            CallAudioService.onStopRequested = null
+            val reason = "Could not open phone microphone for call audio."
+            AndroidDiagnostics.callAudioLastError = reason
+            AndroidDiagnostics.callAudioSourceUsed = "failed"
+            return CallAudioState(active = false, muted = false, route = "phone", reason = reason)
+        }
+        AndroidDiagnostics.callAudioSourceUsed = audioSourceLabel(chosenSource)
+
+        val preferredUsage = selectAudioTrackUsage(inCellularCall)
+        val usageCandidates = if (preferredUsage == AudioAttributes.USAGE_VOICE_COMMUNICATION) {
+            intArrayOf(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+        } else {
+            intArrayOf(preferredUsage, AudioAttributes.USAGE_VOICE_COMMUNICATION)
+        }
+        var track: AudioTrack? = null
+        for (usage in usageCandidates) {
+            val candidate = runCatching {
+                AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(usage)
+                            .setContentType(
+                                if (usage == AudioAttributes.USAGE_MEDIA) AudioAttributes.CONTENT_TYPE_MUSIC
+                                else AudioAttributes.CONTENT_TYPE_SPEECH,
+                            )
+                            .build(),
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build(),
+                    )
+                    .setBufferSizeInBytes(minPlayBuf * 2)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+            }.onFailure {
+                AndroidDiagnostics.callAudioLastError = it.message
+                Log.w(TAG, "AudioTrack create failed (usage=$usage): ${it.message}")
+            }.getOrNull()
+            if (candidate != null && candidate.state == AudioTrack.STATE_INITIALIZED) {
+                track = candidate
+                break
+            }
+            runCatching { candidate?.release() }
+        }
 
         if (track == null || track.state != AudioTrack.STATE_INITIALIZED) {
             runCatching { record.release() }
-            runCatching { track?.release() }
+            CallAudioService.stop(context)
+            CallAudioService.onStopRequested = null
             val reason = "Could not open phone voice output for call audio."
             AndroidDiagnostics.callAudioLastError = reason
             return CallAudioState(active = false, muted = false, route = "phone", reason = reason)
         }
 
-        val audioManager = context.getSystemService(AudioManager::class.java)
+        if (inCellularCall && audioManager != null) {
+            runCatching {
+                val builtinSpeaker = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull {
+                    it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                }
+                if (builtinSpeaker != null) {
+                    track.setPreferredDevice(builtinSpeaker)
+                }
+            }
+        }
+
         synchronized(lock) {
             activePeerId = peerId
             activeCallId = callId
             muted = false
             audioRecord = record
             audioTrack = track
-            aec = if (AcousticEchoCanceler.isAvailable()) {
+            val usePhoneAec = shouldUsePhoneAec(inCellularCall)
+            aec = if (usePhoneAec && AcousticEchoCanceler.isAvailable()) {
                 runCatching { AcousticEchoCanceler.create(record.audioSessionId)?.apply { enabled = true } }.getOrNull()
             } else null
-            ns = if (NoiseSuppressor.isAvailable()) {
+            ns = if (usePhoneAec && NoiseSuppressor.isAvailable()) {
                 runCatching { NoiseSuppressor.create(record.audioSessionId)?.apply { enabled = true } }.getOrNull()
             } else null
 
@@ -191,13 +253,31 @@ class CallAudioBridge(
                 priorAudioMode = audioManager.mode
                 @Suppress("DEPRECATION")
                 priorSpeakerphone = audioManager.isSpeakerphoneOn
-                runCatching { audioManager.mode = AudioManager.MODE_IN_COMMUNICATION }
+                if (shouldSetCommunicationMode(detectedMode)) {
+                    runCatching { audioManager.mode = AudioManager.MODE_IN_COMMUNICATION }
+                }
                 setSpeakerphone(audioManager, enabled = true)
+                AndroidDiagnostics.callAudioSpeakerphoneOn = isSpeakerphoneOnCompat(audioManager)
+                val reassert = Runnable {
+                    if (running.get()) {
+                        setSpeakerphone(audioManager, enabled = true)
+                        AndroidDiagnostics.callAudioSpeakerphoneOn = isSpeakerphoneOnCompat(audioManager)
+                    }
+                }
+                speakerReassertRunnable = reassert
+                runCatching { mainHandler.postDelayed(reassert, 250L) }
             }
             running.set(true)
             AndroidDiagnostics.callAudioActive = true
-            AndroidDiagnostics.callAudioLastError = null
+            AndroidDiagnostics.callAudioClientSilenced = false
+            if (fgsOk || fgsErr == null) {
+                AndroidDiagnostics.callAudioLastError = null
+            }
         }
+
+        val initialWarning = if (!fgsOk && fgsErr != null) {
+            "Open AirBridge on the phone if Mac call audio stays silent (${fgsErr.take(120)})."
+        } else null
 
         return try {
             track.play()
@@ -206,6 +286,9 @@ class CallAudioBridge(
                 runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
                 val buf = ByteArray(frameBytes)
                 var totalSamples = 0L
+                var frameCounter = 0
+                var consecutiveSilencedChecks = 0
+                var silencedReported = false
                 while (running.get()) {
                     val read = runCatching {
                         record.read(buf, 0, buf.size, AudioRecord.READ_BLOCKING)
@@ -213,22 +296,57 @@ class CallAudioBridge(
                     if (read <= 0) continue
                     val samples = read / 2
                     if (samples <= 0) continue
+                    val sampleBytes = samples * 2
                     val ptsMs = ((totalSamples * 1000L) / sampleRate) and 0xffffffffL
                     totalSamples += samples
-                    if (muted) continue
-                    val packet = if (samples * 2 == buf.size) buf.copyOf() else buf.copyOf(samples * 2)
-                    if (onSendAudio(peerId, callId, packet, sampleRate, 1, samples, ptsMs)) {
-                        AndroidDiagnostics.recordCallAudioFrameSent()
+                    frameCounter += 1
+                    val rms = PcmAudioMetrics.computePcm16Rms(buf, sampleBytes)
+                    val nonZero = PcmAudioMetrics.hasNonZeroPcm16(buf, sampleBytes)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && frameCounter % 25 == 0 && !silencedReported) {
+                        val silenced = runCatching { record.activeRecordingConfiguration?.isClientSilenced == true }.getOrDefault(false)
+                        if (silenced) {
+                            consecutiveSilencedChecks += 1
+                            if (consecutiveSilencedChecks >= 2) {
+                                silencedReported = true
+                                val msg = "Android silenced background microphone capture during this cellular call. Open AirBridge on the phone or use phone speakerphone."
+                                AndroidDiagnostics.callAudioClientSilenced = true
+                                AndroidDiagnostics.callAudioLastError = msg
+                                AndroidDiagnostics.recordEvent("callAudio", msg, "WARN")
+                                onStateChanged?.invoke(
+                                    peerId,
+                                    callId,
+                                    CallAudioState(active = true, muted = muted, route = "computer", reason = msg),
+                                )
+                            }
+                        } else {
+                            consecutiveSilencedChecks = 0
+                        }
+                    }
+                    // Always continue forwarding phone/speakerphone audio toward Mac even when Mac mic is muted.
+                    val packet = if (sampleBytes == buf.size) buf.copyOf() else buf.copyOf(sampleBytes)
+                    val sent = onSendAudio(peerId, callId, packet, sampleRate, 1, samples, ptsMs)
+                    if (sent) {
+                        AndroidDiagnostics.recordCallAudioFrameSent(nonZero, rms)
                     }
                 }
             }
-            CallAudioState(active = true, muted = false, route = "computer")
+            CallAudioState(active = true, muted = false, route = "computer", reason = initialWarning)
         } catch (e: Exception) {
             AndroidDiagnostics.callAudioLastError = e.message
             stopAll()
             CallAudioState(active = false, muted = false, route = "phone", reason = e.message ?: "Call audio start failed.")
         }
     }
+
+    private fun isSpeakerphoneOnCompat(audioManager: AudioManager): Boolean = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            audioManager.communicationDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER ||
+                @Suppress("DEPRECATION") audioManager.isSpeakerphoneOn
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.isSpeakerphoneOn
+        }
+    }.getOrDefault(false)
 
     private fun setSpeakerphone(audioManager: AudioManager, enabled: Boolean) {
         runCatching {
@@ -255,6 +373,7 @@ class CallAudioBridge(
         val prevSpeaker: Boolean?
         val curAec: AcousticEchoCanceler?
         val curNs: NoiseSuppressor?
+        val pendingSpeakerCallback: Runnable?
         synchronized(lock) {
             running.set(false)
             activePeerId = null
@@ -262,6 +381,8 @@ class CallAudioBridge(
             muted = false
             threadToJoin = captureThread
             captureThread = null
+            pendingSpeakerCallback = speakerReassertRunnable
+            speakerReassertRunnable = null
             rec = audioRecord
             audioRecord = null
             trk = audioTrack
@@ -275,7 +396,12 @@ class CallAudioBridge(
             prevSpeaker = priorSpeakerphone
             priorSpeakerphone = null
             AndroidDiagnostics.callAudioActive = false
+            AndroidDiagnostics.callAudioClientSilenced = false
+            AndroidDiagnostics.callAudioSpeakerphoneOn = false
         }
+        pendingSpeakerCallback?.let { runCatching { mainHandler.removeCallbacks(it) } }
+        CallAudioService.onStopRequested = null
+        CallAudioService.stop(context)
         runCatching { rec?.stop() }
         runCatching { rec?.release() }
         runCatching { trk?.pause() }
@@ -289,12 +415,53 @@ class CallAudioBridge(
         if (audioManager != null && (prevMode != null || prevSpeaker != null)) {
             runCatching {
                 setSpeakerphone(audioManager, prevSpeaker ?: false)
-                if (prevMode != null) audioManager.mode = prevMode
+                if (prevMode != null && shouldSetCommunicationMode(prevMode)) {
+                    audioManager.mode = prevMode
+                }
             }
         }
     }
 
     companion object {
         private const val TAG = "AirBridgeCallAudio"
+
+        internal fun selectCaptureSources(inCellularCall: Boolean): IntArray = if (inCellularCall) {
+            intArrayOf(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                MediaRecorder.AudioSource.MIC,
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            )
+        } else {
+            intArrayOf(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                MediaRecorder.AudioSource.MIC,
+            )
+        }
+
+        internal fun shouldUsePhoneAec(inCellularCall: Boolean): Boolean = !inCellularCall
+
+        internal fun shouldSetCommunicationMode(currentMode: Int): Boolean =
+            currentMode != AudioManager.MODE_IN_CALL
+
+        internal fun selectAudioTrackUsage(inCellularCall: Boolean): Int = if (inCellularCall) {
+            AudioAttributes.USAGE_MEDIA
+        } else {
+            AudioAttributes.USAGE_VOICE_COMMUNICATION
+        }
+
+        internal fun audioSourceLabel(source: Int): String = when (source) {
+            MediaRecorder.AudioSource.VOICE_RECOGNITION -> "VOICE_RECOGNITION"
+            MediaRecorder.AudioSource.MIC -> "MIC"
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION -> "VOICE_COMMUNICATION"
+            else -> "SOURCE_$source"
+        }
+
+        internal fun audioModeLabel(mode: Int): String = when (mode) {
+            AudioManager.MODE_NORMAL -> "MODE_NORMAL"
+            AudioManager.MODE_RINGTONE -> "MODE_RINGTONE"
+            AudioManager.MODE_IN_CALL -> "MODE_IN_CALL"
+            AudioManager.MODE_IN_COMMUNICATION -> "MODE_IN_COMMUNICATION"
+            else -> "MODE_$mode"
+        }
     }
 }

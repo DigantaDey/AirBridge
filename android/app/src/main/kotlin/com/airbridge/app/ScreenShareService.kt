@@ -114,6 +114,8 @@ class ScreenShareService : Service() {
     @Volatile private var firstPtsUs: Long? = null
     @Volatile private var awaitingKeyframe = true
     @Volatile private var lastSyncRequestAt = 0L
+    @Volatile private var audioCapturedSamples = 0L
+    private var playbackAudioAttempted = false
     private var stopping = false
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -197,10 +199,15 @@ class ScreenShareService : Service() {
         firstPtsUs = null
         awaitingKeyframe = true
         lastSyncRequestAt = 0L
-        AndroidDiagnostics.screenShareActive = true
-        AndroidDiagnostics.recordEvent("screenShare", "Screen share session started (audioRequested=$playbackAudioRequested)")
+        audioCapturedSamples = 0L
+        playbackAudioAttempted = false
         maxEdge = request.maxWidth
         maxFps = request.maxFps.coerceIn(1, Continuity.SCREEN_MAX_FPS)
+        AndroidDiagnostics.screenShareActive = true
+        AndroidDiagnostics.screenShareTargetFps = maxFps
+        AndroidDiagnostics.screenShareInFlight = 0
+        AndroidDiagnostics.screenShareLastAckRttMs = null
+        AndroidDiagnostics.recordEvent("screenShare", "Screen share session started (audioRequested=$playbackAudioRequested, maxFps=$maxFps)")
         projection = mp
         val t = HandlerThread("airbridge-screen").also { it.start() }
         thread = t
@@ -215,9 +222,7 @@ class ScreenShareService : Service() {
             }
         }, handler)
         handler?.post { configure(null, null) }
-        if (playbackAudioRequested) {
-            startPlaybackAudio(id, mp)
-        } else {
+        if (!playbackAudioRequested) {
             AndroidDiagnostics.screenShareAudioAvailable = false
             AndroidDiagnostics.screenShareAudioRecordState = "disabled"
             channel.setScreenAudioAvailable(id, false)
@@ -250,6 +255,11 @@ class ScreenShareService : Service() {
             finish("Low-latency video encoding is unavailable on this phone")
             return
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching {
+                nextSurface.setFrameRate(maxFps.toFloat(), Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+            }
+        }
         if (runCatching { next.setCallback(videoCallback, handler) }.onFailure { Log.w(TAG, "AVC callback setup failed", it) }.isFailure) {
             runCatching { nextSurface.release() }; runCatching { next.release() }
             finish("Low-latency video encoding is unavailable on this phone")
@@ -270,6 +280,10 @@ class ScreenShareService : Service() {
         lastVideoBitrate = sessionId?.let { id ->
             NativeEngineHost.instance?.continuityChannel()?.screenQuality(id)
         }?.let { Continuity.screenVideoBitrate(w, h, maxFps, it) } ?: Continuity.screenVideoBitrate(w, h, maxFps, 70)
+        AndroidDiagnostics.screenShareTargetFps = maxFps
+        AndroidDiagnostics.screenShareWidth = w
+        AndroidDiagnostics.screenShareHeight = h
+        AndroidDiagnostics.screenShareBitrateBps = lastVideoBitrate
         val vd = display
         if (vd == null) {
             display = runCatching {
@@ -285,6 +299,10 @@ class ScreenShareService : Service() {
                 finish("Screen capture failed on the phone")
                 return
             }
+            if (playbackAudioRequested && !playbackAudioAttempted && audioRecord == null) {
+                playbackAudioAttempted = true
+                sessionId?.let { id -> startPlaybackAudio(id, mp) }
+            }
         } else {
             vd.resize(w, h, dpi)
             vd.surface = nextSurface
@@ -293,18 +311,24 @@ class ScreenShareService : Service() {
     }
 
     private fun createVideoEncoder(w: Int, h: Int): MediaCodec {
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
+        val quality = sessionId?.let { id -> NativeEngineHost.instance?.continuityChannel()?.screenQuality(id) } ?: 70
+        val params = computeVideoEncoderParams(w, h, maxFps, quality)
+        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, params.width, params.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            val quality = sessionId?.let { id -> NativeEngineHost.instance?.continuityChannel()?.screenQuality(id) } ?: 70
-            setInteger(MediaFormat.KEY_BIT_RATE, Continuity.screenVideoBitrate(w, h, maxFps, quality))
-            setInteger(MediaFormat.KEY_FRAME_RATE, maxFps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+            setInteger(MediaFormat.KEY_BIT_RATE, params.bitrateBps)
+            setInteger(MediaFormat.KEY_FRAME_RATE, params.maxFps)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, params.iFrameIntervalSec)
+            runCatching { setFloat("max-fps-to-encoder", params.maxFpsToEncoder) }
+            runCatching { setInteger(MediaFormat.KEY_OPERATING_RATE, params.maxFps) }
             // Keep video flowing even on a static screen and eliminate B-frame reordering latency.
-            runCatching { setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L) }
+            runCatching { setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, params.repeatPreviousFrameAfterUs) }
             runCatching { setInteger(MediaFormat.KEY_PRIORITY, 0) }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
                 runCatching { setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0) }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                runCatching { setInteger(MediaFormat.KEY_LATENCY, 1) }
             }
         }
         return MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply { configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE) }
@@ -362,16 +386,27 @@ class ScreenShareService : Service() {
                     runCatching { codec.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, targetBitrate) }) }
                     lastVideoBitrate = targetBitrate
                 }
+                AndroidDiagnostics.screenShareBitrateBps = lastVideoBitrate
+                AndroidDiagnostics.screenShareInFlight = channel.screenSourceInFlight(id)
+                AndroidDiagnostics.screenShareLastAckRttMs = channel.screenSourceLastAckRttMs(id)
                 if (keyFrame) {
                     val payload = ensureAnnexBKeyFrameHeaders(rawBytes, cachedCodecConfig)
-                    if (!channel.canSendScreenFrame(id, keyFrame = true, codec = Continuity.SCREEN_CODEC_H264)) return
                     if (channel.sendScreenVideoFrame(id, payload, width, height, ptsMs, true)) {
                         awaitingKeyframe = false
                         AndroidDiagnostics.recordScreenKeyFrameSent()
+                    } else {
+                        awaitingKeyframe = true
+                        AndroidDiagnostics.recordScreenFrameDropped()
+                        requestSyncFrameInternal(force = false)
                     }
                     return
                 }
-                if (awaitingKeyframe || !channel.sendScreenVideoFrame(id, rawBytes, width, height, ptsMs, false)) {
+                if (awaitingKeyframe) {
+                    AndroidDiagnostics.recordScreenFrameDropped()
+                    requestSyncFrameInternal(force = false)
+                } else if (channel.sendScreenVideoFrame(id, rawBytes, width, height, ptsMs, false)) {
+                    AndroidDiagnostics.recordScreenPFrameSent()
+                } else {
                     awaitingKeyframe = true
                     AndroidDiagnostics.recordScreenFrameDropped()
                     requestSyncFrameInternal(force = false)
@@ -444,6 +479,7 @@ class ScreenShareService : Service() {
         val capture: AudioRecord? = try {
             val config = AudioPlaybackCaptureConfiguration.Builder(mp)
                 .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
                 .addMatchingUsage(AudioAttributes.USAGE_GAME)
                 .build()
             AudioRecord.Builder()
@@ -455,7 +491,7 @@ class ScreenShareService : Service() {
                         .setChannelMask(channelMask)
                         .build(),
                 )
-                .setBufferSizeInBytes(maxOf(minBuffer, bytesPerTwentyMs * 2))
+                .setBufferSizeInBytes(maxOf(minBuffer * 2, bytesPerTwentyMs * 4))
                 .build()
         } catch (se: SecurityException) {
             Log.w(TAG, "Playback capture blocked by SecurityException: ${se.message}")
@@ -502,6 +538,7 @@ class ScreenShareService : Service() {
             channel?.setScreenAudioAvailable(id, false)
             return
         }
+        audioCapturedSamples = 0L
         AndroidDiagnostics.screenShareAudioAvailable = true
         AndroidDiagnostics.screenShareAudioRecordState = "recording"
         channel?.setScreenAudioAvailable(id, true)
@@ -518,11 +555,17 @@ class ScreenShareService : Service() {
             }.getOrDefault(0)
             val validBytes = read - (read.coerceAtLeast(0) % 4) // 16-bit stereo samples
             if (validBytes > 0) {
-                val timestamp = SystemClock.elapsedRealtime() and 0xffffffffL
-                NativeEngineHost.instance?.continuityChannel()?.sendScreenAudio(
+                val sampleFrames = validBytes / 4
+                val timestamp = ((audioCapturedSamples * 1000L) / 48_000L) and 0xffffffffL
+                audioCapturedSamples += sampleFrames
+                val rms = PcmAudioMetrics.computePcm16Rms(bytes, validBytes)
+                val nonZero = PcmAudioMetrics.hasNonZeroPcm16(bytes, validBytes)
+                AndroidDiagnostics.recordScreenAudioFrameCaptured(nonZero, rms)
+                val sent = NativeEngineHost.instance?.continuityChannel()?.sendScreenAudio(
                     id, if (validBytes == bytes.size) bytes else bytes.copyOf(validBytes),
-                    48_000, 2, validBytes / 4, timestamp,
-                )
+                    48_000, 2, sampleFrames, timestamp,
+                ) ?: false
+                AndroidDiagnostics.recordScreenAudioFrameSent(sent)
             }
             if (!stopping && sessionId == id && audioRecord === record) audioHandler?.post(this)
         }
@@ -532,6 +575,8 @@ class ScreenShareService : Service() {
         val id = sessionId
         id?.let { NativeEngineHost.instance?.continuityChannel()?.setScreenAudioAvailable(it, false) }
         AndroidDiagnostics.screenShareAudioAvailable = false
+        playbackAudioAttempted = false
+        audioCapturedSamples = 0L
         val record = audioRecord
         audioRecord = null
         audioBuffer = null
@@ -616,6 +661,34 @@ class ScreenShareService : Service() {
         const val EXTRA_RESULT_CODE = "resultCode"
         const val EXTRA_RESULT_DATA = "resultData"
         const val EXTRA_SHARE_AUDIO = "shareAudio"
+
+        internal data class VideoEncoderParams(
+            val width: Int,
+            val height: Int,
+            val maxFps: Int,
+            val bitrateBps: Int,
+            val maxFpsToEncoder: Float,
+            val iFrameIntervalSec: Int,
+            val repeatPreviousFrameAfterUs: Long,
+        )
+
+        internal fun computeVideoEncoderParams(
+            width: Int,
+            height: Int,
+            maxFps: Int,
+            qualityPercent: Int,
+        ): VideoEncoderParams {
+            val clampedFps = maxFps.coerceIn(1, Continuity.SCREEN_MAX_FPS)
+            return VideoEncoderParams(
+                width = width,
+                height = height,
+                maxFps = clampedFps,
+                bitrateBps = Continuity.screenVideoBitrate(width, height, clampedFps, qualityPercent),
+                maxFpsToEncoder = clampedFps.toFloat(),
+                iFrameIntervalSec = 2,
+                repeatPreviousFrameAfterUs = 250_000L,
+            )
+        }
 
         /** Session currently being captured (null = not sharing). */
         @Volatile var activeSessionId: String? = null

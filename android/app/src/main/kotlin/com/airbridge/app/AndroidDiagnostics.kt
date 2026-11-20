@@ -74,17 +74,41 @@ object AndroidDiagnostics {
 
     // ScreenShare telemetry
     @Volatile var screenShareActive: Boolean = false
+    @Volatile var screenShareTargetFps: Int = 0
+    @Volatile var screenShareWidth: Int = 0
+    @Volatile var screenShareHeight: Int = 0
+    @Volatile var screenShareBitrateBps: Int = 0
+    @Volatile var screenShareInFlight: Int = 0
+    @Volatile var screenShareLastAckRttMs: Long? = null
     @Volatile var screenShareAudioAvailable: Boolean = false
     @Volatile var screenShareAudioPermissionGranted: Boolean = false
     @Volatile var screenShareAudioRecordState: String = "idle"
     @Volatile var screenCodecConfigCached: Boolean = false
+    @Volatile var screenAudioLastRms: Double = 0.0
     private val screenKeyFramesSentCounter = AtomicLong(0L)
+    private val screenPFramesSentCounter = AtomicLong(0L)
     private val screenFramesDroppedCounter = AtomicLong(0L)
     private val screenPliReceivedCounter = AtomicLong(0L)
+    private val screenAudioFramesCapturedCounter = AtomicLong(0L)
+    private val screenAudioNonZeroFramesCounter = AtomicLong(0L)
+    private val screenAudioSilentFramesCounter = AtomicLong(0L)
+    private val screenAudioFramesSentCounter = AtomicLong(0L)
+    private val screenAudioFramesDroppedCounter = AtomicLong(0L)
     fun recordScreenCodecConfigCached() { screenCodecConfigCached = true }
     fun recordScreenKeyFrameSent() { screenKeyFramesSentCounter.incrementAndGet() }
+    fun recordScreenPFrameSent() { screenPFramesSentCounter.incrementAndGet() }
     fun recordScreenFrameDropped() { screenFramesDroppedCounter.incrementAndGet() }
     fun recordScreenPliReceived() { screenPliReceivedCounter.incrementAndGet() }
+    fun recordScreenAudioFrameCaptured(nonZero: Boolean, rms: Double) {
+        screenAudioFramesCapturedCounter.incrementAndGet()
+        screenAudioLastRms = rms
+        if (nonZero) screenAudioNonZeroFramesCounter.incrementAndGet()
+        else screenAudioSilentFramesCounter.incrementAndGet()
+    }
+    fun recordScreenAudioFrameSent(sent: Boolean) {
+        if (sent) screenAudioFramesSentCounter.incrementAndGet()
+        else screenAudioFramesDroppedCounter.incrementAndGet()
+    }
 
     // Clipboard Image telemetry
     private val clipboardImagesReceivedCounter = AtomicLong(0L)
@@ -94,11 +118,32 @@ object AndroidDiagnostics {
 
     // Call Audio telemetry
     @Volatile var callAudioActive: Boolean = false
+    @Volatile var callAudioFgsMicPromoted: Boolean = false
+    @Volatile var callAudioFgsMicError: String? = null
+    @Volatile var callAudioSourceUsed: String = "idle"
+    @Volatile var callAudioAndroidMode: String = "unknown"
+    @Volatile var callAudioSpeakerphoneOn: Boolean = false
+    @Volatile var callAudioClientSilenced: Boolean = false
+    @Volatile var callAudioLastSendRms: Double = 0.0
     @Volatile var callAudioLastError: String? = null
     private val callAudioFramesSentCounter = AtomicLong(0L)
+    private val callAudioNonZeroFramesSentCounter = AtomicLong(0L)
+    private val callAudioSilentFramesSentCounter = AtomicLong(0L)
     private val callAudioFramesReceivedCounter = AtomicLong(0L)
+    private val callAudioTrackFramesWrittenCounter = AtomicLong(0L)
+    private val callAudioTrackWriteErrorsCounter = AtomicLong(0L)
     fun recordCallAudioFrameSent() { callAudioFramesSentCounter.incrementAndGet() }
+    fun recordCallAudioFrameSent(nonZero: Boolean, rms: Double) {
+        callAudioFramesSentCounter.incrementAndGet()
+        callAudioLastSendRms = rms
+        if (nonZero) callAudioNonZeroFramesSentCounter.incrementAndGet()
+        else callAudioSilentFramesSentCounter.incrementAndGet()
+    }
     fun recordCallAudioFrameReceived() { callAudioFramesReceivedCounter.incrementAndGet() }
+    fun recordCallAudioTrackWrite(bytesWritten: Int) {
+        if (bytesWritten > 0) callAudioTrackFramesWrittenCounter.incrementAndGet()
+        else if (bytesWritten < 0) callAudioTrackWriteErrorsCounter.incrementAndGet()
+    }
 
     // QR decode telemetry
     private val qrFrameCounter = AtomicLong(0L)
@@ -464,13 +509,26 @@ object AndroidDiagnostics {
 
         val screenShareObj = JsonValue.Obj()
             .put("active", ScreenShareService.activeSessionId != null || screenShareActive)
+            .put("targetFps", screenShareTargetFps.toLong())
+            .put("width", screenShareWidth.toLong())
+            .put("height", screenShareHeight.toLong())
+            .put("bitrateBps", screenShareBitrateBps.toLong())
             .put("audioAvailable", screenShareAudioAvailable)
             .put("audioPermissionGranted", permsMap["recordAudio"] == true || screenShareAudioPermissionGranted)
             .put("audioRecordInitState", screenShareAudioRecordState)
             .put("codecConfigCached", screenCodecConfigCached)
             .put("keyFramesSent", screenKeyFramesSentCounter.get())
+            .put("pFramesSent", screenPFramesSentCounter.get())
             .put("framesDropped", screenFramesDroppedCounter.get())
             .put("pliReceived", screenPliReceivedCounter.get())
+            .put("inFlightFrames", screenShareInFlight.toLong())
+            .putOpt("lastAckRttMs", screenShareLastAckRttMs)
+            .put("audioFramesCaptured", screenAudioFramesCapturedCounter.get())
+            .put("audioNonZeroFrames", screenAudioNonZeroFramesCounter.get())
+            .put("audioSilentFrames", screenAudioSilentFramesCounter.get())
+            .put("audioFramesSent", screenAudioFramesSentCounter.get())
+            .put("audioFramesDropped", screenAudioFramesDroppedCounter.get())
+            .put("audioLastRms", JsonValue.JsonDouble(screenAudioLastRms))
 
         val clipboardImagesObj = JsonValue.Obj()
             .put("received", clipboardImagesReceivedCounter.get())
@@ -478,14 +536,31 @@ object AndroidDiagnostics {
 
         val callAudioObj = JsonValue.Obj()
             .put("active", callAudioActive)
+            .put("fgsMicPromoted", callAudioFgsMicPromoted)
+            .putOpt("fgsMicError", callAudioFgsMicError?.let(::redact))
+            .put("audioSourceUsed", callAudioSourceUsed)
+            .put("androidAudioMode", callAudioAndroidMode)
+            .put("speakerphoneOn", callAudioSpeakerphoneOn)
+            .put("clientSilenced", callAudioClientSilenced)
             .put("framesSent", callAudioFramesSentCounter.get())
+            .put("nonZeroFramesSent", callAudioNonZeroFramesSentCounter.get())
+            .put("silentFramesSent", callAudioSilentFramesSentCounter.get())
+            .put("lastSendRms", JsonValue.JsonDouble(callAudioLastSendRms))
             .put("framesReceived", callAudioFramesReceivedCounter.get())
+            .put("trackFramesWritten", callAudioTrackFramesWrittenCounter.get())
+            .put("trackWriteErrors", callAudioTrackWriteErrorsCounter.get())
             .putOpt("lastError", callAudioLastError?.let(::redact))
 
         val engineObj = JsonValue.Obj()
             .put("transferResumes", engineSnap?.transferResumes ?: 0L)
             .put("transferInterruptions", engineSnap?.transferInterruptions ?: 0L)
             .put("outboundBatchFlushes", engineSnap?.outboundBatchFlushes ?: 0L)
+            .put("screenFramesWindowRejected", engineSnap?.screenFramesWindowRejected ?: 0L)
+            .put("screenFramesSocketRejected", engineSnap?.screenFramesSocketRejected ?: 0L)
+            .put("screenAudioFramesSent", engineSnap?.screenAudioFramesSent ?: 0L)
+            .put("screenAudioFramesDropped", engineSnap?.screenAudioFramesDropped ?: 0L)
+            .put("callAudioFramesSent", engineSnap?.callAudioFramesSent ?: 0L)
+            .put("callAudioFramesReceived", engineSnap?.callAudioFramesReceived ?: 0L)
 
         val qrObj = JsonValue.Obj()
             .put("framesDecoded", qrFramesCount)

@@ -118,6 +118,12 @@ data class EngineDiagnosticsSnapshot(
     val transferResumes: Long = 0,
     val transferInterruptions: Long = 0,
     val outboundBatchFlushes: Long = 0,
+    val screenFramesWindowRejected: Long = 0,
+    val screenFramesSocketRejected: Long = 0,
+    val screenAudioFramesSent: Long = 0,
+    val screenAudioFramesDropped: Long = 0,
+    val callAudioFramesSent: Long = 0,
+    val callAudioFramesReceived: Long = 0,
 )
 
 data class Peer(

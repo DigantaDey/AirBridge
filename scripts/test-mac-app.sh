@@ -70,7 +70,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 printf '%s\n' "$BIN" > "$APP/Contents/Resources/binary-path"
 printf '%s\n' "$PORT" > "$APP/Contents/Resources/port"
-swiftc -O scripts/mac_app.swift -o "$EXE" -framework AppKit -framework WebKit -framework UserNotifications -framework CoreBluetooth
+swiftc -O scripts/mac_app.swift -o "$EXE" -framework AppKit -framework WebKit -framework UserNotifications -framework CoreBluetooth -framework AVFoundation
 codesign --force -s - "$EXE"
 "$BIN" --version | grep -q "$WANT" || fail "binary reports $("$BIN" --version), want $WANT"
 

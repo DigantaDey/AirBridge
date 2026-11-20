@@ -78,6 +78,9 @@ echo "==> running hotspot pairing checks (endpoint ranking, TCP race, failure cl
 echo "==> running phone continuity checks (contacts, calls, screen sharing)"
 "$JAVA" -cp "$CP" com.airbridge.engine.ContinuityTestKt
 
+echo "==> running screen framerate and continuity audio checks"
+"$JAVA" -cp "$CP" com.airbridge.engine.ScreenFramerateAndAudioContinuityTestKt
+
 echo "==> running append-only file journal checks"
 "$JAVA" -cp "$CP" com.airbridge.engine.FilesTestKt
 

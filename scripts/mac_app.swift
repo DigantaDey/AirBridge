@@ -3,6 +3,7 @@ import WebKit
 import Foundation
 import UserNotifications
 import CoreBluetooth
+import AVFoundation
 
 /**
  * AirBridge Native macOS Application (AppKit + WebKit + NSStatusItem)
@@ -1096,6 +1097,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         window.backgroundColor = NSColor.windowBackgroundColor
         window.isReleasedWhenClosed = false
         window.delegate = self
+        window.collectionBehavior.insert(.fullScreenPrimary)
         window.center()
         window.setFrameAutosaveName("AirBridgeMainWindow")
         window.minSize = NSSize(width: 480, height: 600)
@@ -1108,6 +1110,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         }
         let developerExtrasEnabled = ProcessInfo.processInfo.environment["AIRBRIDGE_DEV_EXTRAS"] == "1"
         config.preferences.setValue(developerExtrasEnabled, forKey: "developerExtrasEnabled")
+        if #available(macOS 12.3, *) {
+            config.preferences.isElementFullscreenEnabled = true
+        } else {
+            config.preferences.setValue(true, forKey: "fullScreenEnabled")
+        }
+        config.mediaTypesRequiringUserActionForPlayback = []
         config.userContentController.add(self, name: "airbridgeShell")
 
         webView = WKWebView(frame: window.contentView!.bounds, configuration: config)
@@ -1395,7 +1403,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
                 "sseLastError": self.events?.lastError as Any,
                 "webViewLoaded": self.pageLoaded,
                 "webViewLastError": self.webViewLastError as Any,
+                "elementFullscreenEnabled": true,
+                "mediaAutoplayUnrestricted": true,
                 "microphonePermissionPolicy": "loopback-only",
+                "microphoneAuthStatus": AppDelegate.microphoneAuthStatusString(),
                 "launchAgentPresent": LoginItem.isEnabled,
                 "supervisorEarlyExits": self.supervisor.earlyExits,
                 "appLogTail": appLogTail,
@@ -1761,6 +1772,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         completionHandler(res == .alertFirstButtonReturn)
     }
 
+    static func microphoneAuthStatusString() -> String {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: return "authorized"
+        case .denied: return "denied"
+        case .restricted: return "restricted"
+        case .notDetermined: return "notDetermined"
+        @unknown default: return "unknown"
+        }
+    }
+
     @available(macOS 12.0, *)
     func webView(
         _ webView: WKWebView,
@@ -1770,11 +1791,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         decisionHandler: @escaping (WKPermissionDecision) -> Void
     ) {
         let host = origin.host.lowercased()
-        let isLoopbackHost = host == "localhost" || host == "127.0.0.1"
+        let isLoopbackHost = host == "localhost" || host == "127.0.0.1" || host == "::1"
         let expectedPort = supervisor != nil ? (Int(supervisor.port) ?? 0) : 0
-        if type == .microphone && isLoopbackHost && expectedPort > 0 && origin.port == expectedPort {
+        guard type == .microphone && isLoopbackHost && expectedPort > 0 && origin.port == expectedPort else {
+            decisionHandler(.deny)
+            return
+        }
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
             decisionHandler(.grant)
-        } else {
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                DispatchQueue.main.async {
+                    decisionHandler(granted ? .grant : .deny)
+                }
+            }
+        case .denied, .restricted:
+            supervisor?.log("microphone access denied in macOS System Settings")
+            decisionHandler(.deny)
+        @unknown default:
             decisionHandler(.deny)
         }
     }

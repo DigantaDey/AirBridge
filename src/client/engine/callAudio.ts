@@ -3,6 +3,20 @@ import {
   CALL_AUDIO_FRAME_SAMPLES,
   CALL_AUDIO_SAMPLE_RATE,
 } from '../../shared/continuity.js';
+import { computePcm16Rms, hasNonZeroPcm16 } from './screenAudio.js';
+
+export interface CallAudioSessionStats {
+  captureMode: 'worklet' | 'script-processor' | 'none';
+  audioContextState: string;
+  audioContextSampleRate: number;
+  micFramesCaptured: number;
+  micNonZeroFrames: number;
+  micLastRms: number;
+  playbackFramesScheduled: number;
+  playbackNonZeroFrames: number;
+  playbackSilentFrames: number;
+  playbackLastRms: number;
+}
 
 export interface CallAudioSessionOptions {
   peerId: string;
@@ -11,8 +25,19 @@ export interface CallAudioSessionOptions {
   sendFrame: (pcmS16le: Uint8Array, sampleRate: number, channels: number, frames: number, ptsMs: number) => boolean | void;
   subscribeIncoming: (listener: (frame: { sampleRate: number; channels: number; frames: number; ptsMs: number; data: Uint8Array }) => void) => () => void;
   onError?: (message: string) => void;
+  onStats?: (stats: CallAudioSessionStats) => void;
   getUserMedia?: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
   AudioContextCtor?: typeof AudioContext;
+}
+
+function float32Rms(samples: Float32Array): number {
+  if (samples.length === 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < samples.length; i += 1) {
+    const v = samples[i]!;
+    sum += v * v;
+  }
+  return Math.min(1, Math.sqrt(sum / samples.length));
 }
 
 /** Convert mono/multi Float32 samples in [-1, 1] to packed S16LE bytes. */
@@ -84,6 +109,7 @@ export class CallAudioSession {
   private workletNode: AudioWorkletNode | null = null;
   private scriptNode: ScriptProcessorNode | null = null;
   private sinkGain: GainNode | null = null;
+  private playbackGain: GainNode | null = null;
   private unsubscribe: (() => void) | null = null;
   private readonly playbackNodes = new Set<AudioBufferSourceNode>();
   private workletUrl: string | null = null;
@@ -94,8 +120,39 @@ export class CallAudioSession {
   private stopped = false;
   private muted = false;
 
+  private captureMode: 'worklet' | 'script-processor' | 'none' = 'none';
+  private micFramesCaptured = 0;
+  private micNonZeroFrames = 0;
+  private micLastRms = 0;
+  private playbackFramesScheduled = 0;
+  private playbackNonZeroFrames = 0;
+  private playbackSilentFrames = 0;
+  private playbackLastRms = 0;
+
   constructor(private readonly opts: CallAudioSessionOptions) {
     this.targetSampleRate = opts.sampleRate ?? CALL_AUDIO_SAMPLE_RATE;
+  }
+
+  public getStats(): CallAudioSessionStats {
+    return {
+      captureMode: this.captureMode,
+      audioContextState: this.context?.state ?? 'uninitialized',
+      audioContextSampleRate: this.context?.sampleRate ?? 0,
+      micFramesCaptured: this.micFramesCaptured,
+      micNonZeroFrames: this.micNonZeroFrames,
+      micLastRms: this.micLastRms,
+      playbackFramesScheduled: this.playbackFramesScheduled,
+      playbackNonZeroFrames: this.playbackNonZeroFrames,
+      playbackSilentFrames: this.playbackSilentFrames,
+      playbackLastRms: this.playbackLastRms,
+    };
+  }
+
+  private emitStats(force = false): void {
+    if (!this.opts.onStats) return;
+    const total = this.micFramesCaptured + this.playbackFramesScheduled;
+    if (!force && total > 2 && total % 10 !== 0) return;
+    this.opts.onStats(this.getStats());
   }
 
   public isMuted(): boolean {
@@ -153,12 +210,9 @@ export class CallAudioSession {
       track.enabled = !this.muted;
     }
 
-    let context: AudioContext;
-    try {
-      context = new AudioContextCtor({ sampleRate: this.targetSampleRate });
-    } catch {
-      context = new AudioContextCtor();
-    }
+    // Let macOS CoreAudio/WebKit run at native hardware sample rate (e.g. 48 kHz)
+    // and resample captured speech cleanly to 16 kHz to prevent silent hardware rate mismatches.
+    const context = new AudioContextCtor();
     this.context = context;
     if (typeof context.resume === 'function' && context.state === 'suspended') {
       await context.resume().catch(() => {});
@@ -175,6 +229,25 @@ export class CallAudioSession {
     zeroGain.gain.value = 0;
     zeroGain.connect(context.destination);
     this.sinkGain = zeroGain;
+
+    if (typeof context.createGain === 'function') {
+      const outGain = context.createGain();
+      outGain.gain.value = 1;
+      outGain.connect(context.destination);
+      this.playbackGain = outGain;
+    }
+
+    try {
+      if (typeof context.createBuffer === 'function' && typeof context.createBufferSource === 'function') {
+        const unlock = context.createBuffer(1, 1, context.sampleRate || 48_000);
+        const unlockNode = context.createBufferSource();
+        unlockNode.buffer = unlock;
+        unlockNode.connect(this.playbackGain ?? context.destination);
+        unlockNode.start(0);
+      }
+    } catch {
+      // Ignore unlock failure on test mocks
+    }
 
     let workletAttached = false;
     if (
@@ -198,6 +271,7 @@ export class CallAudioSession {
           node.connect(zeroGain);
           this.workletNode = node;
           workletAttached = true;
+          this.captureMode = 'worklet';
         }
       } catch {
         // Fall through to ScriptProcessorNode fallback when CSP/WKWebView blocks Blob AudioWorklet.
@@ -215,8 +289,10 @@ export class CallAudioSession {
       source.connect(processor);
       processor.connect(zeroGain);
       this.scriptNode = processor;
+      this.captureMode = 'script-processor';
     }
 
+    this.emitStats(true);
     this.unsubscribe = this.opts.subscribeIncoming((frame) => {
       this.schedulePlaybackFrame(frame);
     });
@@ -238,6 +314,10 @@ export class CallAudioSession {
     let offset = 0;
     while (offset + CALL_AUDIO_FRAME_SAMPLES <= combined.length) {
       const frame = combined.subarray(offset, offset + CALL_AUDIO_FRAME_SAMPLES);
+      const rms = float32Rms(frame);
+      this.micFramesCaptured += 1;
+      this.micLastRms = rms;
+      if (rms > 1e-4) this.micNonZeroFrames += 1;
       const pcm = float32ToPcm16(frame);
       const ptsMs = Math.round((this.emittedSamples * 1000) / this.targetSampleRate) >>> 0;
       this.emittedSamples += CALL_AUDIO_FRAME_SAMPLES;
@@ -249,12 +329,25 @@ export class CallAudioSession {
       offset += CALL_AUDIO_FRAME_SAMPLES;
     }
     this.residual = offset < combined.length ? combined.slice(offset) : new Float32Array(0);
+    if (offset > 0) this.emitStats(this.micFramesCaptured === 1);
   }
 
   /** Play back one incoming PCM S16LE packet on a bounded Web Audio timeline. */
   public schedulePlaybackFrame(frame: { sampleRate: number; channels: number; frames: number; ptsMs: number; data: Uint8Array }): void {
     const context = this.context;
     if (this.stopped || !context || frame.frames <= 0 || frame.data.byteLength < frame.frames * frame.channels * 2) return;
+    if (context.state === 'suspended' && typeof context.resume === 'function') {
+      void context.resume().catch(() => {});
+    }
+    const expectedBytes = frame.frames * frame.channels * 2;
+    const rms = computePcm16Rms(frame.data, expectedBytes);
+    this.playbackFramesScheduled += 1;
+    this.playbackLastRms = rms;
+    if (hasNonZeroPcm16(frame.data, expectedBytes)) {
+      this.playbackNonZeroFrames += 1;
+    } else {
+      this.playbackSilentFrames += 1;
+    }
     const now = context.currentTime;
     // Clamp drift past 250ms so interactive call audio stays real-time.
     if (this.playhead < now + 0.015 || this.playhead > now + 0.25) {
@@ -267,7 +360,7 @@ export class CallAudioSession {
     }
     const node = context.createBufferSource();
     node.buffer = buffer;
-    node.connect(context.destination);
+    node.connect(this.playbackGain ?? context.destination);
     this.playbackNodes.add(node);
     node.onended = () => {
       this.playbackNodes.delete(node);
@@ -275,6 +368,7 @@ export class CallAudioSession {
     };
     node.start(this.playhead);
     this.playhead += buffer.duration;
+    this.emitStats(this.playbackFramesScheduled === 1);
   }
 
   public stop(): void {
@@ -295,6 +389,8 @@ export class CallAudioSession {
     this.sourceNode = null;
     try { this.sinkGain?.disconnect(); } catch { /* ignore */ }
     this.sinkGain = null;
+    try { this.playbackGain?.disconnect(); } catch { /* ignore */ }
+    this.playbackGain = null;
     if (this.stream) {
       for (const track of this.stream.getTracks()) {
         try { track.stop(); } catch { /* ignore */ }

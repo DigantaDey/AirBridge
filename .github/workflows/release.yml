@@ -94,6 +94,65 @@ jobs:
             dist-bin/AirBridge-macOS-*.zip
           if-no-files-found: error
 
+  android-apk:
+    name: Android APK (installable testing/sideload build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      # Use the runner image's preinstalled Android SDK (third-party setup
+      # actions lag image migrations); install exactly what we compile against.
+      - name: Ensure Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "SDK_ROOT=$SDK_ROOT"
+          if [ ! -d "$SDK_ROOT" ]; then
+            echo "::error title=Android SDK missing::No Android SDK at $SDK_ROOT (ANDROID_HOME=${ANDROID_HOME:-unset})"
+            exit 1
+          fi
+          SDKMGR="$(find "$SDK_ROOT/cmdline-tools" -name sdkmanager -type f 2>/dev/null | sort | tail -1)"
+          if [ -z "$SDKMGR" ]; then
+            echo "::error title=sdkmanager missing::No sdkmanager under $SDK_ROOT/cmdline-tools — runner image layout changed"
+            exit 1
+          fi
+          yes | "$SDKMGR" --licenses >/dev/null 2>&1 || true
+          "$SDKMGR" --install "platforms;android-35" "build-tools;35.0.0" 2>&1 | tail -5
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.14.3
+      - name: Engine checks + unit tests + debug APK
+        shell: bash
+        run: |
+          set -o pipefail
+          export AIRBRIDGE_VERSION_CODE=$((2300000 + GITHUB_RUN_NUMBER))
+          gradle -p android :engine:check :app:testDebugUnitTest :app:assembleDebug --no-daemon 2>&1 | tee gradle-build.log || {
+            diagnostics="$(grep -E '(^e: |error:|What went wrong|Execution failed|Caused by:|Compilation error| FAILED)' gradle-build.log | tail -n 40)"
+            if [ -z "$diagnostics" ]; then diagnostics="$(tail -c 3500 gradle-build.log)"; fi
+            echo "::error title=Android APK build failed::$(printf '%s\n' "$diagnostics" | tr '\n' '|' | cut -c1-3800)"
+            exit 1
+          }
+      - name: Name APK artifact
+        run: |
+          set -euo pipefail
+          mkdir -p dist-bin
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist-bin/AirBridge-android-debug.apk
+          test -s dist-bin/AirBridge-android-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: dist-bin/AirBridge-android-debug.apk
+          if-no-files-found: error
+
   android-aab:
     # A public desktop release must never manufacture an unsigned Android
     # substitute. When the private Play upload key is not configured yet, this
@@ -176,13 +235,17 @@ jobs:
           set -o pipefail
           export AIRBRIDGE_VERSION_CODE=$((2300000 + GITHUB_RUN_NUMBER))
           gradle -p android :engine:check --no-daemon 2>&1 | tee gradle-build.log && \
-          gradle -p android :app:bundleRelease --no-daemon 2>&1 | tee -a gradle-build.log || {
+          gradle -p android :app:bundleRelease :app:assembleRelease --no-daemon 2>&1 | tee -a gradle-build.log || {
             echo "::error title=Android App Bundle build failed::$(tail -n 40 gradle-build.log | tr '\n' '|' | cut -c1-3000)"
             exit 1
           }
       - name: Name artifact
         if: ${{ steps.signing.outputs.configured == 'true' }}
-        run: mkdir -p dist-bin && cp android/app/build/outputs/bundle/release/app-release.aab dist-bin/AirBridge.aab
+        run: |
+          set -euo pipefail
+          mkdir -p dist-bin
+          cp android/app/build/outputs/bundle/release/app-release.aab dist-bin/AirBridge.aab
+          cp android/app/build/outputs/apk/release/app-release.apk dist-bin/AirBridge-android-release.apk
       # This is a Play Console upload package, not a direct-download asset.
       # Keep it short-lived and inside Actions; publishing it on a GitHub Release
       # invites users to download an AAB their device cannot install.
@@ -193,11 +256,17 @@ jobs:
           path: dist-bin/AirBridge.aab
           retention-days: 7
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: ${{ steps.signing.outputs.configured == 'true' }}
+        with:
+          name: android-release-apk
+          path: dist-bin/AirBridge-android-release.apk
+          if-no-files-found: error
 
   publish:
     name: Publish GitHub release
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    needs: [desktop-linux-windows, desktop-darwin, android-aab]
+    needs: [desktop-linux-windows, desktop-darwin, android-apk, android-aab]
     runs-on: ubuntu-latest
     # Keyless signing: Sigstore build-provenance attestations bound to this
     # workflow run (no signing keys or repository secrets to manage or leak).
@@ -212,12 +281,21 @@ jobs:
         with:
           node-version: 22
       # Keep the Play AAB in the private, short-lived Actions artifact above.
-      # GitHub Releases contain only desktop assets users can actually install.
+      # GitHub Releases publish validated desktop installers plus direct-install APKs.
       - uses: actions/download-artifact@v4
         with:
           pattern: desktop-*
           path: dist-bin
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: dist-bin
+      - uses: actions/download-artifact@v4
+        if: ${{ needs.android-aab.outputs.signed_aab_built == 'true' }}
+        with:
+          name: android-release-apk
+          path: dist-bin
       - name: Resolve release tag
         id: tag
         env:
@@ -243,9 +321,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$SIGNED_AAB_BUILT" = "true" ]; then
-            note="Android: a signed AAB was built as a private Play-upload artifact; it is not a GitHub download."
+            note="Android: includes the signed release APK (AirBridge-android-release.apk) and installable debug APK (AirBridge-android-debug.apk); the Play App Bundle (AAB) was built as a private Play-upload artifact and is not a GitHub download."
           else
-            note="Android: no Play bundle is included. The private Play upload key is not configured yet, so this public release contains only the validated desktop artifacts."
+            note="Android: includes the installable debug APK (AirBridge-android-debug.apk) for direct testing/sideloading. No signed Play bundle is included because the private Play upload key is not configured yet."
           fi
           {
             echo "note<<EOF"

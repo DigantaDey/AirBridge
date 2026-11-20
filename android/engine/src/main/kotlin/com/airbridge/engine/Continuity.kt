@@ -172,7 +172,7 @@ object Continuity {
     const val SCREEN_DEFAULT_FPS = 15
     const val SCREEN_MAX_FPS = 30
     const val SCREEN_MAX_INFLIGHT = 2
-    const val SCREEN_VIDEO_MAX_INFLIGHT = 6
+    const val SCREEN_VIDEO_MAX_INFLIGHT = 12
     const val SCREEN_MAX_FRAME_BYTES = 3 * 1024 * 1024
     const val SCREEN_CONSENT_TIMEOUT_MS = 2 * 60_000L
     const val FRAME_SCREEN = 0x04
@@ -744,6 +744,10 @@ class ContinuityChannel internal constructor(private val host: Host) {
     @Volatile var screenSourceAvailable: Boolean = false
 
     val screenPliReceivedCount = AtomicLong(0)
+    val screenFramesWindowRejectedCount = AtomicLong(0)
+    val screenFramesSocketRejectedCount = AtomicLong(0)
+    val screenAudioFramesSentCount = AtomicLong(0)
+    val screenAudioFramesDroppedCount = AtomicLong(0)
     val callAudioFramesSentCount = AtomicLong(0)
     val callAudioFramesReceivedCount = AtomicLong(0)
 
@@ -754,6 +758,7 @@ class ContinuityChannel internal constructor(private val host: Host) {
         var ackedSeq = 0L
         var lastAckAt = System.currentTimeMillis()
         var lastSentAt = 0L
+        var lastAckRttMs: Long? = null
         val sentAt = HashMap<Long, Long>()
         var quality = 0.7
         var running = true
@@ -1164,7 +1169,18 @@ class ContinuityChannel internal constructor(private val host: Host) {
     /** JPEG quality (30–85) the capture loop should use right now. */
     fun screenQuality(sessionId: String): Int = synchronized(lock) { ((sources[sessionId]?.quality ?: 0.7) * 100).toInt() }
 
-    /** Frame interval elapsed and the in-flight window has room (latest-frame-wins). */
+    /** Number of sent video frames still awaiting viewer acknowledgement. */
+    fun screenSourceInFlight(sessionId: String): Int = synchronized(lock) {
+        val s = sources[sessionId] ?: return 0
+        (s.nextSeq - 1 - s.ackedSeq).coerceAtLeast(0L).toInt()
+    }
+
+    /** Most recent ack round-trip latency in milliseconds for [sessionId]. */
+    fun screenSourceLastAckRttMs(sessionId: String): Long? = synchronized(lock) {
+        sources[sessionId]?.lastAckRttMs
+    }
+
+    /** Frame interval elapsed (JPEG) and the in-flight window has room (H.264 + JPEG). */
     fun canSendScreenFrame(
         sessionId: String,
         keyFrame: Boolean = false,
@@ -1173,19 +1189,21 @@ class ContinuityChannel internal constructor(private val host: Host) {
         val s = sources[sessionId] ?: return false
         if (!s.running) return false
         val now = System.currentTimeMillis()
-        val baseLimit = if (codec == Continuity.SCREEN_CODEC_H264) {
-            Continuity.SCREEN_VIDEO_MAX_INFLIGHT
+        val limit = if (codec == Continuity.SCREEN_CODEC_H264) {
+            Continuity.SCREEN_VIDEO_MAX_INFLIGHT + if (keyFrame) 2 else 0
         } else {
-            Continuity.SCREEN_MAX_INFLIGHT
+            Continuity.SCREEN_MAX_INFLIGHT + if (keyFrame) 1 else 0
         }
-        val limit = if (keyFrame) baseLimit + 1 else baseLimit
         if (s.nextSeq - 1 - s.ackedSeq >= limit) {
             if (now - s.lastAckAt <= 3_000) return false
             s.ackedSeq = s.nextSeq - 1 // frames lost on a reconnect: forget them
             s.sentAt.clear()
             s.lastAckAt = now
         }
-        keyFrame || (now - s.lastSentAt >= 1000L / s.maxFps)
+        // Only pace uncompressed JPEG captures by wall-clock interval; hardware H.264
+        // access units are already paced by the VirtualDisplay/encoder and burst slightly around vsync.
+        if (codec == Continuity.SCREEN_CODEC_H264) true
+        else keyFrame || (now - s.lastSentAt >= 1000L / s.maxFps)
     }
 
     /** Compatibility path for browser/JPEG sources. Android uses [sendScreenVideoFrame]. */
@@ -1207,7 +1225,10 @@ class ContinuityChannel internal constructor(private val host: Host) {
         keyFrame: Boolean,
     ): Boolean {
         if (plaintext.isEmpty() || plaintext.size > Continuity.SCREEN_MAX_FRAME_BYTES || width <= 0 || height <= 0) return false
-        if (!canSendScreenFrame(sessionId, keyFrame, codec)) return false
+        if (!canSendScreenFrame(sessionId, keyFrame, codec)) {
+            screenFramesWindowRejectedCount.incrementAndGet()
+            return false
+        }
         val (peerId, seq) = synchronized(lock) {
             val s = sources[sessionId] ?: return false
             s.peerId to s.nextSeq
@@ -1221,7 +1242,10 @@ class ContinuityChannel internal constructor(private val host: Host) {
             if (!s.running || s.nextSeq != seq) return false
             s.lastSentAt = now
         }
-        if (!host.sendFrame(peerId, Continuity.encodeScreenFrame(aad, iv, ct))) return false
+        if (!host.sendFrame(peerId, Continuity.encodeScreenFrame(aad, iv, ct))) {
+            screenFramesSocketRejectedCount.incrementAndGet()
+            return false
+        }
         synchronized(lock) {
             val s = sources[sessionId] ?: return false
             s.sentAt[seq] = now
@@ -1246,12 +1270,16 @@ class ContinuityChannel internal constructor(private val host: Host) {
         val key = host.sessionKey(peerId) ?: return false
         val aad = Continuity.encodeScreenAudioAad(sessionId, seq, sampleRate, channels, frames, ptsMs)
         val (iv, ct) = AirCrypto.encryptMediaFrame(key, aad, pcmS16le)
-        if (!host.sendFrame(peerId, Continuity.encodeScreenAudioFrame(aad, iv, ct))) return false
+        if (!host.sendFrame(peerId, Continuity.encodeScreenAudioFrame(aad, iv, ct))) {
+            screenAudioFramesDroppedCount.incrementAndGet()
+            return false
+        }
         synchronized(lock) {
             val s = sources[sessionId] ?: return false
             if (!s.running || !s.audioAvailable || s.nextAudioSeq != seq) return false
             s.nextAudioSeq = seq + 1
         }
+        screenAudioFramesSentCount.incrementAndGet()
         return true
     }
 
@@ -1271,7 +1299,11 @@ class ContinuityChannel internal constructor(private val host: Host) {
         val s = sources[sessionId] ?: return@synchronized
         if (s.peerId != fromPeerId || seq <= s.ackedSeq || seq >= s.nextSeq) return@synchronized
         val now = System.currentTimeMillis()
-        s.sentAt[seq]?.let { s.quality = Continuity.nextQuality(s.quality, now - it) }
+        s.sentAt[seq]?.let {
+            val rtt = (now - it).coerceAtLeast(0L)
+            s.lastAckRttMs = rtt
+            s.quality = Continuity.nextQuality(s.quality, rtt)
+        }
         s.sentAt.keys.removeAll { it <= seq }
         s.ackedSeq = seq
         s.lastAckAt = now

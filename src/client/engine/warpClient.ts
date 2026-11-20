@@ -1606,14 +1606,12 @@ export class WarpClient {
     this.continuity.requestScreenKeyframe(sessionId, reason);
   }
 
-  public recordScreenViewerStats(stats: {
-    decoderMode?: string | null;
-    codec?: string | null;
-    framesDecodedDelta?: number;
-    decodeErrorsDelta?: number;
-    keyframesReceivedDelta?: number;
-  }): void {
+  public recordScreenViewerStats(stats: Parameters<ContinuityManager['recordScreenViewerStats']>[0]): void {
     this.continuity.recordScreenViewerStats(stats);
+  }
+
+  public recordCallAudioStats(stats: Parameters<ContinuityManager['recordCallAudioStats']>[0]): void {
+    this.continuity.recordCallAudioStats(stats);
   }
 
   /** Decrypted frames for a viewer session (the latest frame is replayed on subscribe). */

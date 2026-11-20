@@ -53,6 +53,7 @@ import {
   type ScreenShareState,
 } from '../../shared/continuity.js';
 import type { ControlPayload, PeerSummary } from '../../shared/protocol.js';
+import type { CallAudioSessionStats } from './callAudio.js';
 import { decryptMediaFrame, encryptMediaFrame } from './crypto.js';
 
 export interface ContactsQueryResult {
@@ -140,13 +141,28 @@ export interface CallAudioFrame {
 export interface ContinuityDiagnosticsSnapshot {
   screenShare: {
     activeSessions: number;
+    targetFps: number;
+    actualFps: number;
+    actualKbps: number;
     decoderMode: string | null;
     codec: string | null;
     framesDecoded: number;
+    framesRendered: number;
+    framesDroppedBeforeDraw: number;
     decodeErrors: number;
     keyframesReceived: number;
     pliSent: number;
     pliReceived: number;
+    fullscreenMode: string;
+    lastFullscreenError: string | null;
+    audioContextState: string;
+    audioFramesReceived: number;
+    audioFramesPlayed: number;
+    audioNonZeroFrames: number;
+    audioSilentFrames: number;
+    audioFramesDroppedStale: number;
+    audioFramesDroppedDecrypt: number;
+    audioLastRms: number;
   };
   contacts: {
     savedCount: number;
@@ -161,6 +177,16 @@ export interface ContinuityDiagnosticsSnapshot {
     framesReceived: number;
     packetsDropped: number;
     lastError: string | null;
+    captureMode: string;
+    audioContextState: string;
+    audioContextSampleRate: number;
+    micFramesCaptured: number;
+    micNonZeroFrames: number;
+    micLastRms: number;
+    playbackFramesScheduled: number;
+    playbackNonZeroFrames: number;
+    playbackSilentFrames: number;
+    playbackLastRms: number;
   };
 }
 
@@ -352,6 +378,8 @@ export class ContinuityManager {
   private readonly frameListeners = new Map<string, Set<(frame: ScreenFrame) => void>>();
   /** Serialize async decrypts: H.264 deltas must reach WebCodecs in wire order. */
   private readonly screenFrameQueues = new Map<string, Promise<void>>();
+  /** Serialize async screen-audio decrypts so concurrent WebCrypto resolutions never race cursor checks. */
+  private readonly screenAudioQueues = new Map<string, Promise<void>>();
   private readonly videoListeners = new Map<string, Set<(frame: ScreenVideoFrame) => void>>();
   private readonly audioListeners = new Map<string, Set<(frame: ScreenAudioFrame) => void>>();
   private readonly callAudioListeners = new Map<string, Set<(frame: CallAudioFrame) => void>>();
@@ -368,16 +396,38 @@ export class ContinuityManager {
   private screenDecoderMode: string | null = null;
   private screenCodec: string | null = null;
   private screenFramesDecoded = 0;
+  private screenFramesRendered = 0;
+  private screenFramesDroppedBeforeDraw = 0;
   private screenDecodeErrors = 0;
   private screenKeyframesReceived = 0;
   private screenPliSent = 0;
   private screenPliReceived = 0;
+  private screenFullscreenMode = 'none';
+  private screenLastFullscreenError: string | null = null;
+  private screenAudioContextState = 'uninitialized';
+  private screenAudioFramesReceived = 0;
+  private screenAudioFramesPlayed = 0;
+  private screenAudioNonZeroFrames = 0;
+  private screenAudioSilentFrames = 0;
+  private screenAudioFramesDroppedStale = 0;
+  private screenAudioFramesDroppedDecrypt = 0;
+  private screenAudioLastRms = 0;
   private contactsRemovedByUser = 0;
   private contactsClearedOnDisconnect = 0;
   private callAudioFramesSent = 0;
   private callAudioFramesReceived = 0;
   private callAudioPacketsDropped = 0;
   private callAudioLastError: string | null = null;
+  private callAudioCaptureMode = 'none';
+  private callAudioContextState = 'uninitialized';
+  private callAudioContextSampleRate = 0;
+  private callAudioMicFramesCaptured = 0;
+  private callAudioMicNonZeroFrames = 0;
+  private callAudioMicLastRms = 0;
+  private callAudioPlaybackFramesScheduled = 0;
+  private callAudioPlaybackNonZeroFrames = 0;
+  private callAudioPlaybackSilentFrames = 0;
+  private callAudioPlaybackLastRms = 0;
 
   constructor(private readonly host: ContinuityHost, private options: ContinuityOptions = {}) {
     this.loadSavedContacts();
@@ -617,19 +667,38 @@ export class ContinuityManager {
   }
 
   getDiagnostics(): ContinuityDiagnosticsSnapshot {
-    const activeSessions = [...this.viewers.values(), ...this.sources.values()].filter((s) =>
+    const activeList = [...this.viewers.values(), ...this.sources.values()].filter((s) =>
       ['requesting', 'pending', 'active'].includes(s.view.state),
-    ).length;
+    );
+    const activeSessions = activeList.length;
+    const primarySession =
+      activeList.find((s) => s.view.role === 'viewer' && s.view.state === 'active') ??
+      activeList[0];
     return {
       screenShare: {
         activeSessions,
+        targetFps: primarySession?.view.maxFps ?? 0,
+        actualFps: primarySession?.view.fps ?? 0,
+        actualKbps: primarySession?.view.kbps ?? 0,
         decoderMode: this.screenDecoderMode,
         codec: this.screenCodec,
         framesDecoded: this.screenFramesDecoded,
+        framesRendered: this.screenFramesRendered,
+        framesDroppedBeforeDraw: this.screenFramesDroppedBeforeDraw,
         decodeErrors: this.screenDecodeErrors,
         keyframesReceived: this.screenKeyframesReceived,
         pliSent: this.screenPliSent,
         pliReceived: this.screenPliReceived,
+        fullscreenMode: this.screenFullscreenMode,
+        lastFullscreenError: this.screenLastFullscreenError,
+        audioContextState: this.screenAudioContextState,
+        audioFramesReceived: this.screenAudioFramesReceived,
+        audioFramesPlayed: this.screenAudioFramesPlayed,
+        audioNonZeroFrames: this.screenAudioNonZeroFrames,
+        audioSilentFrames: this.screenAudioSilentFrames,
+        audioFramesDroppedStale: this.screenAudioFramesDroppedStale,
+        audioFramesDroppedDecrypt: this.screenAudioFramesDroppedDecrypt,
+        audioLastRms: this.screenAudioLastRms,
       },
       contacts: {
         savedCount: this.savedContacts.length,
@@ -644,6 +713,16 @@ export class ContinuityManager {
         framesReceived: this.callAudioFramesReceived,
         packetsDropped: this.callAudioPacketsDropped,
         lastError: this.callAudioLastError,
+        captureMode: this.callAudioCaptureMode,
+        audioContextState: this.callAudioContextState,
+        audioContextSampleRate: this.callAudioContextSampleRate,
+        micFramesCaptured: this.callAudioMicFramesCaptured,
+        micNonZeroFrames: this.callAudioMicNonZeroFrames,
+        micLastRms: this.callAudioMicLastRms,
+        playbackFramesScheduled: this.callAudioPlaybackFramesScheduled,
+        playbackNonZeroFrames: this.callAudioPlaybackNonZeroFrames,
+        playbackSilentFrames: this.callAudioPlaybackSilentFrames,
+        playbackLastRms: this.callAudioPlaybackLastRms,
       },
     };
   }
@@ -660,6 +739,7 @@ export class ContinuityManager {
     for (const call of this.calls.values()) if (call.timer) clearTimeout(call.timer);
     for (const timer of this.lingerTimers) clearTimeout(timer);
     this.screenFrameQueues.clear();
+    this.screenAudioQueues.clear();
     this.batteryStatus.clear();
     this.lowBatteryNotified.clear();
     for (const map of [this.contactRequests, this.callCommands] as Array<Map<string, Pending<never>>>) {
@@ -1307,14 +1387,51 @@ export class ContinuityManager {
     decoderMode?: string | null;
     codec?: string | null;
     framesDecodedDelta?: number;
+    framesRenderedDelta?: number;
+    framesDroppedBeforeDrawDelta?: number;
     decodeErrorsDelta?: number;
     keyframesReceivedDelta?: number;
+    fullscreenMode?: string;
+    lastFullscreenError?: string | null;
+    audioContextState?: string;
+    audioFramesPlayedDelta?: number;
+    audioNonZeroFramesDelta?: number;
+    audioSilentFramesDelta?: number;
+    audioFramesPlayed?: number;
+    audioNonZeroFrames?: number;
+    audioSilentFrames?: number;
+    audioLastRms?: number;
   }): void {
     if (stats.decoderMode !== undefined) this.screenDecoderMode = stats.decoderMode;
     if (stats.codec !== undefined) this.screenCodec = stats.codec;
     if (stats.framesDecodedDelta) this.screenFramesDecoded += stats.framesDecodedDelta;
+    if (stats.framesRenderedDelta) this.screenFramesRendered += stats.framesRenderedDelta;
+    if (stats.framesDroppedBeforeDrawDelta) this.screenFramesDroppedBeforeDraw += stats.framesDroppedBeforeDrawDelta;
     if (stats.decodeErrorsDelta) this.screenDecodeErrors += stats.decodeErrorsDelta;
     if (stats.keyframesReceivedDelta) this.screenKeyframesReceived += stats.keyframesReceivedDelta;
+    if (stats.fullscreenMode !== undefined) this.screenFullscreenMode = stats.fullscreenMode;
+    if (stats.lastFullscreenError !== undefined) this.screenLastFullscreenError = stats.lastFullscreenError;
+    if (stats.audioContextState !== undefined) this.screenAudioContextState = stats.audioContextState;
+    if (stats.audioFramesPlayedDelta) this.screenAudioFramesPlayed += stats.audioFramesPlayedDelta;
+    if (stats.audioNonZeroFramesDelta) this.screenAudioNonZeroFrames += stats.audioNonZeroFramesDelta;
+    if (stats.audioSilentFramesDelta) this.screenAudioSilentFrames += stats.audioSilentFramesDelta;
+    if (stats.audioFramesPlayed !== undefined) this.screenAudioFramesPlayed = stats.audioFramesPlayed;
+    if (stats.audioNonZeroFrames !== undefined) this.screenAudioNonZeroFrames = stats.audioNonZeroFrames;
+    if (stats.audioSilentFrames !== undefined) this.screenAudioSilentFrames = stats.audioSilentFrames;
+    if (stats.audioLastRms !== undefined) this.screenAudioLastRms = stats.audioLastRms;
+  }
+
+  recordCallAudioStats(stats: Partial<CallAudioSessionStats>): void {
+    if (stats.captureMode !== undefined) this.callAudioCaptureMode = stats.captureMode;
+    if (stats.audioContextState !== undefined) this.callAudioContextState = stats.audioContextState;
+    if (stats.audioContextSampleRate !== undefined) this.callAudioContextSampleRate = stats.audioContextSampleRate;
+    if (stats.micFramesCaptured !== undefined) this.callAudioMicFramesCaptured = stats.micFramesCaptured;
+    if (stats.micNonZeroFrames !== undefined) this.callAudioMicNonZeroFrames = stats.micNonZeroFrames;
+    if (stats.micLastRms !== undefined) this.callAudioMicLastRms = stats.micLastRms;
+    if (stats.playbackFramesScheduled !== undefined) this.callAudioPlaybackFramesScheduled = stats.playbackFramesScheduled;
+    if (stats.playbackNonZeroFrames !== undefined) this.callAudioPlaybackNonZeroFrames = stats.playbackNonZeroFrames;
+    if (stats.playbackSilentFrames !== undefined) this.callAudioPlaybackSilentFrames = stats.playbackSilentFrames;
+    if (stats.playbackLastRms !== undefined) this.callAudioPlaybackLastRms = stats.playbackLastRms;
   }
 
   requestScreenShare(peerId: string, options: { maxWidth?: number; maxFps?: number } = {}): string {
@@ -1389,31 +1506,69 @@ export class ContinuityManager {
 
   async handleScreenAudioFrame(fromPeerId: string, bytes: Uint8Array): Promise<void> {
     if (this.destroyed) return;
-    let frame;
+    let frame: ReturnType<typeof decodeScreenAudioFrame>;
     try {
       frame = decodeScreenAudioFrame(bytes);
     } catch {
       return;
     }
+    const key = frame.sessionId;
+    const prior = this.screenAudioQueues.get(key) ?? Promise.resolve();
+    const next = prior.catch(() => {}).then(() => this.processScreenAudioFrame(fromPeerId, frame));
+    const settled = next.catch(() => {});
+    this.screenAudioQueues.set(key, settled);
+    try {
+      await settled;
+    } finally {
+      if (this.screenAudioQueues.get(key) === settled) this.screenAudioQueues.delete(key);
+    }
+  }
+
+  private async processScreenAudioFrame(
+    fromPeerId: string,
+    frame: ReturnType<typeof decodeScreenAudioFrame>,
+  ): Promise<void> {
+    if (this.destroyed) return;
     const session = this.viewers.get(frame.sessionId);
     if (!session || session.view.peerId !== fromPeerId || !['pending', 'active'].includes(session.view.state)) return;
     // Audio is independent from video, but it must still move forward on the
-    // source's modulo-u32 clock. This drops queued/replayed old packets rather
-    // than allowing a delayed relay packet to create audible A/V drift.
-    if (frame.seq <= session.lastAudioSeq || (session.lastAudioPtsMs !== undefined && (((frame.ptsMs - session.lastAudioPtsMs + 0x100000000) % 0x100000000) === 0 || ((frame.ptsMs - session.lastAudioPtsMs + 0x100000000) % 0x100000000) > 0x80000000))) return;
+    // source's monotonic sample clock without falsely dropping equal-ms packets.
+    if (frame.seq <= session.lastAudioSeq) {
+      this.screenAudioFramesDroppedStale++;
+      return;
+    }
+    if (session.lastAudioPtsMs !== undefined) {
+      const ptsDelta = (frame.ptsMs - session.lastAudioPtsMs + 0x100000000) % 0x100000000;
+      if (ptsDelta > 0x80000000) {
+        this.screenAudioFramesDroppedStale++;
+        return;
+      }
+    }
     const key = await this.host.sessionKey(fromPeerId);
     if (!key) return;
     let data: Uint8Array;
     try {
       data = await decryptMediaFrame(key, frame.aad, frame.iv, frame.ciphertext);
     } catch {
+      this.screenAudioFramesDroppedDecrypt++;
       return;
     }
-    const audioPtsDelta = session.lastAudioPtsMs === undefined ? 1 : (frame.ptsMs - session.lastAudioPtsMs + 0x100000000) % 0x100000000;
-    if (frame.seq <= session.lastAudioSeq || !this.viewers.has(frame.sessionId) || data.byteLength !== frame.frames * frame.channels * 2 || audioPtsDelta === 0 || audioPtsDelta > 0x80000000) return;
+    const postPtsDelta = session.lastAudioPtsMs === undefined
+      ? 0
+      : (frame.ptsMs - session.lastAudioPtsMs + 0x100000000) % 0x100000000;
+    if (
+      frame.seq <= session.lastAudioSeq ||
+      !this.viewers.has(frame.sessionId) ||
+      data.byteLength !== frame.frames * frame.channels * 2 ||
+      (session.lastAudioPtsMs !== undefined && postPtsDelta > 0x80000000)
+    ) {
+      this.screenAudioFramesDroppedStale++;
+      return;
+    }
     session.lastAudioSeq = frame.seq;
     session.lastAudioPtsMs = frame.ptsMs;
     session.view.audioAvailable = true;
+    this.screenAudioFramesReceived++;
     const out: ScreenAudioFrame = {
       sessionId: frame.sessionId,
       peerId: fromPeerId,
@@ -1563,6 +1718,7 @@ export class ContinuityManager {
         this.videoListeners.delete(session.view.sessionId);
         this.audioListeners.delete(session.view.sessionId);
         this.screenFrameQueues.delete(session.view.sessionId);
+        this.screenAudioQueues.delete(session.view.sessionId);
         this.host.emit();
       }
     }, STOPPED_SHARE_LINGER_MS);

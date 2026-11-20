@@ -21,8 +21,13 @@ describe('public release workflow', () => {
 
     const publishJob = workflow.slice(workflow.indexOf('  publish:'));
     expect(publishJob).toContain('SIGNED_AAB_BUILT: ${{ needs.android-aab.outputs.signed_aab_built }}');
-    expect(publishJob).toContain('public release contains only the validated desktop artifacts');
+    expect(publishJob).toContain('needs: [desktop-linux-windows, desktop-darwin, android-apk, android-aab]');
+    expect(publishJob).toContain('AirBridge-android-debug.apk');
+    expect(publishJob).toContain('android-release-apk');
     expect(publishJob).not.toContain('AirBridge.aab');
+
+    expect(workflow).toContain('android-apk:');
+    expect(workflow).toContain('dist-bin/AirBridge-android-debug.apk');
   });
 
   it('uses the available Intel macOS runner while packaging both architectures', async () => {

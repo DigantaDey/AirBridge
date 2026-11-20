@@ -243,20 +243,25 @@ describe('install.ps1 fail-closed checksum enforcement (S-4)', () => {
         { mode: 0o755 },
       );
       fs.writeFileSync(path.join(psRoot, 'sums-fail'), '1');
-      const res = spawnSync('pwsh', ['-NoProfile', '-File', psInstaller], {
+      const res = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', psInstaller], {
         env: {
           ...process.env,
           PATH: `${binDir}:${process.env.PATH}`,
           AIRBRIDGE_INSTALL_DIR: targetDir,
           TEST_PS_ROOT: psRoot,
+          POWERSHELL_TELEMETRY_OPTOUT: '1',
+          POWERSHELL_UPDATECHECK: 'Off',
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1',
         },
         encoding: 'utf8',
+        timeout: 25_000,
       });
+      expect(res.error).toBeUndefined();
       expect(res.status).not.toBe(0);
       expect(fs.existsSync(path.join(targetDir, 'AirBridge.exe'))).toBe(false);
       expect(fs.existsSync(path.join(targetDir, 'AirBridge.exe.tmp'))).toBe(false);
     } finally {
       fs.rmSync(psRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });

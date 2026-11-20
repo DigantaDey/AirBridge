@@ -61,7 +61,7 @@ PLIST
 
 echo "▸ compiling the Swift shell for $TARGET"
 swiftc -O -target "$TARGET" scripts/mac_app.swift -o "$APP/Contents/MacOS/AirBridge" \
-  -framework AppKit -framework WebKit -framework UserNotifications -framework CoreBluetooth
+  -framework AppKit -framework WebKit -framework UserNotifications -framework CoreBluetooth -framework AVFoundation
 
 cp "$SERVER" "$APP/Contents/Resources/airbridge-server"
 chmod 755 "$APP/Contents/Resources/airbridge-server" "$APP/Contents/MacOS/AirBridge"
