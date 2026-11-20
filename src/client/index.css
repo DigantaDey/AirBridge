@@ -414,6 +414,11 @@ html.dark .clipboard-error { color: #f87171; }
 .contact-value { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--ab-secondary); font-variant-numeric: tabular-nums; }
 .contact-value a { color: var(--ab-secondary); }
 .contact-value small { color: var(--ab-muted); }
+.contact-list[aria-label="Contacts"] > .contact-row { display: grid; grid-template-columns: minmax(0, 1fr) 124px; align-items: center; gap: 10px; }
+.contact-actions { display: grid; grid-template-columns: 30px minmax(0, 1fr); align-items: center; gap: 8px; min-width: 0; white-space: nowrap; }
+.contact-call-actions { display: flex; flex-direction: column; align-items: flex-start; }
+.contact-call-actions .text-button { white-space: nowrap; }
+.contact-actions .call-actions { flex-wrap: nowrap; white-space: nowrap; }
 .contacts-send-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .contact-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
 .contact-form input { border: 1px solid var(--ab-border-strong); border-radius: 6px; padding: 8px 10px; color: var(--ab-text); background: var(--ab-bg); }
