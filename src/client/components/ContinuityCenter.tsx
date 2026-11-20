@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { Maximize2, Phone, PhoneIncoming, PhoneOff, ScreenShare, Search, Upload, Download, UserPlus, Volume2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { Maximize2, Mic, MicOff, Phone, PhoneIncoming, PhoneOff, ScreenShare, Search, Trash2, Upload, Download, UserPlus, Volume2 } from "lucide-react";
 import {
   MAX_VCARD_LENGTH,
   buildVCard,
@@ -10,10 +10,20 @@ import {
   parseVCards,
   type ContactCard,
   type ContinuityFeature,
+  type SavedContactRecord,
 } from "../../shared/continuity.js";
 import type { PeerSummary } from "../../shared/protocol.js";
-import { h264CodecFromAnnexB } from "../engine/h264.js";
+import {
+  annexBToAvcc,
+  buildAvcDecoderConfigurationRecord,
+  extractSpsPps,
+  h264CodecFromAnnexB,
+  prependSpsPpsIfMissing,
+} from "../engine/h264.js";
+import { CallAudioSession } from "../engine/callAudio.js";
 import type {
+  CallAudioFrame,
+  CallAudioStateView,
   CallCommandResult,
   CallView,
   ContactShareItem,
@@ -34,12 +44,35 @@ export interface ContinuityClient {
   requestContacts(peerId: string, options?: { query?: string; limit?: number }): Promise<ContactsQueryResult>;
   shareContacts(peerId: string, contacts: ContactCard[]): Promise<ContactShareItem>;
   clearSharedContacts(): void;
+  removeSavedContact?(contactId: string): boolean;
+  clearSavedContacts?(peerId?: string): number;
   answerCall(peerId: string, callId: string): Promise<CallCommandResult>;
   rejectCall(peerId: string, callId: string): Promise<CallCommandResult>;
   hangUpCall(peerId: string, callId: string): Promise<CallCommandResult>;
   dialNumber(peerId: string, number: string): Promise<CallCommandResult>;
+  startCallAudio?(peerId: string, callId: string): Promise<void>;
+  stopCallAudio?(peerId: string, callId: string): Promise<void>;
+  setCallAudioMuted?(peerId: string, callId: string, muted: boolean): Promise<void>;
+  sendCallAudio?(
+    peerId: string,
+    callId: string,
+    pcmS16le: Uint8Array,
+    sampleRate: number,
+    channels: number,
+    frames: number,
+    ptsMs: number,
+  ): Promise<boolean>;
+  subscribeCallAudio?(callId: string, listener: (frame: CallAudioFrame) => void): () => void;
   requestScreenShare(peerId: string, options?: { maxWidth?: number; maxFps?: number }): string;
   stopScreenShare(sessionId: string): void;
+  requestScreenKeyframe?(sessionId: string, reason?: string): void;
+  recordScreenViewerStats?(stats: {
+    decoderMode?: string | null;
+    codec?: string | null;
+    framesDecodedDelta?: number;
+    decodeErrorsDelta?: number;
+    keyframesReceivedDelta?: number;
+  }): void;
   subscribeScreenFrames(sessionId: string, listener: (frame: ScreenFrame) => void): () => void;
   subscribeScreenVideo?(sessionId: string, listener: (frame: ScreenVideoFrame) => void): () => void;
   subscribeScreenAudio?(sessionId: string, listener: (frame: ScreenAudioFrame) => void): () => void;
@@ -63,7 +96,7 @@ type ScreenPreset = keyof typeof SCREEN_PRESETS;
 
 const LIST_PAGE = 150;
 
-export const EMPTY_SNAPSHOT: ContinuitySnapshot = { peerFeatures: {}, calls: [], screenShares: [], screenRequests: [], sharedContacts: [], batteryStatus: {} };
+export const EMPTY_SNAPSHOT: ContinuitySnapshot = { peerFeatures: {}, calls: [], screenShares: [], screenRequests: [], sharedContacts: [], savedContacts: [], batteryStatus: {}, callAudio: null };
 
 /** Why a tab cannot be used with a device, in words the user can act on (null = ready). */
 export function featureGuidance(tab: ContinuityTab, peer: PeerSummary | undefined, features: ContinuityFeature[] | undefined): string | null {
@@ -141,18 +174,20 @@ interface ContinuityCenterProps {
 /** Contacts, calls and screen viewing for paired devices (top bar → Contacts / Calls / Screen). */
 export function ContinuityCenter({ client, peers, continuity, initialTab, onClose }: ContinuityCenterProps) {
   const snap = continuity ?? EMPTY_SNAPSHOT;
-  const [tab, setTab] = useState<ContinuityTab>(initialTab);
-  useEffect(() => setTab(initialTab), [initialTab]);
+  const [tabState, setTabState] = useState<{ initial: ContinuityTab; current: ContinuityTab }>({
+    initial: initialTab,
+    current: initialTab,
+  });
+  const tab = tabState.initial === initialTab ? tabState.current : initialTab;
+  const setTab = (next: ContinuityTab) => setTabState({ initial: initialTab, current: next });
   const paired = useMemo(() => peers.filter((p) => p.discoveryScope === "paired"), [peers]);
   const capable = (t: ContinuityTab) => paired.filter((p) => snap.peerFeatures[p.peerId]?.includes(TAB_FEATURE[t]));
-  const [peerId, setPeerId] = useState<string>("");
+  const [selectedPeerId, setSelectedPeerId] = useState<string>("");
   // Follow the best device for the tab unless the user picked one that still exists.
-  useEffect(() => {
-    if (peerId && paired.some((p) => p.peerId === peerId)) return;
-    const next = capable(tab)[0] ?? paired[0];
-    setPeerId(next?.peerId ?? "");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, paired, snap.peerFeatures]);
+  const peerId =
+    selectedPeerId && paired.some((p) => p.peerId === selectedPeerId)
+      ? selectedPeerId
+      : ((capable(tab)[0] ?? paired[0])?.peerId ?? "");
   const peer = paired.find((p) => p.peerId === peerId);
   const guidance = featureGuidance(tab, peer, peer ? snap.peerFeatures[peer.peerId] : undefined);
   const canCall = Boolean(peer && snap.peerFeatures[peer.peerId]?.includes("calls.control"));
@@ -180,7 +215,7 @@ export function ContinuityCenter({ client, peers, continuity, initialTab, onClos
         {paired.length > 1 && (
           <label className="continuity-device">
             <span>Device</span>
-            <select aria-label="Device" value={peerId} onChange={(e) => setPeerId(e.target.value)}>
+            <select aria-label="Device" value={peerId} onChange={(e) => setSelectedPeerId(e.target.value)}>
               {paired.map((p) => (
                 <option key={p.peerId} value={p.peerId}>
                   {p.device.name}{snap.peerFeatures[p.peerId]?.includes(TAB_FEATURE[tab]) ? "" : " (unavailable)"}
@@ -190,7 +225,17 @@ export function ContinuityCenter({ client, peers, continuity, initialTab, onClos
           </label>
         )}
         {peer && snap.batteryStatus?.[peer.peerId] && <PhoneBatteryStatus status={snap.batteryStatus[peer.peerId]!} />}
-        {tab === "calls" && <CallsPanel client={client} calls={snap.calls} peer={peer} guidance={guidance} autoDial={autoDial} />}
+        {tab === "calls" && (
+          <CallsPanel
+            client={client}
+            calls={snap.calls}
+            peer={peer}
+            guidance={guidance}
+            autoDial={autoDial}
+            peerFeatures={snap.peerFeatures}
+            callAudio={snap.callAudio ?? null}
+          />
+        )}
         {tab === "contacts" && (
           <ContactsPanel
             client={client}
@@ -199,6 +244,7 @@ export function ContinuityCenter({ client, peers, continuity, initialTab, onClos
             canCall={canCall}
             canReceive={Boolean(peer && (snap.peerFeatures[peer.peerId] ?? []).includes("contacts.receive"))}
             shared={snap.sharedContacts}
+            savedContacts={snap.savedContacts ?? []}
             onCall={(number) => { setAutoDial({ number, at: Date.now() }); setTab("calls"); }}
           />
         )}
@@ -210,15 +256,32 @@ export function ContinuityCenter({ client, peers, continuity, initialTab, onClos
 
 // ---------------------------------------------------------------- calls
 
-function CallsPanel({ client, calls, peer, guidance, autoDial }: { client: ContinuityClient; calls: CallView[]; peer?: PeerSummary; guidance: string | null; autoDial?: { number: string; at: number } | null }) {
+function CallsPanel({
+  client,
+  calls,
+  peer,
+  guidance,
+  autoDial,
+  peerFeatures,
+  callAudio,
+}: {
+  client: ContinuityClient;
+  calls: CallView[];
+  peer?: PeerSummary;
+  guidance: string | null;
+  autoDial?: { number: string; at: number } | null;
+  peerFeatures: Record<string, ContinuityFeature[]>;
+  callAudio: CallAudioStateView | null;
+}) {
   const [number, setNumber] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const live = calls.filter((c) => c.state !== "ended" || Date.now() - c.updatedAt < 5000);
-  const now = useNow(live.some((c) => c.state === "active"));
+  const now = useNow(calls.some((c) => c.state === "active" || c.state === "ended"));
+  const live = calls.filter((c) => c.state !== "ended" || now - c.updatedAt < 5000);
   const dialable = dialableNumber(number);
+  const callsAudioSupported = Boolean(peer && (peerFeatures[peer.peerId] ?? []).includes("calls.audio"));
 
-  const dial = async (event?: FormEvent, override?: string) => {
+  const dial = useCallback(async (event?: FormEvent, override?: string) => {
     event?.preventDefault();
     const target = override ?? dialable;
     if (!peer || !target) return;
@@ -232,23 +295,41 @@ function CallsPanel({ client, calls, peer, guidance, autoDial }: { client: Conti
     } finally {
       setBusy(false);
     }
-  };
+  }, [client, dialable, peer]);
 
   // "Call" next to a contact: show the number here and place the call once.
   const dialedRef = useRef(0);
   useEffect(() => {
     if (!autoDial || autoDial.at === dialedRef.current || !peer || guidance) return;
     dialedRef.current = autoDial.at;
-    setNumber(autoDial.number);
-    void dial(undefined, autoDial.number);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoDial, peer, guidance]);
+    const targetNumber = autoDial.number;
+    queueMicrotask(() => {
+      setNumber(targetNumber);
+      void dial(undefined, targetNumber);
+    });
+  }, [autoDial, peer, guidance, dial]);
 
   return (
     <div className="continuity-panel">
       {live.length > 0 && (
         <ul className="call-list" aria-label="Calls">
-          {live.map((call) => <CallRow key={`${call.peerId}:${call.callId}`} client={client} call={call} now={now} onError={setError} />)}
+          {live.map((call) => (
+            <CallRow
+              key={`${call.peerId}:${call.callId}`}
+              client={client}
+              call={call}
+              now={now}
+              canCallAudio={Boolean(
+                (peerFeatures[call.peerId] ?? []).includes("calls.audio") &&
+                client.startCallAudio &&
+                client.stopCallAudio &&
+                client.sendCallAudio &&
+                client.subscribeCallAudio,
+              )}
+              callAudioState={callAudio?.callId === call.callId ? callAudio : null}
+              onError={setError}
+            />
+          ))}
         </ul>
       )}
       {guidance ? (
@@ -274,7 +355,11 @@ function CallsPanel({ client, calls, peer, guidance, autoDial }: { client: Conti
               <Phone size={15} aria-hidden="true" /> {busy ? "Calling…" : `Call from ${peer?.device.name ?? "phone"}`}
             </button>
           </div>
-          <small className="continuity-note">Audio plays on {peer?.device.name ?? "the phone"} or its connected headset — Android doesn&apos;t let apps route call audio to a computer.</small>
+          <small className="continuity-note">
+            {callsAudioSupported
+              ? "Speak and listen on this Mac using \"Use Mac Audio\" during a call (uses Android's speakerphone-assisted E2EE audio bridge)."
+              : `Audio plays on ${peer?.device.name ?? "the phone"} or its connected headset unless two-way call audio is enabled in Android settings.`}
+          </small>
         </form>
       )}
       {error && <p className="clipboard-error" role="alert">{error}</p>}
@@ -282,12 +367,97 @@ function CallsPanel({ client, calls, peer, guidance, autoDial }: { client: Conti
   );
 }
 
-function CallRow({ client, call, now, onError }: { client: ContinuityClient; call: CallView; now: number; onError: (e: string | null) => void }) {
+function CallRow({
+  client,
+  call,
+  now,
+  canCallAudio,
+  callAudioState,
+  onError,
+}: {
+  client: ContinuityClient;
+  call: CallView;
+  now: number;
+  canCallAudio: boolean;
+  callAudioState: CallAudioStateView | null;
+  onError: (e: string | null) => void;
+}) {
   const [pending, setPending] = useState<string | null>(null);
+  const [localAudioActive, setLocalAudioActive] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const sessionRef = useRef<CallAudioSession | null>(null);
+
+  const stopMacAudio = useCallback(async () => {
+    const existing = sessionRef.current;
+    sessionRef.current = null;
+    existing?.stop();
+    setLocalAudioActive(false);
+    setMuted(false);
+    if (client.stopCallAudio) {
+      await client.stopCallAudio(call.peerId, call.callId).catch(() => {});
+    }
+  }, [call.callId, call.peerId, client]);
+
+  useEffect(() => {
+    if (call.state === "ended" && sessionRef.current) {
+      queueMicrotask(() => { void stopMacAudio(); });
+    }
+  }, [call.state, stopMacAudio]);
+
+  useEffect(() => {
+    return () => {
+      const existing = sessionRef.current;
+      sessionRef.current = null;
+      existing?.stop();
+      if (existing && client.stopCallAudio) {
+        void client.stopCallAudio(call.peerId, call.callId).catch(() => {});
+      }
+    };
+  }, [call.callId, call.peerId, client]);
+
+  const startMacAudio = async () => {
+    if (!client.startCallAudio || !client.sendCallAudio || !client.subscribeCallAudio) return;
+    setPending("audio-start");
+    onError(null);
+    const session = new CallAudioSession({
+      peerId: call.peerId,
+      callId: call.callId,
+      sendFrame: (pcm, sr, ch, frames, ptsMs) => {
+        void client.sendCallAudio?.(call.peerId, call.callId, pcm, sr, ch, frames, ptsMs);
+      },
+      subscribeIncoming: (listener) => client.subscribeCallAudio?.(call.callId, listener) ?? (() => {}),
+      onError: (msg) => onError(msg),
+    });
+    try {
+      await session.start();
+      sessionRef.current = session;
+      await client.startCallAudio(call.peerId, call.callId);
+      setLocalAudioActive(true);
+      setMuted(false);
+    } catch (err) {
+      session.stop();
+      sessionRef.current = null;
+      setLocalAudioActive(false);
+      onError(err instanceof Error ? err.message : "Could not start Mac call audio.");
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const toggleMute = async () => {
+    const nextMuted = !muted;
+    sessionRef.current?.setMuted(nextMuted);
+    setMuted(nextMuted);
+    await client.setCallAudioMuted?.(call.peerId, call.callId, nextMuted).catch(() => {});
+  };
+
   const run = async (action: "answer" | "reject" | "hangup") => {
     setPending(action);
     onError(null);
     try {
+      if (action === "hangup" && (localAudioActive || sessionRef.current)) {
+        await stopMacAudio();
+      }
       const fn = action === "answer" ? client.answerCall : action === "reject" ? client.rejectCall : client.hangUpCall;
       const result = await fn.call(client, call.peerId, call.callId);
       if (!result.ok) onError(result.error ?? "The phone did not respond.");
@@ -297,13 +467,39 @@ function CallRow({ client, call, now, onError }: { client: ContinuityClient; cal
       setPending(null);
     }
   };
+
+  const isAudioOn = localAudioActive || Boolean(callAudioState?.active);
+  const canRouteAudio = canCallAudio && (call.state === "active" || call.state === "dialing");
+
   return (
     <li className={`call-row call-${call.state}`}>
       <span className="call-party">
         <strong>{callPartyLabel(call)}</strong>
-        <small>{call.name && call.number ? `${call.number} · ` : ""}{callStatusLabel(call, now)} · {call.peerName}</small>
+        <small>
+          {call.name && call.number ? `${call.number} · ` : ""}
+          {callStatusLabel(call, now)} · {call.peerName}
+          {isAudioOn ? " · Mac audio active" : ""}
+        </small>
+        {callAudioState?.reason && !callAudioState.active && (
+          <small className="continuity-note">{callAudioState.reason}</small>
+        )}
       </span>
       <span className="call-actions">
+        {canRouteAudio && !isAudioOn && (
+          <button type="button" className="quiet-button" disabled={pending !== null} onClick={() => void startMacAudio()}>
+            <Volume2 size={14} aria-hidden="true" /> Use Mac Audio
+          </button>
+        )}
+        {canRouteAudio && isAudioOn && (
+          <>
+            <button type="button" className="quiet-button" aria-pressed={muted} disabled={pending !== null} onClick={() => void toggleMute()}>
+              {muted ? <MicOff size={14} aria-hidden="true" /> : <Mic size={14} aria-hidden="true" />} {muted ? "Unmute" : "Mute"}
+            </button>
+            <button type="button" className="quiet-button" disabled={pending !== null} onClick={() => void stopMacAudio()}>
+              Switch to Phone
+            </button>
+          </>
+        )}
         {call.actions.includes("answer") && (
           <button type="button" className="beam-button call-answer" disabled={pending !== null} onClick={() => run("answer")}>
             <PhoneIncoming size={14} aria-hidden="true" /> Answer
@@ -331,10 +527,11 @@ interface ContactsPanelProps {
   canCall: boolean;
   canReceive: boolean;
   shared: ContactShareItem[];
+  savedContacts: SavedContactRecord[];
   onCall: (number: string) => void;
 }
 
-function ContactsPanel({ client, peer, guidance, canCall, canReceive, shared, onCall }: ContactsPanelProps) {
+function ContactsPanel({ client, peer, guidance, canCall, canReceive, shared, savedContacts, onCall }: ContactsPanelProps) {
   const [all, setAll] = useState<ContactCard[] | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [remote, setRemote] = useState<ContactCard[] | null>(null);
@@ -345,31 +542,51 @@ function ContactsPanel({ client, peer, guidance, canCall, canReceive, shared, on
   const [notice, setNotice] = useState<string | null>(null);
   const loadedFor = useRef<string>("");
 
-  const load = async () => {
-    if (!peer || guidance) return;
+  const targetPeerId = peer?.peerId;
+  const targetDeviceId = peer?.device.deviceId;
+  const peerSavedRecords = useMemo(() => {
+    if (!peer) return savedContacts;
+    return savedContacts.filter(
+      (record) =>
+        (targetDeviceId && record.peerDeviceId === targetDeviceId) ||
+        record.peerId === targetPeerId,
+    );
+  }, [peer, savedContacts, targetDeviceId, targetPeerId]);
+
+  const savedIdByCardKey = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const record of peerSavedRecords) {
+      if (record.contact.id) map.set(`id:${record.contact.id}`, record.id);
+      map.set(`name:${record.contact.name.toLowerCase()}`, record.id);
+    }
+    return map;
+  }, [peerSavedRecords]);
+
+  const load = useCallback(async () => {
+    if (!targetPeerId || guidance) return;
     setLoading(true);
     setError(null);
     try {
-      const result = await client.requestContacts(peer.peerId);
+      const result = await client.requestContacts(targetPeerId);
       setAll(result.contacts);
       setTruncated(result.truncated);
-      loadedFor.current = peer.peerId;
+      loadedFor.current = targetPeerId;
     } catch (err) {
       setError(err instanceof Error ? err.message : "The phone did not send its contacts.");
     } finally {
       setLoading(false);
     }
-  };
+  }, [client, guidance, targetPeerId]);
 
   useEffect(() => {
-    if (peer && !guidance && loadedFor.current !== peer.peerId) void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [peer?.peerId, guidance]);
+    if (targetPeerId && !guidance && loadedFor.current !== targetPeerId && peerSavedRecords.length === 0) {
+      queueMicrotask(() => { void load(); });
+    }
+  }, [targetPeerId, guidance, peerSavedRecords.length, load]);
 
   // Large address books: the phone filters when the local page is incomplete.
   useEffect(() => {
-    setVisible(LIST_PAGE);
-    if (!truncated || !peer || !query.trim()) { setRemote(null); return; }
+    if (!truncated || !peer || !query.trim()) return;
     const timer = window.setTimeout(() => {
       client.requestContacts(peer.peerId, { query: query.trim(), limit: 500 })
         .then((r) => setRemote(r.contacts))
@@ -378,57 +595,103 @@ function ContactsPanel({ client, peer, guidance, canCall, canReceive, shared, on
     return () => window.clearTimeout(timer);
   }, [query, truncated, peer, client]);
 
+  const activeRemote = truncated && peer && query.trim() ? remote : null;
+  const effectiveList = useMemo(() => {
+    if (activeRemote) return activeRemote;
+    if (all) {
+      // Keep UI consistent immediately if user removed from savedContacts after loading
+      if (peerSavedRecords.length > 0 && savedContacts.length > 0) {
+        const savedCardIds = new Set(peerSavedRecords.map((r) => r.contact.id).filter(Boolean));
+        const hasIds = all.some((c) => Boolean(c.id));
+        if (hasIds && savedCardIds.size > 0 && peerSavedRecords.every((r) => r.source === "synced")) {
+          const mergedIds = new Set(peerSavedRecords.map((r) => r.contact.id).filter(Boolean));
+          return all.filter((c) => !c.id || mergedIds.has(c.id));
+        }
+      }
+      return all;
+    }
+    return peerSavedRecords.map((r) => r.contact);
+  }, [activeRemote, all, peerSavedRecords, savedContacts.length]);
+
   const matches = useMemo(() => {
-    if (remote) return remote;
-    if (!all) return [];
-    return query.trim() ? all.filter((c) => contactMatches(c, query)) : all;
-  }, [all, remote, query]);
+    if (!effectiveList.length && all === null && peerSavedRecords.length === 0) return [];
+    return query.trim() ? effectiveList.filter((c) => contactMatches(c, query)) : effectiveList;
+  }, [effectiveList, all, peerSavedRecords.length, query]);
 
   const incoming = shared.filter((s) => s.direction === "incoming");
 
+  const removeCard = (card: ContactCard) => {
+    const savedId = (card.id && savedIdByCardKey.get(`id:${card.id}`)) || savedIdByCardKey.get(`name:${card.name.toLowerCase()}`);
+    if (savedId && client.removeSavedContact) {
+      client.removeSavedContact(savedId);
+    }
+    setAll((prev) => (prev ? prev.filter((item) => (card.id && item.id ? item.id !== card.id : item !== card)) : prev));
+  };
+
   return (
     <div className="continuity-panel">
-      {guidance ? (
-        <p className="continuity-guidance" role="status">{guidance}</p>
-      ) : (
+      {guidance && <p className="continuity-guidance" role="status">{guidance}</p>}
+      {(!guidance || peerSavedRecords.length > 0) && (
         <>
           <div className="contacts-toolbar">
             <label className="contacts-search">
               <Search size={14} aria-hidden="true" />
-              <input aria-label="Search contacts" placeholder="Search name, number, email or company" value={query} onChange={(e) => setQuery(e.target.value)} />
+              <input aria-label="Search contacts" placeholder="Search name, number, email or company" value={query} onChange={(e) => { setQuery(e.target.value); setVisible(LIST_PAGE); }} />
             </label>
-            <button type="button" className="quiet-button" onClick={load} disabled={loading}>{loading ? "Loading…" : "Refresh"}</button>
+            {!guidance && (
+              <button type="button" className="quiet-button" onClick={load} disabled={loading}>{loading ? "Loading…" : "Refresh"}</button>
+            )}
             <button type="button" className="quiet-button" disabled={!matches.length} onClick={() => downloadVCard(buildVCards(matches), query.trim() ? `contacts-${query.trim()}` : `${peer?.device.name ?? "phone"} contacts`)}>
               <Download size={13} aria-hidden="true" /> Export
             </button>
+            {peerSavedRecords.length > 0 && client.clearSavedContacts && (
+              <button
+                type="button"
+                className="quiet-button"
+                onClick={() => {
+                  client.clearSavedContacts?.(peer?.peerId);
+                  setAll([]);
+                }}
+              >
+                <Trash2 size={13} aria-hidden="true" /> Clear saved
+              </button>
+            )}
           </div>
           {error && <p className="clipboard-error" role="alert">{error}</p>}
-          {all && (
+          {(all || peerSavedRecords.length > 0) && (
             <p className="quiet-count" aria-live="polite">
-              {matches.length} {matches.length === 1 ? "contact" : "contacts"}{truncated && !remote ? " (search to find more)" : ""}
+              {matches.length} {matches.length === 1 ? "contact" : "contacts"}{peerSavedRecords.length > 0 && all === null ? " · saved while connected" : ""}{truncated && !remote ? " (search to find more)" : ""}
             </p>
           )}
           <ul className="contact-list" aria-label="Contacts">
-            {matches.slice(0, visible).map((card, i) => (
-              <li key={card.id ?? `${card.name}-${i}`} className="contact-row">
-                <span className="contact-copy">
-                  <strong>{card.name || card.phones[0]?.number || card.emails[0]?.address}</strong>
-                  {card.organization && <small>{card.organization}</small>}
-                  {card.phones.map((p) => (
-                    <span key={p.number} className="contact-value">
-                      <span>{p.number}{p.label ? <small> · {p.label}</small> : null}</span>
-                      {canCall && dialableNumber(p.number) && (
-                        <button type="button" className="text-button" aria-label={`Call ${card.name} ${p.number}`} onClick={() => onCall(dialableNumber(p.number)!)}>Call</button>
-                      )}
-                    </span>
-                  ))}
-                  {card.emails.map((e) => (
-                    <span key={e.address} className="contact-value"><a href={`mailto:${e.address}`}>{e.address}</a></span>
-                  ))}
-                </span>
-                <button type="button" className="text-button" aria-label={`Save ${card.name} as vCard`} onClick={() => downloadVCard(buildVCard(card), card.name)}>Save</button>
-              </li>
-            ))}
+            {matches.slice(0, visible).map((card, i) => {
+              const savedId = (card.id && savedIdByCardKey.get(`id:${card.id}`)) || savedIdByCardKey.get(`name:${card.name.toLowerCase()}`);
+              return (
+                <li key={card.id ?? `${card.name}-${i}`} className="contact-row">
+                  <span className="contact-copy">
+                    <strong>{card.name || card.phones[0]?.number || card.emails[0]?.address}</strong>
+                    {card.organization && <small>{card.organization}</small>}
+                    {card.phones.map((p) => (
+                      <span key={p.number} className="contact-value">
+                        <span>{p.number}{p.label ? <small> · {p.label}</small> : null}</span>
+                        {canCall && dialableNumber(p.number) && (
+                          <button type="button" className="text-button" aria-label={`Call ${card.name} ${p.number}`} onClick={() => onCall(dialableNumber(p.number)!)}>Call</button>
+                        )}
+                      </span>
+                    ))}
+                    {card.emails.map((e) => (
+                      <span key={e.address} className="contact-value"><a href={`mailto:${e.address}`}>{e.address}</a></span>
+                    ))}
+                  </span>
+                  <span className="call-actions">
+                    <button type="button" className="text-button" aria-label={`Save ${card.name} as vCard`} onClick={() => downloadVCard(buildVCard(card), card.name)}>Save</button>
+                    {savedId && client.removeSavedContact && (
+                      <button type="button" className="text-button" aria-label={`Remove ${card.name}`} onClick={() => removeCard(card)}>Remove</button>
+                    )}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
           {matches.length > visible && (
             <button type="button" className="quiet-button" onClick={() => setVisible((v) => v + LIST_PAGE)}>Show more ({matches.length - visible})</button>
@@ -643,90 +906,270 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
   }, [client, share.sessionId]);
 
   // Android uses AVC access units rather than serialised bitmaps. WebCodecs
-  // keeps decode off the layout path; a legacy browser can still view JPEG
-  // streams from browser peers, but is told when it cannot render Android AVC.
+  // keeps decode off the layout path; on macOS WKWebView / Safari WebKit
+  // VideoDecoder requires an ISO 14496-15 avcC `description` + length-prefixed
+  // samples (`avcc` mode), with Annex-B kept as an automatic fallback.
   useEffect(() => {
     if (!client.subscribeScreenVideo) return;
     type DecodedFrame = { displayWidth: number; displayHeight: number; close: () => void };
     type DecoderInstance = { configure(config: Record<string, unknown>): void; decode(chunk: unknown): void; close(): void };
-    type DecoderCtor = new (init: { output: (frame: DecodedFrame) => void; error: (error: Error) => void }) => DecoderInstance;
+    type DecoderCtor = {
+      new (init: { output: (frame: DecodedFrame) => void; error: (error: Error) => void }): DecoderInstance;
+      isConfigSupported?: (config: Record<string, unknown>) => Promise<{ supported?: boolean }>;
+    };
     type ChunkCtor = new (init: { type: 'key' | 'delta'; timestamp: number; data: Uint8Array }) => unknown;
     const api = window as unknown as Window & { VideoDecoder?: DecoderCtor; EncodedVideoChunk?: ChunkCtor };
     if (!api.VideoDecoder || !api.EncodedVideoChunk) {
-      setVideoError("This browser cannot decode the phone's low-latency H.264 stream. Use a current Chromium-based AirBridge desktop browser.");
+      queueMicrotask(() => {
+        setVideoError("This browser cannot decode the phone's low-latency H.264 stream. Use a current Chromium-based AirBridge desktop browser.");
+      });
       return;
     }
+
+    let disposed = false;
     let decoder: DecoderInstance | null = null;
-    let codecString: string | null = null;
+    let decoderConfigKey: string | null = null;
+    let decoderMode: 'avcc' | 'annexb' = 'annexb';
+    let cachedCodecConfig: Uint8Array | null = null;
     let waitingForKeyFrame = true;
-    const createDecoder = (codec: string) => {
-      let created!: DecoderInstance;
-      created = new api.VideoDecoder!({
-        output: (frame) => {
-          try {
-            const canvas = canvasRef.current;
-            const context = canvas?.getContext('2d');
-            if (canvas && context) {
-              // Resizing a canvas reallocates its backing store; do it only on
-              // rotation/resize, not for every output frame.
-              if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth;
-              if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight;
-              context.drawImage(frame as unknown as CanvasImageSource, 0, 0);
-              setH264Active(true);
-              setHasFrame(true);
-              setVideoError(null);
-            }
-          } finally {
-            frame.close();
+    let configuringPromise: Promise<void> | null = null;
+    const pendingFrames: ScreenVideoFrame[] = [];
+    let lastPliSentAt = 0;
+    let lastFrameAt = Date.now();
+    let pendingDrawFrame: DecodedFrame | null = null;
+    let rafId: number | null = null;
+
+    const requestPli = (reason: string) => {
+      const now = Date.now();
+      if (disposed || now - lastPliSentAt < 1_200) return;
+      lastPliSentAt = now;
+      client.requestScreenKeyframe?.(share.sessionId, reason);
+    };
+
+    const flushDraw = () => {
+      const frame = pendingDrawFrame;
+      pendingDrawFrame = null;
+      if (!frame) return;
+      try {
+        if (!disposed) {
+          const canvas = canvasRef.current;
+          const context = canvas?.getContext('2d');
+          if (canvas && context) {
+            if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth;
+            if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight;
+            context.drawImage(frame as unknown as CanvasImageSource, 0, 0);
+            client.recordScreenViewerStats?.({ framesDecodedDelta: 1 });
+            setH264Active(true);
+            setHasFrame(true);
+            setVideoError(null);
           }
-        },
+        }
+      } finally {
+        try { frame.close(); } catch { /* ignore */ }
+      }
+    };
+
+    const scheduleDraw = (frame: DecodedFrame) => {
+      if (disposed) {
+        try { frame.close(); } catch { /* ignore */ }
+        return;
+      }
+      if (pendingDrawFrame) {
+        try { pendingDrawFrame.close(); } catch { /* ignore */ }
+      }
+      pendingDrawFrame = frame;
+      if (typeof requestAnimationFrame === 'function') {
+        if (rafId === null) {
+          rafId = requestAnimationFrame(() => {
+            rafId = null;
+            flushDraw();
+          });
+        }
+      } else {
+        flushDraw();
+      }
+    };
+
+    const makeDecoder = (mode: 'avcc' | 'annexb', codec: string, config: Record<string, unknown>, key: string) => {
+      try { decoder?.close(); } catch { /* previous decoder already closed */ }
+      const created: DecoderInstance = new api.VideoDecoder!({
+        output: (frame) => scheduleDraw(frame),
         error: () => {
-          if (decoder === created) {
-            decoder = null;
-            codecString = null;
-            waitingForKeyFrame = true;
-            setVideoError("The H.264 decoder recovered from a damaged frame and is waiting for the next sync frame.");
-          }
+          if (disposed || decoder !== created) return;
+          decoder = null;
+          decoderConfigKey = null;
+          waitingForKeyFrame = true;
+          client.recordScreenViewerStats?.({ decodeErrorsDelta: 1 });
+          setVideoError("The H.264 decoder recovered from a damaged frame and is waiting for the next sync frame.");
+          requestPli('decode-error');
         },
       });
-      // The actual MediaCodec profile/level varies by phone and output size.
-      // Configure from the SPS in a sync access unit instead of assuming
-      // baseline level 3.0 (which cannot decode many 1080p streams).
-      created.configure({ codec, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
+      created.configure(config);
       decoder = created;
-      codecString = codec;
+      decoderMode = mode;
+      decoderConfigKey = key;
+      client.recordScreenViewerStats?.({ decoderMode: mode, codec });
     };
-    const unsubscribe = client.subscribeScreenVideo(share.sessionId, (frame) => {
+
+    const selectConfig = async (
+      codec: string,
+      spsPps: { sps: Uint8Array; pps: Uint8Array } | null,
+    ): Promise<{ mode: 'avcc' | 'annexb'; config: Record<string, unknown> } | null> => {
+      const candidates: Array<{ mode: 'avcc' | 'annexb'; config: Record<string, unknown> }> = [];
+      if (spsPps) {
+        const avcC = buildAvcDecoderConfigurationRecord(spsPps.sps, spsPps.pps);
+        candidates.push(
+          { mode: 'avcc', config: { codec, description: avcC, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' } },
+          { mode: 'avcc', config: { codec, description: avcC, optimizeForLatency: true, hardwareAcceleration: 'no-preference' } },
+        );
+      }
+      candidates.push(
+        { mode: 'annexb', config: { codec, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' } },
+        { mode: 'annexb', config: { codec, optimizeForLatency: true, hardwareAcceleration: 'no-preference' } },
+      );
+      const isSupported = api.VideoDecoder?.isConfigSupported;
+      if (typeof isSupported !== 'function') {
+        return candidates[0] ?? null;
+      }
+      for (const candidate of candidates) {
+        try {
+          const result = await isSupported.call(api.VideoDecoder, candidate.config);
+          if (result?.supported) return candidate;
+        } catch {
+          // Try next configuration candidate
+        }
+      }
+      return candidates[candidates.length - 1] ?? null;
+    };
+
+    const submitToDecoder = (frame: ScreenVideoFrame, accessUnit: Uint8Array) => {
+      if (!decoder) {
+        waitingForKeyFrame = true;
+        setVideoError("Waiting for an H.264 sync frame with codec headers…");
+        requestPli('missing-decoder');
+        return;
+      }
+      try {
+        const payload = decoderMode === 'avcc' ? annexBToAvcc(accessUnit) : accessUnit;
+        decoder.decode(new api.EncodedVideoChunk!({
+          type: frame.keyFrame ? 'key' : 'delta',
+          timestamp: frame.ptsMs * 1000,
+          data: payload,
+        }));
+        waitingForKeyFrame = false;
+      } catch {
+        waitingForKeyFrame = true;
+        client.recordScreenViewerStats?.({ decodeErrorsDelta: 1 });
+        requestPli('decode-exception');
+      }
+    };
+
+    const handleFrame = (frame: ScreenVideoFrame) => {
+      if (disposed) return;
+      lastFrameAt = Date.now();
       mapSourceTime(frame.ptsMs);
-      if (waitingForKeyFrame && !frame.keyFrame) return;
+      let accessUnit = frame.data;
+      const foundSpsPps = extractSpsPps(accessUnit);
+      if (foundSpsPps) {
+        const spsLen = foundSpsPps.sps.byteLength;
+        const ppsLen = foundSpsPps.pps.byteLength;
+        const combined = new Uint8Array(8 + spsLen + ppsLen);
+        combined.set([0, 0, 0, 1], 0);
+        combined.set(foundSpsPps.sps, 4);
+        combined.set([0, 0, 0, 1], 4 + spsLen);
+        combined.set(foundSpsPps.pps, 8 + spsLen);
+        cachedCodecConfig = combined;
+      } else if (frame.keyFrame && cachedCodecConfig) {
+        accessUnit = prependSpsPpsIfMissing(accessUnit, cachedCodecConfig);
+      }
+
       if (frame.keyFrame) {
-        const detectedCodec = h264CodecFromAnnexB(frame.data);
-        if (detectedCodec && detectedCodec !== codecString) {
-          try { decoder?.close(); } catch { /* previous decoder already failed */ }
-          decoder = null;
-          try { createDecoder(detectedCodec); } catch {
-            decoder = null;
-            codecString = null;
-            waitingForKeyFrame = true;
-            setVideoError("This browser cannot initialise the phone's H.264 profile.");
+        client.recordScreenViewerStats?.({ keyframesReceivedDelta: 1 });
+      }
+      if (waitingForKeyFrame && !frame.keyFrame) {
+        requestPli('awaiting-keyframe');
+        return;
+      }
+
+      if (configuringPromise) {
+        if (frame.keyFrame) pendingFrames.length = 0;
+        if (pendingFrames.length < 15) pendingFrames.push({ ...frame, data: accessUnit });
+        return;
+      }
+
+      if (frame.keyFrame) {
+        const effectiveSpsPps = foundSpsPps ?? extractSpsPps(accessUnit);
+        const detectedCodec = h264CodecFromAnnexB(accessUnit);
+        const targetKey = detectedCodec ? `${detectedCodec}:${effectiveSpsPps ? 'avcc' : 'annexb'}` : null;
+        if (detectedCodec && targetKey !== decoderConfigKey) {
+          if (typeof api.VideoDecoder?.isConfigSupported !== 'function') {
+            try {
+              const avcC = effectiveSpsPps
+                ? buildAvcDecoderConfigurationRecord(effectiveSpsPps.sps, effectiveSpsPps.pps)
+                : undefined;
+              const syncConfig: Record<string, unknown> = {
+                codec: detectedCodec,
+                ...(avcC ? { description: avcC } : {}),
+                optimizeForLatency: true,
+                hardwareAcceleration: 'prefer-hardware',
+              };
+              makeDecoder(avcC ? 'avcc' : 'annexb', detectedCodec, syncConfig, targetKey!);
+            } catch {
+              decoder = null;
+              decoderConfigKey = null;
+              waitingForKeyFrame = true;
+              client.recordScreenViewerStats?.({ decodeErrorsDelta: 1 });
+              setVideoError("This browser cannot initialise the phone's H.264 profile.");
+              return;
+            }
+          } else {
+            pendingFrames.length = 0;
+            pendingFrames.push({ ...frame, data: accessUnit });
+            configuringPromise = (async () => {
+              try {
+                const chosen = await selectConfig(detectedCodec, effectiveSpsPps);
+                if (disposed || !chosen) return;
+                makeDecoder(chosen.mode, detectedCodec, chosen.config, targetKey!);
+                const batch = pendingFrames.splice(0);
+                for (const queued of batch) {
+                  if (disposed) break;
+                  submitToDecoder(queued, queued.data);
+                }
+              } catch {
+                decoder = null;
+                decoderConfigKey = null;
+                waitingForKeyFrame = true;
+                client.recordScreenViewerStats?.({ decodeErrorsDelta: 1 });
+                setVideoError("This browser cannot initialise the phone's H.264 profile.");
+              } finally {
+                configuringPromise = null;
+              }
+            })();
             return;
           }
         }
       }
-      if (!decoder) {
-        waitingForKeyFrame = true;
-        setVideoError("Waiting for an H.264 sync frame with codec headers…");
-        return;
+
+      submitToDecoder(frame, accessUnit);
+    };
+
+    const unsubscribe = client.subscribeScreenVideo(share.sessionId, handleFrame);
+    const watchdog = window.setInterval(() => {
+      if (!disposed && waitingForKeyFrame && Date.now() - lastFrameAt > 2_500) {
+        requestPli('stalled-keyframe');
       }
-      try {
-        decoder.decode(new api.EncodedVideoChunk!({ type: frame.keyFrame ? 'key' : 'delta', timestamp: frame.ptsMs * 1000, data: frame.data }));
-        waitingForKeyFrame = false;
-      } catch {
-        // Decoder has entered an error state; don't feed deltas after a lost frame.
-        waitingForKeyFrame = true;
-      }
-    });
+    }, 1_000);
     return () => {
+      disposed = true;
+      window.clearInterval(watchdog);
+      if (rafId !== null && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(rafId);
+      }
+      if (pendingDrawFrame) {
+        try { pendingDrawFrame.close(); } catch { /* ignore */ }
+        pendingDrawFrame = null;
+      }
+      pendingFrames.length = 0;
       unsubscribe();
       try { decoder?.close(); } catch { /* decoder already closed */ }
     };
@@ -737,6 +1180,7 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
   useEffect(() => {
     if (!audioEnabled || !client.subscribeScreenAudio || !contextRef.current) return;
     const context = contextRef.current;
+    const audioNodes = audioNodesRef.current;
     const unsubscribe = client.subscribeScreenAudio(share.sessionId, (frame) => {
       // Video and AudioRecord carry the same elapsed-realtime PTS. Map that
       // source clock once at arrival, then keep about 60 ms of jitter room.
@@ -755,15 +1199,15 @@ function ScreenViewer({ client, share, onStop }: { client: ContinuityClient; sha
       const node = context.createBufferSource();
       node.buffer = buffer;
       node.connect(context.destination);
-      audioNodesRef.current.add(node);
-      node.onended = () => { audioNodesRef.current.delete(node); node.disconnect(); };
+      audioNodes.add(node);
+      node.onended = () => { audioNodes.delete(node); node.disconnect(); };
       node.start(startAt);
       playheadRef.current = startAt + buffer.duration;
     });
     return () => {
       unsubscribe();
-      for (const node of audioNodesRef.current) { try { node.stop(); } catch { /* already stopped */ } }
-      audioNodesRef.current.clear();
+      for (const node of audioNodes) { try { node.stop(); } catch { /* already stopped */ } }
+      audioNodes.clear();
       playheadRef.current = 0;
       timelineRef.current = null;
     };

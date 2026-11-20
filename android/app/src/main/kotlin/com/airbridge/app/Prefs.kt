@@ -5,13 +5,8 @@ import android.content.SharedPreferences
 import com.airbridge.engine.PairingLink
 
 /**
- * Shell settings: which computer this phone is paired with, plus the loopback
- * port the relay prefers.
- *
- * The port matters: it is part of the WebView origin, and the web app keeps its
- * device identity, theme and pair code in `localStorage` for that origin. Reusing
- * the same port across launches therefore keeps this phone recognisable to the
- * desktop instead of looking like a new device every time.
+ * App preferences: which computer this phone is paired with, device identity,
+ * continuity feature toggles, and persisted TLS trust anchors.
  */
 class Prefs(context: Context) {
     private val sp: SharedPreferences =

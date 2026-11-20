@@ -2,6 +2,7 @@ package com.airbridge.engine
 
 import java.nio.charset.StandardCharsets
 import java.text.Normalizer
+import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.spec.SecretKeySpec
 
 // =============================================================================
@@ -99,6 +100,40 @@ fun interface CallController {
     fun execute(command: CallCommand): CallCommandResult
 }
 
+data class CallAudioCommand(
+    val peerId: String,
+    val callId: String,
+    val action: String,
+    val sampleRate: Int? = null,
+)
+
+data class CallAudioState(
+    val active: Boolean,
+    val muted: Boolean,
+    val route: String = "phone",
+    val reason: String? = null,
+)
+
+class CallAudioFrame(
+    val callId: String,
+    val peerId: String,
+    val seq: Long,
+    val sampleRate: Int,
+    val channels: Int,
+    val frames: Int,
+    val ptsMs: Long,
+    val data: ByteArray,
+)
+
+interface CallAudioController {
+    fun execute(command: CallAudioCommand): CallAudioState
+    fun onIncomingAudio(frame: CallAudioFrame) {}
+}
+
+fun interface ScreenKeyframeRequester {
+    fun onKeyframeRequested(sessionId: String, reason: String?)
+}
+
 class ContinuityException(val code: String, message: String) : Exception(message)
 
 object Continuity {
@@ -106,13 +141,14 @@ object Continuity {
     const val FEATURE_CONTACTS_PROVIDE = "contacts.provide"
     const val FEATURE_CONTACTS_RECEIVE = "contacts.receive"
     const val FEATURE_CALLS_CONTROL = "calls.control"
+    const val FEATURE_CALLS_AUDIO = "calls.audio"
     const val FEATURE_SCREEN_SOURCE = "screen.source"
     const val FEATURE_SCREEN_VIEW = "screen.view"
     /** Android captures only playback that the OS and source app permit. */
     const val FEATURE_SCREEN_AUDIO_CAPTURE = "screen.audio.capture"
     const val FEATURE_SCREEN_AUDIO_PLAY = "screen.audio.play"
     val FEATURES = listOf(
-        FEATURE_CONTACTS_PROVIDE, FEATURE_CONTACTS_RECEIVE, FEATURE_CALLS_CONTROL,
+        FEATURE_CONTACTS_PROVIDE, FEATURE_CONTACTS_RECEIVE, FEATURE_CALLS_CONTROL, FEATURE_CALLS_AUDIO,
         FEATURE_SCREEN_SOURCE, FEATURE_SCREEN_VIEW, FEATURE_SCREEN_AUDIO_CAPTURE, FEATURE_SCREEN_AUDIO_PLAY,
     )
 
@@ -136,15 +172,25 @@ object Continuity {
     const val SCREEN_DEFAULT_FPS = 15
     const val SCREEN_MAX_FPS = 30
     const val SCREEN_MAX_INFLIGHT = 2
+    const val SCREEN_VIDEO_MAX_INFLIGHT = 6
     const val SCREEN_MAX_FRAME_BYTES = 3 * 1024 * 1024
     const val SCREEN_CONSENT_TIMEOUT_MS = 2 * 60_000L
     const val FRAME_SCREEN = 0x04
     /** Separate, independently droppable encrypted PCM playback-audio packet. */
     const val FRAME_SCREEN_AUDIO = 0x05
+    /** Full-duplex encrypted Continuity phone-call audio PCM packet. */
+    const val FRAME_CALL_AUDIO = 0x06
     const val SCREEN_FRAME_AAD_LENGTH = 1 + 16 + 4 + 1 + 2 + 2 // 26
     const val SCREEN_FRAME_HEADER_LENGTH = SCREEN_FRAME_AAD_LENGTH + 12 // 38
     const val SCREEN_AUDIO_AAD_LENGTH = 1 + 16 + 4 + 2 + 1 + 2 + 4 // 30
     const val SCREEN_AUDIO_FRAME_HEADER_LENGTH = SCREEN_AUDIO_AAD_LENGTH + 12 // 42
+    const val CALL_AUDIO_AAD_LENGTH = 1 + 16 + 4 + 2 + 1 + 2 + 4 // 30
+    const val CALL_AUDIO_FRAME_HEADER_LENGTH = CALL_AUDIO_AAD_LENGTH + 12 // 42
+    const val CALL_AUDIO_SAMPLE_RATE = 16_000
+    const val CALL_AUDIO_CHANNELS = 1
+    const val CALL_AUDIO_FRAME_SAMPLES = 320
+    const val CALL_AUDIO_MAX_FRAMES = 960
+    const val CALL_AUDIO_MAX_FRAME_BYTES = CALL_AUDIO_MAX_FRAMES * 2 * 2 // 3840
     const val SCREEN_AUDIO_PCM_S16LE = 1
     const val SCREEN_AUDIO_MAX_FRAME_BYTES = 64 * 1024
     const val SCREEN_AUDIO_MAX_FRAMES = 4096
@@ -386,6 +432,63 @@ object Continuity {
             sessionId, u32(17), sampleRate, channels, frames, u32(26),
             bytes.copyOfRange(0, SCREEN_AUDIO_AAD_LENGTH),
             bytes.copyOfRange(SCREEN_AUDIO_AAD_LENGTH, SCREEN_AUDIO_FRAME_HEADER_LENGTH), ciphertext,
+        )
+    }
+
+    fun encodeCallAudioAad(callId: String, seq: Long, sampleRate: Int, channels: Int, frames: Int, ptsMs: Long): ByteArray {
+        require(isId(callId)) { "Invalid call id" }
+        require(seq in 0..0xffffffffL) { "Invalid call audio sequence" }
+        require(sampleRate in 8_000..48_000 && channels in 1..2 && frames in 1..CALL_AUDIO_MAX_FRAMES) { "Invalid call audio format" }
+        require(ptsMs in 0..0xffffffffL) { "Invalid call audio timestamp" }
+        val out = ByteArray(CALL_AUDIO_AAD_LENGTH)
+        out[0] = FRAME_CALL_AUDIO.toByte()
+        for (i in 0 until 16) out[1 + i] = callId[i].code.toByte()
+        fun put32(offset: Int, value: Long) {
+            out[offset] = (value ushr 24).toByte(); out[offset + 1] = (value ushr 16).toByte()
+            out[offset + 2] = (value ushr 8).toByte(); out[offset + 3] = value.toByte()
+        }
+        put32(17, seq)
+        out[21] = (sampleRate ushr 8).toByte(); out[22] = sampleRate.toByte()
+        out[23] = channels.toByte()
+        out[24] = (frames ushr 8).toByte(); out[25] = frames.toByte()
+        put32(26, ptsMs)
+        return out
+    }
+
+    fun encodeCallAudioFrame(aad: ByteArray, iv: ByteArray, ciphertext: ByteArray): ByteArray {
+        require(aad.size == CALL_AUDIO_AAD_LENGTH && (aad[0].toInt() and 0xff) == FRAME_CALL_AUDIO) { "Invalid call audio header" }
+        require(iv.size == 12) { "Invalid IV length" }
+        require(ciphertext.size <= CALL_AUDIO_MAX_FRAME_BYTES + 16) { "Call audio frame too large" }
+        val out = ByteArray(CALL_AUDIO_FRAME_HEADER_LENGTH + ciphertext.size)
+        System.arraycopy(aad, 0, out, 0, aad.size)
+        System.arraycopy(iv, 0, out, CALL_AUDIO_AAD_LENGTH, 12)
+        System.arraycopy(ciphertext, 0, out, CALL_AUDIO_FRAME_HEADER_LENGTH, ciphertext.size)
+        return out
+    }
+
+    class DecodedCallAudioFrame(
+        val callId: String, val seq: Long, val sampleRate: Int, val channels: Int, val frames: Int, val ptsMs: Long,
+        val aad: ByteArray, val iv: ByteArray, val ciphertext: ByteArray,
+    )
+
+    fun decodeCallAudioFrame(bytes: ByteArray): DecodedCallAudioFrame {
+        require(bytes.size >= CALL_AUDIO_FRAME_HEADER_LENGTH + 16) { "Call audio frame too short" }
+        require((bytes[0].toInt() and 0xff) == FRAME_CALL_AUDIO) { "Not a call audio frame" }
+        require(bytes.size <= CALL_AUDIO_FRAME_HEADER_LENGTH + CALL_AUDIO_MAX_FRAME_BYTES + 16) { "Call audio frame too large" }
+        fun u(i: Int) = bytes[i].toInt() and 0xff
+        fun u32(i: Int) = (u(i).toLong() shl 24) or (u(i + 1).toLong() shl 16) or (u(i + 2).toLong() shl 8) or u(i + 3).toLong()
+        val callId = String(bytes, 1, 16, StandardCharsets.ISO_8859_1)
+        require(isId(callId)) { "Invalid call id" }
+        val sampleRate = (u(21) shl 8) or u(22)
+        val channels = u(23)
+        val frames = (u(24) shl 8) or u(25)
+        require(sampleRate in 8_000..48_000 && channels in 1..2 && frames in 1..CALL_AUDIO_MAX_FRAMES) { "Invalid call audio format" }
+        val ciphertext = bytes.copyOfRange(CALL_AUDIO_FRAME_HEADER_LENGTH, bytes.size)
+        require(ciphertext.size == frames * channels * 2 + 16) { "Invalid call audio payload length" }
+        return DecodedCallAudioFrame(
+            callId, u32(17), sampleRate, channels, frames, u32(26),
+            bytes.copyOfRange(0, CALL_AUDIO_AAD_LENGTH),
+            bytes.copyOfRange(CALL_AUDIO_AAD_LENGTH, CALL_AUDIO_FRAME_HEADER_LENGTH), ciphertext,
         )
     }
 }
@@ -633,10 +736,16 @@ class ContinuityChannel internal constructor(private val host: Host) {
 
     @Volatile var contactProvider: ContactProvider? = null
     @Volatile var callController: CallController? = null
+    @Volatile var callAudioController: CallAudioController? = null
+    @Volatile var screenKeyframeRequester: ScreenKeyframeRequester? = null
     /** Provider present AND the user allowed it (permission + toggle). */
     @Volatile var contactsReady: Boolean = false
     @Volatile var callsReady: Boolean = false
     @Volatile var screenSourceAvailable: Boolean = false
+
+    val screenPliReceivedCount = AtomicLong(0)
+    val callAudioFramesSentCount = AtomicLong(0)
+    val callAudioFramesReceivedCount = AtomicLong(0)
 
     private class Source(val sessionId: String, val peerId: String, val maxWidth: Int, val maxFps: Int) {
         var nextSeq = 1L
@@ -656,11 +765,16 @@ class ContinuityChannel internal constructor(private val host: Host) {
     private val requests = LinkedHashMap<String, ScreenShareRequest>()
     private val sources = HashMap<String, Source>()
     private val seenShares = LinkedHashSet<String>()
+    private val lastCallAudioSeq = HashMap<String, Long>()
+    private var callAudioSeq = 1L
 
     fun features(): List<String> {
         val out = mutableListOf(Continuity.FEATURE_CONTACTS_RECEIVE)
         if (contactProvider != null && contactsReady) out.add(Continuity.FEATURE_CONTACTS_PROVIDE)
-        if (callController != null && callsReady) out.add(Continuity.FEATURE_CALLS_CONTROL)
+        if (callController != null && callsReady) {
+            out.add(Continuity.FEATURE_CALLS_CONTROL)
+            if (callAudioController != null) out.add(Continuity.FEATURE_CALLS_AUDIO)
+        }
         if (screenSourceAvailable) {
             out.add(Continuity.FEATURE_SCREEN_SOURCE)
             // This means the device can ask Android for permitted playback audio;
@@ -713,6 +827,7 @@ class ContinuityChannel internal constructor(private val host: Host) {
         val ended = ArrayList<String>()
         synchronized(lock) {
             peerFeatures.remove(peerId)
+            lastCallAudioSeq.keys.removeAll { it.startsWith("$peerId:") }
             requests.values.filter { it.peerId == peerId }.forEach { requests.remove(it.sessionId); ended.add(it.sessionId) }
             sources.values.filter { it.peerId == peerId }.forEach { it.running = false; sources.remove(it.sessionId); ended.add(it.sessionId) }
         }
@@ -724,7 +839,7 @@ class ContinuityChannel internal constructor(private val host: Host) {
         val ended = synchronized(lock) {
             val ids = requests.keys.toList() + sources.keys.toList()
             sources.values.forEach { it.running = false }
-            requests.clear(); sources.clear(); peerFeatures.clear(); knownPeers = HashMap()
+            requests.clear(); sources.clear(); peerFeatures.clear(); lastCallAudioSeq.clear(); knownPeers = HashMap()
             ids
         }
         for (id in ended) for (l in host.listeners()) runCatching { l.onScreenShareEnded(id, "AirBridge stopped") }
@@ -743,8 +858,17 @@ class ContinuityChannel internal constructor(private val host: Host) {
             "contacts-request" -> answerContacts(fromPeerId, payload)
             "contact-share" -> receiveContactShare(fromPeerId, payload)
             "call-command" -> executeCallCommand(fromPeerId, payload)
+            "call-audio-control" -> executeCallAudioControl(fromPeerId, payload)
             "screen-share-request" -> receiveScreenRequest(fromPeerId, payload)
             "screen-share-ack" -> receiveAck(fromPeerId, payload.optStr("sessionId") ?: return true, payload.optLong("seq") ?: return true)
+            "screen-share-keyframe" -> {
+                val id = payload.optStr("sessionId") ?: return true
+                val owned = synchronized(lock) { sources[id]?.peerId == fromPeerId }
+                if (owned) {
+                    screenPliReceivedCount.incrementAndGet()
+                    screenKeyframeRequester?.onKeyframeRequested(id, payload.optStr("reason"))
+                }
+            }
             "screen-share-stop" -> {
                 val id = payload.optStr("sessionId") ?: return true
                 val ended = synchronized(lock) {
@@ -757,7 +881,7 @@ class ContinuityChannel internal constructor(private val host: Host) {
                 if (ended) for (l in host.listeners()) l.onScreenShareEnded(id, "The computer stopped watching")
             }
             // Viewer-side and desktop-only kinds: the phone never asks, so ignore.
-            "contacts-response", "call-state", "call-command-result", "screen-share-state", "battery-status" -> {}
+            "contacts-response", "call-state", "call-command-result", "call-audio-state", "screen-share-state", "battery-status" -> {}
             else -> return false
         }
         return true
@@ -873,6 +997,110 @@ class ContinuityChannel internal constructor(private val host: Host) {
         }
     }
 
+    fun publishCallAudioState(peerId: String, callId: String, state: CallAudioState) {
+        if (!Continuity.isId(callId) || !host.isAuthorized(peerId)) return
+        send(
+            peerId,
+            JsonValue.Obj()
+                .put("kind", "call-audio-state")
+                .put("callId", callId)
+                .put("active", state.active)
+                .put("muted", state.muted)
+                .put("route", if (state.route == "computer") "computer" else "phone")
+                .putOpt("reason", state.reason?.take(200)),
+        )
+    }
+
+    private fun executeCallAudioControl(fromPeerId: String, payload: JsonValue.Obj) {
+        val callId = payload.optStr("callId")?.takeIf { Continuity.isId(it) } ?: return
+        val action = payload.optStr("action")?.takeIf { it in listOf("start", "stop", "mute", "unmute") } ?: return
+        fun reply(state: CallAudioState) {
+            send(
+                fromPeerId,
+                JsonValue.Obj()
+                    .put("kind", "call-audio-state")
+                    .put("callId", callId)
+                    .put("active", state.active)
+                    .put("muted", state.muted)
+                    .put("route", if (state.route == "computer") "computer" else "phone")
+                    .putOpt("reason", state.reason?.take(200)),
+            )
+        }
+        if (!host.isAuthorized(fromPeerId)) {
+            return reply(CallAudioState(active = false, muted = false, route = "phone", reason = "This computer is not verified for call audio. Pair again."))
+        }
+        val controller = callAudioController
+        if (controller == null || !callsReady) {
+            return reply(CallAudioState(active = false, muted = false, route = "phone", reason = "Call audio bridge is unavailable on the phone."))
+        }
+        val sampleRate = payload.optInt("sampleRate")
+        if (action == "start" || action == "stop") {
+            synchronized(lock) { lastCallAudioSeq.remove("$fromPeerId:$callId") }
+        }
+        host.execute {
+            val result = try {
+                controller.execute(CallAudioCommand(fromPeerId, callId, action, sampleRate))
+            } catch (e: Exception) {
+                CallAudioState(active = false, muted = false, route = "phone", reason = e.message?.take(200) ?: "Call audio command failed.")
+            }
+            reply(result)
+        }
+    }
+
+    fun sendCallAudio(
+        peerId: String,
+        callId: String,
+        pcmS16le: ByteArray,
+        sampleRate: Int,
+        channels: Int,
+        frames: Int,
+        ptsMs: Long,
+    ): Boolean {
+        if (!Continuity.isId(callId) || !host.isAuthorized(peerId)) return false
+        if (sampleRate !in 8_000..48_000 || channels !in 1..2 || frames !in 1..Continuity.CALL_AUDIO_MAX_FRAMES ||
+            pcmS16le.size != frames * channels * 2 || pcmS16le.size > Continuity.CALL_AUDIO_MAX_FRAME_BYTES || ptsMs !in 0..0xffffffffL
+        ) return false
+        val key = host.sessionKey(peerId) ?: return false
+        val seq = synchronized(lock) { callAudioSeq++ }
+        val aad = Continuity.encodeCallAudioAad(callId, seq, sampleRate, channels, frames, ptsMs)
+        val (iv, ct) = AirCrypto.encryptMediaFrame(key, aad, pcmS16le)
+        if (!host.sendFrame(peerId, Continuity.encodeCallAudioFrame(aad, iv, ct))) return false
+        callAudioFramesSentCount.incrementAndGet()
+        return true
+    }
+
+    private fun handleCallAudioFrame(fromPeerId: String, bytes: ByteArray) {
+        if (!host.isAuthorized(fromPeerId)) return
+        val controller = callAudioController ?: return
+        val decoded = Continuity.decodeCallAudioFrame(bytes)
+        val cursorKey = "$fromPeerId:${decoded.callId}"
+        synchronized(lock) {
+            val prev = lastCallAudioSeq[cursorKey]
+            if (prev != null && decoded.seq <= prev) return
+        }
+        val key = host.sessionKey(fromPeerId) ?: return
+        val plain = AirCrypto.decryptMediaFrame(key, decoded.aad, decoded.iv, decoded.ciphertext)
+        if (plain.size != decoded.frames * decoded.channels * 2) return
+        synchronized(lock) {
+            val prev = lastCallAudioSeq[cursorKey]
+            if (prev != null && decoded.seq <= prev) return
+            lastCallAudioSeq[cursorKey] = decoded.seq
+        }
+        callAudioFramesReceivedCount.incrementAndGet()
+        controller.onIncomingAudio(
+            CallAudioFrame(
+                callId = decoded.callId,
+                peerId = fromPeerId,
+                seq = decoded.seq,
+                sampleRate = decoded.sampleRate,
+                channels = decoded.channels,
+                frames = decoded.frames,
+                ptsMs = decoded.ptsMs,
+                data = plain,
+            ),
+        )
+    }
+
     // ---- screen sharing (source) -----------------------------------------------
 
     private fun screenState(peerId: String, sessionId: String, state: String, reason: String? = null, audio: Boolean? = null) {
@@ -937,32 +1165,49 @@ class ContinuityChannel internal constructor(private val host: Host) {
     fun screenQuality(sessionId: String): Int = synchronized(lock) { ((sources[sessionId]?.quality ?: 0.7) * 100).toInt() }
 
     /** Frame interval elapsed and the in-flight window has room (latest-frame-wins). */
-    fun canSendScreenFrame(sessionId: String): Boolean = synchronized(lock) {
+    fun canSendScreenFrame(
+        sessionId: String,
+        keyFrame: Boolean = false,
+        codec: Int = Continuity.SCREEN_CODEC_JPEG,
+    ): Boolean = synchronized(lock) {
         val s = sources[sessionId] ?: return false
         if (!s.running) return false
         val now = System.currentTimeMillis()
-        if (s.nextSeq - 1 - s.ackedSeq >= Continuity.SCREEN_MAX_INFLIGHT) {
+        val baseLimit = if (codec == Continuity.SCREEN_CODEC_H264) {
+            Continuity.SCREEN_VIDEO_MAX_INFLIGHT
+        } else {
+            Continuity.SCREEN_MAX_INFLIGHT
+        }
+        val limit = if (keyFrame) baseLimit + 1 else baseLimit
+        if (s.nextSeq - 1 - s.ackedSeq >= limit) {
             if (now - s.lastAckAt <= 3_000) return false
             s.ackedSeq = s.nextSeq - 1 // frames lost on a reconnect: forget them
             s.sentAt.clear()
             s.lastAckAt = now
         }
-        now - s.lastSentAt >= 1000L / s.maxFps
+        keyFrame || (now - s.lastSentAt >= 1000L / s.maxFps)
     }
 
     /** Compatibility path for browser/JPEG sources. Android uses [sendScreenVideoFrame]. */
     fun sendScreenFrame(sessionId: String, jpeg: ByteArray, width: Int, height: Int): Boolean =
-        sendScreenPayload(sessionId, jpeg, Continuity.SCREEN_CODEC_JPEG, width, height)
+        sendScreenPayload(sessionId, jpeg, Continuity.SCREEN_CODEC_JPEG, width, height, keyFrame = false)
 
     /** Sends a low-latency AVC access unit with its source timestamp and sync-frame bit. */
     fun sendScreenVideoFrame(sessionId: String, accessUnit: ByteArray, width: Int, height: Int, ptsMs: Long, keyFrame: Boolean): Boolean {
         val packet = runCatching { Continuity.encodeScreenH264Packet(accessUnit, ptsMs, keyFrame) }.getOrNull() ?: return false
-        return sendScreenPayload(sessionId, packet, Continuity.SCREEN_CODEC_H264, width, height)
+        return sendScreenPayload(sessionId, packet, Continuity.SCREEN_CODEC_H264, width, height, keyFrame = keyFrame)
     }
 
-    private fun sendScreenPayload(sessionId: String, plaintext: ByteArray, codec: Int, width: Int, height: Int): Boolean {
+    private fun sendScreenPayload(
+        sessionId: String,
+        plaintext: ByteArray,
+        codec: Int,
+        width: Int,
+        height: Int,
+        keyFrame: Boolean,
+    ): Boolean {
         if (plaintext.isEmpty() || plaintext.size > Continuity.SCREEN_MAX_FRAME_BYTES || width <= 0 || height <= 0) return false
-        if (!canSendScreenFrame(sessionId)) return false
+        if (!canSendScreenFrame(sessionId, keyFrame, codec)) return false
         val (peerId, seq) = synchronized(lock) {
             val s = sources[sessionId] ?: return false
             s.peerId to s.nextSeq
@@ -1017,6 +1262,7 @@ class ContinuityChannel internal constructor(private val host: Host) {
             when (bytes.firstOrNull()?.toInt()?.and(0xff)) {
                 Continuity.FRAME_SCREEN -> Continuity.decodeScreenFrame(bytes)
                 Continuity.FRAME_SCREEN_AUDIO -> Continuity.decodeScreenAudioFrame(bytes)
+                Continuity.FRAME_CALL_AUDIO -> handleCallAudioFrame(fromPeerId, bytes)
             }
         }
     }

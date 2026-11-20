@@ -312,5 +312,7 @@ fun main() {
             "Expected unaccepted pending offer to fail on disconnect, got ${pendingAfter?.status}"
         }
     } finally { disconnectEngine.stop() }
-    println("TRANSPORT: ALL PASS (bounded frames, fragments, exactly-once close, byte/item queues, range crypto, nonblocking cancel, bounded latest-state work, per-file ACKs, consent/receipt identity, connecting resume)")
+    runTlsSanAndTelemetryChecks()
+    runWebSocketResilienceChecks()
+    println("TRANSPORT: ALL PASS (bounded frames, fragments, exactly-once close, byte/item queues, range crypto, nonblocking cancel, bounded latest-state work, per-file ACKs, consent/receipt identity, connecting resume, TLS/IPv6 SAN, WS resilience)")
 }

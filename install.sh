@@ -52,7 +52,13 @@ bin="$INSTALL_DIR/AirBridge"
 tmp="$(mktemp "${TMPDIR:-/tmp}/airbridge.XXXXXX")"
 sums="$(mktemp "${TMPDIR:-/tmp}/airbridge-sums.XXXXXX")"
 errlog="$(mktemp "${TMPDIR:-/tmp}/airbridge-err.XXXXXX")"
-cleanup() { rm -f "$tmp" "$sums" "$errlog"; }
+swift_dir=""
+stage=""
+cleanup() {
+  rm -f "$tmp" "$sums" "$errlog" "$bin.tmp"
+  if [ -n "${swift_dir:-}" ]; then rm -rf "$swift_dir"; fi
+  if [ -n "${stage:-}" ]; then rm -rf "$stage"; fi
+}
 trap cleanup EXIT
 
 # --- release URLs -----------------------------------------------------------
@@ -94,7 +100,6 @@ last_error() { [ -s "$errlog" ] && sed 's/^/  /' "$errlog" >&2 || true; }
 discover_asset() {
   command -v curl >/dev/null 2>&1 || return 1
   local api="https://api.github.com/repos/${REPO}/releases"
-  local tag
   if [ -n "${AIRBRIDGE_VERSION:-}" ]; then
     api="$api/tags/${AIRBRIDGE_VERSION}"
   else
@@ -146,18 +151,39 @@ download_binary() {
   return 1
 }
 
+compute_sha256() {
+  local target="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$target" | awk '{print tolower($1)}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$target" | awk '{print tolower($1)}'
+  else
+    echo "✖ neither 'shasum' nor 'sha256sum' is available to verify checksums" >&2
+    return 1
+  fi
+}
+
+parse_checksum_for_asset() {
+  local sums_file="$1" target_asset="$2" parsed
+  parsed="$(tr -d '\r' < "$sums_file" | awk -v n="$target_asset" '($2 == n || $2 == "*"n) { print tolower($1); exit }')"
+  if ! [[ "$parsed" =~ ^[0-9a-f]{64}$ ]]; then
+    return 1
+  fi
+  printf '%s\n' "$parsed"
+}
+
 verify_checksum() {
   if ! fetch "$sums_url" "$sums" || [ ! -s "$sums" ]; then
-    return 0 # no manifest published — nothing to compare against
+    echo "✖ could not download SHA256SUMS.txt for ${asset} from ${sums_url}" >&2
+    last_error
+    return 1
   fi
   local want got
-  want="$(awk -v n="$asset" '$2 == n || $2 == "*"n { print $1 }' "$sums" | head -n 1)"
-  [ -n "$want" ] || return 0
-  if command -v shasum >/dev/null 2>&1; then
-    got="$(shasum -a 256 "$tmp" | awk '{print $1}')"
-  else
-    got="$(sha256sum "$tmp" | awk '{print $1}')"
+  if ! want="$(parse_checksum_for_asset "$sums" "$asset")"; then
+    echo "✖ SHA256SUMS.txt has no valid SHA-256 entry for ${asset}" >&2
+    return 1
   fi
+  got="$(compute_sha256 "$tmp")" || return 1
   if [ "$want" != "$got" ]; then
     echo "✖ checksum mismatch for ${asset}" >&2
     echo "  expected $want" >&2
@@ -219,7 +245,7 @@ install_from_source() {
 # ad-hoc signed in CI): no Xcode/swiftc needed, and the in-app updater can
 # replace it as a whole. Returns 1 when the release has no app bundle.
 install_prebuilt_macos_app() {
-  local app="$1" zip_asset="AirBridge-macOS-${a}.zip" zip_url want got stage
+  local app="$1" zip_asset="AirBridge-macOS-${a}.zip" zip_url want got
   [ "${AIRBRIDGE_PREBUILT_APP:-1}" = "1" ] || return 1
   [ "$mode" = "binary" ] || return 1
   if [ -n "${AIRBRIDGE_VERSION:-}" ]; then
@@ -237,9 +263,12 @@ install_prebuilt_macos_app() {
     echo "⚠ no SHA256SUMS.txt for the prebuilt app; building the app locally instead" >&2
     return 1
   fi
-  want="$(awk -v n="$zip_asset" '$2 == n || $2 == "*"n { print $1 }' "$sums" | head -n 1)"
-  got="$(shasum -a 256 "$tmp" | awk '{print $1}')"
-  if [ -z "$want" ] || [ "$want" != "$got" ]; then
+  if ! want="$(parse_checksum_for_asset "$sums" "$zip_asset")"; then
+    echo "✖ SHA256SUMS.txt has no valid SHA-256 entry for ${zip_asset}; not installing it" >&2
+    return 1
+  fi
+  got="$(compute_sha256 "$tmp")" || return 1
+  if [ "$want" != "$got" ]; then
     echo "✖ checksum mismatch for ${zip_asset}; not installing it" >&2
     return 1
   fi
@@ -251,6 +280,7 @@ install_prebuilt_macos_app() {
      || ! "$stage/AirBridge.app/Contents/Resources/airbridge-server" --version >/dev/null 2>&1; then
     echo "⚠ the prebuilt app failed verification; building the app locally instead" >&2
     rm -rf "$stage"
+    stage=""
     return 1
   fi
   # The old bundle is kept until the new one is in place.
@@ -259,9 +289,11 @@ install_prebuilt_macos_app() {
   if ! mv "$stage/AirBridge.app" "$app"; then
     if [ -e "$stage/AirBridge.app.old" ]; then mv "$stage/AirBridge.app.old" "$app"; fi
     rm -rf "$stage"
+    stage=""
     return 1
   fi
   rm -rf "$stage"
+  stage=""
   # Per-user settings live outside the signed bundle (editing it breaks the seal).
   mkdir -p "$HOME/.airbridge"
   if [ "$PORT" != "3000" ]; then printf '%s\n' "$PORT" > "$HOME/.airbridge/port"; else rm -f "$HOME/.airbridge/port"; fi
@@ -275,11 +307,13 @@ install_prebuilt_macos_app() {
   return 0
 }
 
+xml_escape() { sed -e 's/\&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
 # Install a tiny Launch Services app that starts the same server as the CLI.
 # The installer is often piped to bash, so everything needed to create the
 # launcher is included here; the artwork is fetched separately and is optional.
 install_macos_app() {
-  local app="$HOME/Applications/AirBridge.app" contents icon_url
+  local app="$HOME/Applications/AirBridge.app" contents icon_url app_version="" escaped_version
   contents="$app/Contents"
   if [ -e "$app" ] && { [ ! -f "$contents/Info.plist" ] || ! grep -q 'com.airbridge.launcher' "$contents/Info.plist"; }; then
     echo "✖ $app already exists and is not an AirBridge launcher; not replacing it." >&2
@@ -292,7 +326,20 @@ install_macos_app() {
   # earlier prebuilt bundle is sealed; start from a clean directory.
   if [ -f "$contents/Resources/airbridge-server" ]; then rm -rf "$app"; fi
   mkdir -p "$contents/MacOS" "$contents/Resources"
-  cat > "$contents/Info.plist" <<'PLIST'
+
+  if [ "$mode" = "binary" ]; then
+    app_version="$("$bin" --version 2>/dev/null | awk '{print $NF}' | tr -d '\r\n' || true)"
+  elif [ -f "$HOME/.local/share/airbridge/src/package.json" ] && command -v node >/dev/null 2>&1; then
+    app_version="$(node -p 'try{require(process.argv[1]).version||""}catch{""}' "$HOME/.local/share/airbridge/src/package.json" 2>/dev/null | tr -d '\r\n' || true)"
+  fi
+  if [ -z "$app_version" ]; then
+    app_version="${AIRBRIDGE_VERSION:-}"
+    app_version="${app_version#v}"
+  fi
+  [ -n "$app_version" ] || app_version="1"
+  escaped_version="$(printf %s "$app_version" | xml_escape)"
+
+  cat > "$contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -302,18 +349,27 @@ install_macos_app() {
   <key>CFBundleExecutable</key><string>AirBridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AirBridge.icns</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>${escaped_version}</string>
+  <key>CFBundleVersion</key><string>${escaped_version}</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSUIElement</key><true/>
-  <key>NSBluetoothAlwaysUsageDescription</key><string>Your paired phone can hand over its hotspot over Bluetooth when it and this Mac share no network.</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSHumanReadableCopyright</key><string>© 2026 Diganta Dey — AirBridge (open source, end-to-end encrypted)</string>
+  <key>NSLocalNetworkUsageDescription</key><string>AirBridge connects directly to your phone on the local network to transfer files and clipboard content.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>Your paired phone can hand over its hotspot over Bluetooth when it and this Mac share no network. Only the paired phone can use it.</string>
+  <key>NSMicrophoneUsageDescription</key><string>AirBridge uses your Mac microphone when you route a paired phone call's audio to your Mac.</string>
+  <key>NSBonjourServices</key><array><string>_airbridge._tcp</string><string>_airbridge-rv._tcp</string></array>
 </dict></plist>
 PLIST
   printf '%s\n' "$bin" > "$contents/Resources/binary-path"
   printf '%s\n' "$PORT" > "$contents/Resources/port"
 
   # Compile Native Swift App Launcher if swiftc is available
-  local local_swift="$(dirname "$0")/scripts/mac_app.swift"
-  local swift_src="$(mktemp "${TMPDIR:-/tmp}/mac_app.XXXXXX.swift")"
-  local swift_url="https://raw.githubusercontent.com/${REPO}/main/scripts/mac_app.swift"
+  local local_swift swift_src swift_url
+  local_swift="$(dirname "$0")/scripts/mac_app.swift"
+  swift_dir="$(mktemp -d "${TMPDIR:-/tmp}/airbridge-swift.XXXXXX")"
+  swift_src="$swift_dir/mac_app.swift"
+  swift_url="https://raw.githubusercontent.com/${REPO}/main/scripts/mac_app.swift"
 
   if [ -f "$local_swift" ]; then
     cp "$local_swift" "$swift_src"
@@ -325,7 +381,8 @@ PLIST
     echo "▸ compiling native macOS Swift App GUI"
     if swiftc -O -suppress-warnings "$swift_src" -o "$contents/MacOS/AirBridge" -framework AppKit -framework WebKit -framework UserNotifications -framework CoreBluetooth 2>/dev/null; then
       codesign --force -s - "$contents/MacOS/AirBridge" 2>/dev/null || true
-      rm -f "$swift_src"
+      rm -rf "$swift_dir"
+      swift_dir=""
       icon_url="https://raw.githubusercontent.com/${REPO}/main/macos/AirBridge.icns"
       if fetch "$icon_url" "$tmp" && [ -s "$tmp" ]; then
         cp "$tmp" "$contents/Resources/AirBridge.icns"
@@ -337,7 +394,8 @@ PLIST
       return 0
     fi
   fi
-  rm -f "$swift_src"
+  rm -rf "$swift_dir"
+  swift_dir=""
 
   cat > "$contents/MacOS/AirBridge" <<'APP'
 #!/bin/bash
@@ -397,7 +455,7 @@ if ! download_binary; then
   install_from_source
   mode="source"
 else
-  verify_checksum
+  verify_checksum || exit 1
   chmod +x "$tmp"
   mv "$tmp" "$bin.tmp"
   # A binary that cannot report its version is the wrong arch, truncated, or
@@ -426,7 +484,7 @@ stop_running_daemon() {
   if [ -e "$bin" ] && command -v pgrep >/dev/null 2>&1; then
     for pid in $(pgrep -f "$bin" 2>/dev/null || true); do
       [ "$pid" = "$$" ] && continue
-      kill -TERM "$pid" 2>/dev/null && stopped=1 || true
+      if kill -TERM "$pid" 2>/dev/null; then stopped=1; fi
     done
   fi
   # Whatever AirBridge still holds the port (an older install at another path,
@@ -437,7 +495,7 @@ stop_running_daemon() {
       [ "$pid" = "$$" ] && continue
       cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
       case "$cmd" in
-        *AirBridge*|*airbridge*) kill -TERM "$pid" 2>/dev/null && stopped=1 || true ;;
+        *AirBridge*|*airbridge*) if kill -TERM "$pid" 2>/dev/null; then stopped=1; fi ;;
       esac
     done
   fi
@@ -492,7 +550,7 @@ if [ "$os" = "Linux" ] && [ "${AIRBRIDGE_LAUNCHER:-1}" != "0" ] && [ "$mode" = "
   # the version and Contacts / Calls / Screen Sharing actions (right-click).
   # `--open` hands off to an already-running service. The binary refreshes the
   # version line itself after self-updates (src/server/desktopLauncher.ts).
-  app_version="$("$bin" --version 2>/dev/null | awk '{print $NF}' | tr -d '\r\n')"
+  app_version="$("$bin" --version 2>/dev/null | awk '{print $NF}' | tr -d '\r\n' || true)"
   [ -n "$app_version" ] || app_version="unknown"
   launcher_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
   exec_bin="\"$(printf %s "$bin" | sed -e 's/[\\"`$]/\\&/g' -e 's/\\/\\\\/g' -e 's/%/%%/g')\""
@@ -503,7 +561,7 @@ Version=1.5
 Type=Application
 Name=AirBridge
 GenericName=Phone & File Bridge
-Comment=AirBridge $app_version — end-to-end encrypted files, clipboard, contacts, calls and screen sharing with your phone
+Comment=AirBridge $app_version — end-to-end encrypted files, photo & text clipboard, contacts, call audio and H.264 screen sharing (by Diganta Dey)
 Exec=$exec_bin --open
 Icon=airbridge
 Terminal=false
@@ -529,7 +587,9 @@ Icon=video-display
 Exec=$exec_bin --open screen
 LAUNCHER
     mv "$launcher_dir/airbridge.desktop.tmp" "$launcher_dir/airbridge.desktop"
-    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$launcher_dir" >/dev/null 2>&1 || true
+    if command -v update-desktop-database >/dev/null 2>&1; then
+      update-desktop-database "$launcher_dir" >/dev/null 2>&1 || true
+    fi
     echo "▸ app launcher: $launcher_dir/airbridge.desktop (AirBridge $app_version)"
   fi
 fi
@@ -537,8 +597,6 @@ case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) echo "  add to PATH:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac
-
-xml_escape() { sed -e 's/\&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 
 if [ "$AUTOSTART" = "1" ]; then
   mkdir -p "$HOME/.airbridge"

@@ -244,6 +244,25 @@ export type ControlPayload =
       kind: 'screen-share-stop';
       sessionId: string;
       reason?: string;
+    }
+  | {
+      kind: 'screen-share-keyframe';
+      sessionId: string;
+      reason?: string;
+    }
+  | {
+      kind: 'call-audio-control';
+      callId: string;
+      action: 'start' | 'stop' | 'mute' | 'unmute';
+      sampleRate?: number;
+    }
+  | {
+      kind: 'call-audio-state';
+      callId: string;
+      active: boolean;
+      muted: boolean;
+      route?: 'computer' | 'phone';
+      reason?: string;
     };
 
 export type ClientToServerMessage =
@@ -285,7 +304,9 @@ export type ClientToServerMessage =
     }
   | {
       type: 'set-host-clipboard';
-      text: string;
+      text?: string;
+      imageDataUrl?: string;
+      imageName?: string;
     }
   | {
       /** Hotspot handoff: credentials sealed to the computer's handoff key (base64url, see handoff.ts). */
@@ -403,7 +424,10 @@ export type ServerToClientMessage =
     }
   | {
       type: 'host-clipboard';
-      text: string;
+      text?: string;
+      imageDataUrl?: string;
+      imageName?: string;
+      contentType?: 'text' | 'image';
       timestamp: number;
     }
   | {
@@ -502,8 +526,8 @@ export function formatPairCode(code: string): string {
 export const FRAME_ENCRYPTED_CHUNK = 0x01;
 export const FRAME_ROUTED_RELAY = 0x02;
 export const FRAME_BINARY_SACK = 0x03;
-/** Encrypted screen-share frame (see continuity.ts). */
-export { FRAME_SCREEN } from './continuity.js';
+/** Encrypted continuity frames (see continuity.ts). */
+export { FRAME_CALL_AUDIO, FRAME_SCREEN } from './continuity.js';
 
 export const ID_ASCII_LENGTH = 16; // 16 hex chars = 64 bits entropy
 export const GCM_IV_LENGTH = 12;
@@ -678,9 +702,14 @@ export function decodeBinarySackFrame(bytes: Uint8Array): BinarySackFrame {
 // ============================================================================
 
 export function bytesToBase64Url(bytes: Uint8Array): string {
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64url');
+  }
+  const CHUNK = 0x8000;
   let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  for (let i = 0; i < bytes.byteLength; i += CHUNK) {
+    const slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.byteLength));
+    binary += String.fromCharCode(...slice);
   }
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }

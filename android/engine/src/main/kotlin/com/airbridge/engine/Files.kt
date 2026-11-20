@@ -159,6 +159,7 @@ class DirectoryFileSink(
     private var finalized = false
     private var paused = false
     @Volatile private var discarded = false
+    private var locationFinisher: ((partFile: File, name: String) -> String)? = null
     private var streamDigest: MessageDigest? = MessageDigest.getInstance("SHA-256")
     private var nextHashChunk = 0
     private val pendingHashChunks = HashMap<Int, ByteArray>()
@@ -388,11 +389,11 @@ class DirectoryFileSink(
             if (discarded) return null
             val verified = true
             error = null
-            val finalTarget = finisher(partFile, meta.name)
+            val savedLocation = locationFinisher?.invoke(partFile, meta.name) ?: finisher(partFile, meta.name).absolutePath
             sidecar.delete()
             journalFile.delete()
             finalized = true
-            return FileFinalize(finalTarget.absolutePath, hex, verified)
+            return FileFinalize(savedLocation, hex, verified)
         } catch (e: Exception) {
             error = e.message ?: "finalize failed"
             return null
@@ -444,9 +445,23 @@ class DirectoryFileSink(
     @Synchronized
     override fun lastError(): String? = error
 
-    private companion object {
-        const val JOURNAL_ENTRY_BYTES = 4
-        const val JOURNAL_FLUSH_CHUNKS = 32
+    companion object {
+        private const val JOURNAL_ENTRY_BYTES = 4
+        private const val JOURNAL_FLUSH_CHUNKS = 32
+
+        /**
+         * Creates a [DirectoryFileSink] whose [finisher] returns a canonical
+         * destination string (such as a `content://` MediaStore URI or a
+         * real filesystem path) recorded directly in [FileFinalize.savedPath].
+         */
+        fun withLocationFinisher(
+            stagingDir: File,
+            meta: FileManifestItem,
+            transferId: String,
+            finisher: (partFile: File, name: String) -> String,
+        ): FileSink = DirectoryFileSink(stagingDir, meta, transferId).apply {
+            locationFinisher = finisher
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 package com.airbridge.app
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,11 +9,16 @@ import android.app.Service
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import com.airbridge.engine.ConnectionState
 import com.airbridge.engine.TransferDirection
@@ -27,6 +33,71 @@ import kotlin.math.floor
 import kotlin.math.log
 import kotlin.math.pow
 
+/**
+ * Pure policy & cumulative duration tracker for transfer-only WakeLock and WifiLock.
+ *
+ * Ensures CPU partial wake locks and low-latency Wi-Fi locks are held strictly
+ * while a transfer is active (`transferActive == true`), never while idle in
+ * `connectionContinuity` standby.
+ */
+class TransferLockPolicy(
+    private val clockMs: () -> Long = { SystemClock.elapsedRealtime() },
+) {
+    private var wakeHeldSinceMs: Long? = null
+    private var wifiHeldSinceMs: Long? = null
+    private var accumulatedWakeMs: Long = 0L
+    private var accumulatedWifiMs: Long = 0L
+
+    val isWakeHeld: Boolean
+        @Synchronized get() = wakeHeldSinceMs != null
+
+    val isWifiHeld: Boolean
+        @Synchronized get() = wifiHeldSinceMs != null
+
+    @Synchronized
+    fun shouldHoldLocks(transferActive: Boolean, @Suppress("UNUSED_PARAMETER") connectionContinuity: Boolean): Boolean =
+        transferActive
+
+    @Synchronized
+    fun onWakeLockAcquired() {
+        if (wakeHeldSinceMs == null) {
+            wakeHeldSinceMs = clockMs()
+        }
+    }
+
+    @Synchronized
+    fun onWifiLockAcquired() {
+        if (wifiHeldSinceMs == null) {
+            wifiHeldSinceMs = clockMs()
+        }
+    }
+
+    @Synchronized
+    fun onLocksReleased() {
+        val now = clockMs()
+        wakeHeldSinceMs?.let { since ->
+            accumulatedWakeMs += (now - since).coerceAtLeast(0L)
+            wakeHeldSinceMs = null
+        }
+        wifiHeldSinceMs?.let { since ->
+            accumulatedWifiMs += (now - since).coerceAtLeast(0L)
+            wifiHeldSinceMs = null
+        }
+    }
+
+    @Synchronized
+    fun totalWakeLockHeldMs(): Long {
+        val active = wakeHeldSinceMs?.let { (clockMs() - it).coerceAtLeast(0L) } ?: 0L
+        return accumulatedWakeMs + active
+    }
+
+    @Synchronized
+    fun totalWifiLockHeldMs(): Long {
+        val active = wifiHeldSinceMs?.let { (clockMs() - it).coerceAtLeast(0L) } ?: 0L
+        return accumulatedWifiMs + active
+    }
+}
+
 /** Owns the native encrypted peer independently of any Activity. */
 class ConnectionService : Service() {
     private var transferActive = false
@@ -40,10 +111,13 @@ class ConnectionService : Service() {
     @Volatile private var engineHost: NativeEngineHost? = null
     /** [com.airbridge.engine.PairingInvitationStore.engineKey] of the running engine; a rescan changes it. */
     private var engineTarget = ""
-    private var engineGeneration = 0L
-    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+    @Volatile private var engineGeneration = 0L
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var wifiNetworkCallback: ConnectivityManager.NetworkCallback? = null
     private var networkCallbackPrimed = false
-    private var defaultNetwork: android.net.Network? = null
+    private var wifiCallbackPrimed = false
+    private var defaultNetwork: Network? = null
+    private var wifiNetwork: Network? = null
     private var lockRefreshScheduled = false
     private var notificationScheduled = false
     private val notificationRefresh = Runnable {
@@ -65,9 +139,10 @@ class ConnectionService : Service() {
     private val lockRefresh = object : Runnable {
         override fun run() {
             lockRefreshScheduled = false
-            val continuity = Prefs(this@ConnectionService).connectionContinuity
-            if (transferActive || continuity) {
+            if (lockPolicy.shouldHoldLocks(transferActive, Prefs(this@ConnectionService).connectionContinuity)) {
                 updateTransferWakeLock()
+            } else {
+                releaseTransferWakeLock()
             }
         }
     }
@@ -86,6 +161,7 @@ class ConnectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        AndroidDiagnostics.installUncaughtExceptionHandler(this)
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val listener = ClipboardManager.OnPrimaryClipChangedListener {
             publishSystemClipboard(clipboard)
@@ -96,12 +172,13 @@ class ConnectionService : Service() {
         } catch (e: Exception) {
             Log.w("AirBridgeClip", "could not watch clipboard: ${e.message}")
         }
-        val connectivity = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-        val callback = object : android.net.ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: android.net.Network) {
+        val connectivity = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val defaultCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
                 val previousNetwork = defaultNetwork
                 val changed = previousNetwork != null && previousNetwork != network
                 defaultNetwork = network
+                AndroidDiagnostics.defaultNetworkPresent = true
                 // The first callback after registering only reports the current
                 // network; reconnecting then would abort the engine's first dial
                 // mid-flight (a silent CANCELLED). Reconnect only on a real switch
@@ -109,19 +186,59 @@ class ConnectionService : Service() {
                 val firstReport = !networkCallbackPrimed
                 networkCallbackPrimed = true
                 if (!firstReport && (changed || previousNetwork == null || nativeState == ConnectionState.RECONNECTING)) {
+                    AndroidDiagnostics.recordNetworkReconnectTrigger()
+                    AndroidDiagnostics.recordEvent("network", "Default network available ($network); triggering reconnect")
                     engineHost?.reconnect()
                 }
-                val prefs = Prefs(this@ConnectionService)
-                if (transferActive || prefs.connectionContinuity) updateTransferWakeLock()
+                if (transferActive) updateTransferWakeLock()
             }
-            override fun onLost(network: android.net.Network) {
+            override fun onLost(network: Network) {
                 if (defaultNetwork == network) {
                     defaultNetwork = null
+                    AndroidDiagnostics.defaultNetworkPresent = false
                 }
             }
         }
-        try { connectivity.registerDefaultNetworkCallback(callback, mainHandler); networkCallback = callback }
-        catch (e: Exception) { Log.w("AirBridgeNetwork", "Network recovery callback unavailable: ${e.message}") }
+        try {
+            connectivity.registerDefaultNetworkCallback(defaultCallback, mainHandler)
+            networkCallback = defaultCallback
+        } catch (e: Exception) {
+            Log.w("AirBridgeNetwork", "Network recovery callback unavailable: ${e.message}")
+        }
+
+        // Also monitor TRANSPORT_WIFI explicitly so non-default Wi-Fi or local-only hotspot
+        // transitions trigger immediate engine endpoint re-evaluation even while cellular is default.
+        val wifiCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                val previousWifi = wifiNetwork
+                val changed = previousWifi != null && previousWifi != network
+                wifiNetwork = network
+                AndroidDiagnostics.wifiNetworkPresent = true
+                val firstReport = !wifiCallbackPrimed
+                wifiCallbackPrimed = true
+                if (!firstReport && (changed || previousWifi == null) && network != defaultNetwork) {
+                    AndroidDiagnostics.recordNetworkReconnectTrigger()
+                    AndroidDiagnostics.recordEvent("network", "Wi-Fi transport available ($network); triggering reconnect")
+                    engineHost?.reconnect()
+                }
+            }
+            override fun onLost(network: Network) {
+                if (wifiNetwork == network) {
+                    wifiNetwork = null
+                    AndroidDiagnostics.wifiNetworkPresent = false
+                }
+            }
+        }
+        try {
+            val wifiRequest = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .build()
+            connectivity.registerNetworkCallback(wifiRequest, wifiCallback, mainHandler)
+            wifiNetworkCallback = wifiCallback
+        } catch (e: Exception) {
+            Log.w("AirBridgeNetwork", "Wi-Fi transport callback unavailable: ${e.message}")
+        }
+
         val channel = NotificationChannel(
             CHANNEL_ID,
             "AirBridge connection and transfers",
@@ -130,7 +247,7 @@ class ConnectionService : Service() {
         getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
     }
 
-    private var foregroundStarted = false
+    @Volatile private var foregroundStarted = false
 
     private fun startForegroundCompat(notification: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -151,10 +268,13 @@ class ConnectionService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
         foregroundStarted = true
+        AndroidDiagnostics.fgsPromoted = true
+        AndroidDiagnostics.fgsLastStartError = null
     }
 
     private fun stopForegroundAndSelf(startId: Int? = null) {
         foregroundStarted = false
+        AndroidDiagnostics.fgsPromoted = false
         runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
         if (startId != null) stopSelf(startId) else stopSelf()
     }
@@ -175,7 +295,7 @@ class ConnectionService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_SHARE_TEXT -> {
-                shareUntil = android.os.SystemClock.elapsedRealtime() + 60_000
+                shareUntil = SystemClock.elapsedRealtime() + 60_000
                 mainHandler.postDelayed({ if (shouldStopWhenIdle()) stopForegroundAndSelf() }, 60_100)
             }
             ACTION_UI_ATTACH -> uiAttached = true
@@ -189,9 +309,15 @@ class ConnectionService : Service() {
             true
         }.getOrElse { err ->
             Log.w("AirBridgeService", "startForeground unavailable: ${err.message}")
+            AndroidDiagnostics.fgsLastStartError = err.message ?: err.javaClass.simpleName
+            AndroidDiagnostics.recordEvent("fgs", "startForeground failed: ${err.message}", "WARN")
             foregroundStarted
         }
-        if (!promoted && intent?.action != ACTION_UI_ATTACH && shouldStopWhenIdle()) {
+        // AND-06: If startForegroundCompat() fails and !foregroundStarted, ALWAYS call
+        // stopSelf(startId) and return START_NOT_STICKY so Android never crashes the app
+        // with ForegroundServiceDidNotStartInTimeException.
+        if (!promoted && !foregroundStarted) {
+            releaseTransferWakeLock()
             stopSelf(startId)
             return START_NOT_STICKY
         }
@@ -217,16 +343,22 @@ class ConnectionService : Service() {
         return if (Prefs(this).connectionContinuity) START_STICKY else START_NOT_STICKY
     }
 
+    @SuppressLint("InlinedApi")
     override fun onTimeout(startId: Int) {
         Log.w("AirBridgeService", "Foreground service timeout reached (API 34+): startId=$startId")
+        AndroidDiagnostics.recordFgsTimeout()
+        AndroidDiagnostics.recordEvent("fgs", "Foreground service timeout reached (startId=$startId)", "WARN")
         handleFgsTimeout(startId, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {
         Log.w("AirBridgeService", "Foreground service timeout reached (API 35+): startId=$startId type=$fgsType")
+        AndroidDiagnostics.recordFgsTimeout()
+        AndroidDiagnostics.recordEvent("fgs", "Foreground service timeout reached (startId=$startId type=$fgsType)", "WARN")
         handleFgsTimeout(startId, fgsType)
     }
 
+    @SuppressLint("InlinedApi")
     private fun handleFgsTimeout(
         startId: Int,
         fgsType: Int = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
@@ -276,7 +408,16 @@ class ConnectionService : Service() {
      * The listener still fires when the OS allows it; failures are swallowed so
      * the foreground service (and the encrypted session) stay alive.
      */
-    private fun publishSystemClipboard(@Suppress("UNUSED_PARAMETER") clipboard: ClipboardManager) {
+    private fun publishSystemClipboard(clipboard: ClipboardManager) {
+        if (isOwnImageSuppressed(SystemClock.elapsedRealtime())) {
+            AndroidDiagnostics.recordClipboardImageSuppressedEcho()
+            return
+        }
+        val clip = runCatching { clipboard.primaryClip }.getOrNull()
+        val desc = clip?.description
+        if (desc != null && (desc.hasMimeType("image/*") || !desc.hasMimeType("text/*"))) {
+            return
+        }
         ClipboardText.read(this)?.let { publishClipboardChange(this, it) }
     }
 
@@ -352,12 +493,13 @@ class ConnectionService : Service() {
 
     private fun updateTransferWakeLock() {
         val prefs = Prefs(this)
-        val shouldHold = transferActive || prefs.connectionContinuity
+        // AND-07: Hold PARTIAL_WAKE_LOCK and WIFI_MODE_FULL_LOW_LATENCY ONLY while transferActive is true.
+        val shouldHold = lockPolicy.shouldHoldLocks(transferActive, prefs.connectionContinuity)
         if (!shouldHold) {
             releaseTransferWakeLock()
             return
         }
-        val wakeTimeoutMs = if (transferActive) 10 * 60_000L else 3 * 60_000L
+        val wakeTimeoutMs = 10 * 60_000L
         var cpuLock = transferWakeLock
         if (cpuLock == null) {
             val powerManager = getSystemService(POWER_SERVICE) as PowerManager
@@ -369,7 +511,10 @@ class ConnectionService : Service() {
             }
             transferWakeLock = cpuLock
         }
-        runCatching { cpuLock.acquire(wakeTimeoutMs) }
+        runCatching {
+            cpuLock.acquire(wakeTimeoutMs)
+            lockPolicy.onWakeLockAcquired()
+        }
         if (wifiLock?.isHeld != true) try {
             var lock = wifiLock
             if (lock == null) {
@@ -390,13 +535,14 @@ class ConnectionService : Service() {
                 wifiLock = lock
             }
             lock.acquire()
+            lockPolicy.onWifiLockAcquired()
         } catch (e: SecurityException) {
             Log.w("AirBridgePower", "Wi-Fi performance lock unavailable: ${e.message}")
             wifiLock = null
         }
         if (!lockRefreshScheduled) {
             lockRefreshScheduled = true
-            mainHandler.postDelayed(lockRefresh, if (transferActive) 60_000 else 120_000)
+            mainHandler.postDelayed(lockRefresh, 60_000)
         }
     }
 
@@ -410,6 +556,7 @@ class ConnectionService : Service() {
         val lock = wifiLock
         if (lock?.isHeld == true) runCatching { lock.release() }
         wifiLock = null
+        lockPolicy.onLocksReleased()
     }
 
     override fun onDestroy() {
@@ -417,11 +564,20 @@ class ConnectionService : Service() {
             instance = null
             sharedUiState.value = NativeEngineUiState()
         }
+        foregroundStarted = false
+        AndroidDiagnostics.fgsPromoted = false
         engineGeneration++
-        networkCallback?.let { callback -> runCatching {
-            (getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager).unregisterNetworkCallback(callback)
-        } }
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        networkCallback?.let { callback ->
+            runCatching { cm?.unregisterNetworkCallback(callback) }
+        }
         networkCallback = null
+        wifiNetworkCallback?.let { callback ->
+            runCatching { cm?.unregisterNetworkCallback(callback) }
+        }
+        wifiNetworkCallback = null
+        AndroidDiagnostics.defaultNetworkPresent = false
+        AndroidDiagnostics.wifiNetworkPresent = false
         val host = engineHost
         engineHost = null
         // Shutdown is potentially waiting on disk IO. Never block the main
@@ -447,7 +603,7 @@ class ConnectionService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun shouldStopWhenIdle(): Boolean = !transferActive && !pendingOffers && !uiAttached &&
-        !Prefs(this).connectionContinuity && android.os.SystemClock.elapsedRealtime() >= shareUntil
+        !Prefs(this).connectionContinuity && SystemClock.elapsedRealtime() >= shareUntil
 
     private fun ensureEngine() {
         val prefs = Prefs(this)
@@ -477,8 +633,15 @@ class ConnectionService : Service() {
                 transferActive = transfers.any { it.status == TransferStatus.TRANSFERRING || it.status == TransferStatus.CONNECTING }
                 pendingOffers = transfers.any { it.status == TransferStatus.PENDING_ACCEPT }
                 val active = transfers.firstOrNull { it.status == TransferStatus.TRANSFERRING }
-                transferSpeed = active?.let { TransferSpeedSnapshot(it.direction == TransferDirection.OUTGOING,
-                    it.speedBytesPerSec, it.transferredBytes, it.totalBytes, it.etaSeconds) }
+                transferSpeed = active?.let {
+                    TransferSpeedSnapshot(
+                        it.direction == TransferDirection.OUTGOING,
+                        it.speedBytesPerSec,
+                        it.transferredBytes,
+                        it.totalBytes,
+                        it.etaSeconds,
+                    )
+                }
                 for (view in transfers) if (view.status != TransferStatus.PENDING_ACCEPT && offerIds.remove(view.transferId)) {
                     getSystemService(NotificationManager::class.java)?.cancel(offerNotificationId(view.transferId))
                 }
@@ -561,18 +724,51 @@ class ConnectionService : Service() {
         @Volatile
         private var instance: ConnectionService? = null
 
+        internal val lockPolicy = TransferLockPolicy()
+
         private val sharedUiState = MutableStateFlow(NativeEngineUiState())
         val uiState: StateFlow<NativeEngineUiState> = sharedUiState.asStateFlow()
 
         fun currentHost(): NativeEngineHost? = instance?.engineHost
 
+        fun isForegroundPromoted(): Boolean = instance?.foregroundStarted == true
+
+        fun isUiAttached(): Boolean = instance?.uiAttached == true
+
+        fun currentEngineGeneration(): Long = instance?.engineGeneration ?: 0L
+
+        fun totalWakeLockHeldMs(): Long = lockPolicy.totalWakeLockHeldMs()
+
+        fun totalWifiLockHeldMs(): Long = lockPolicy.totalWifiLockHeldMs()
+
+        fun isWakeLockHeld(): Boolean = lockPolicy.isWakeHeld
+
+        fun isWifiLockHeld(): Boolean = lockPolicy.isWifiHeld
+
+        /**
+         * AND-17: In-process UI detach callable directly from `MainActivity.onStop()`
+         * without calling `startService(ACTION_UI_DETACH)` while backgrounding.
+         */
+        fun detachUi() {
+            val service = instance ?: return
+            service.uiAttached = false
+            service.mainHandler.post {
+                if (instance === service && service.shouldStopWhenIdle()) {
+                    service.stopForegroundAndSelf()
+                }
+            }
+        }
+
         private const val OWN_WRITE_ECHO_WINDOW_MS = 1_500L
+        private const val OWN_IMAGE_ECHO_WINDOW_MS = 4_000L
         private const val DUPLICATE_EVENT_WINDOW_MS = 400L
 
         @Volatile
         private var lastOwnClipboardText: String? = null
         @Volatile
         private var lastOwnClipboardAt = 0L
+        @Volatile
+        private var lastOwnClipboardImageAt = 0L
         @Volatile
         private var lastPublishedClipboardText: String? = null
         @Volatile
@@ -581,7 +777,17 @@ class ConnectionService : Service() {
         /** Called before writing an incoming beam into ClipboardManager. */
         fun markOwnClipboardWrite(text: String) {
             lastOwnClipboardText = text
-            lastOwnClipboardAt = android.os.SystemClock.elapsedRealtime()
+            lastOwnClipboardAt = SystemClock.elapsedRealtime()
+        }
+
+        /** Called before/after copying an incoming image into ClipboardManager to block text/URI echo. */
+        fun markOwnClipboardImageWrite() {
+            lastOwnClipboardImageAt = SystemClock.elapsedRealtime()
+        }
+
+        internal fun isOwnImageSuppressed(nowElapsedMs: Long): Boolean {
+            val at = lastOwnClipboardImageAt
+            return at > 0L && nowElapsedMs - at < OWN_IMAGE_ECHO_WINDOW_MS
         }
 
         /**
@@ -595,7 +801,7 @@ class ConnectionService : Service() {
             val host = service.engineHost ?: return false
             if (!explicit && !Prefs(context).connectionContinuity && !service.uiAttached) return false
             if (text.isBlank() || text.length > com.airbridge.engine.Limits.MAX_CLIPBOARD_TEXT) return false
-            val now = android.os.SystemClock.elapsedRealtime()
+            val now = SystemClock.elapsedRealtime()
             val own = lastOwnClipboardText
             if (!explicit && own != null && own == text && now - lastOwnClipboardAt < OWN_WRITE_ECHO_WINDOW_MS) {
                 lastPublishedClipboardText = text
@@ -628,7 +834,7 @@ class ConnectionService : Service() {
             val prefs = Prefs(context)
             if (!explicit && !prefs.connectionContinuity) return false
             if (text.isBlank() || text.length > com.airbridge.engine.Limits.MAX_CLIPBOARD_TEXT) return false
-            val now = android.os.SystemClock.elapsedRealtime()
+            val now = SystemClock.elapsedRealtime()
             val own = lastOwnClipboardText
             if (!explicit && own != null && own == text && now - lastOwnClipboardAt < OWN_WRITE_ECHO_WINDOW_MS) return false
             return runCatching {

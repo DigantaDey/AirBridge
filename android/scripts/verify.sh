@@ -25,7 +25,8 @@ fi
 JAVA="${JAVA:-java}"
 # kotlinc's own launcher shells out to `java` on PATH — make an explicit JAVA
 # visible to it too.
-export PATH="$(dirname "$JAVA"):$PATH"
+PATH="$(dirname "$JAVA"):$PATH"
+export PATH
 
 die() { echo "verify: $*" >&2; exit 1; }
 

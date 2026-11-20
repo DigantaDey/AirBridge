@@ -9,6 +9,7 @@ import android.os.Looper
 import android.util.Log
 import com.airbridge.engine.DiscoveryQueue
 import com.airbridge.engine.DiscoveryUrlFormatter
+import java.util.concurrent.Executor
 
 /**
  * mDNS browse for the desktop AirBridge server (`_airbridge._tcp`, registered
@@ -21,128 +22,244 @@ class ServerDiscovery(
     private val onFound: (url: String, serviceName: String) -> Unit,
     private val onLost: (serviceName: String) -> Unit,
 ) {
-    private val nsd = context.getSystemService(Context.NSD_SERVICE) as NsdManager
+    private val nsd = context.applicationContext.getSystemService(Context.NSD_SERVICE) as NsdManager
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainExecutor = Executor { command -> mainHandler.post(command) }
     private val queue = DiscoveryQueue<NsdServiceInfo>()
     private var resolveTimeoutRunnable: Runnable? = null
-    @Volatile
-    private var active = false
+    private var activeCancelResolution: (() -> Unit)? = null
+    @Volatile private var active = false
+    @Volatile private var activeListener: NsdManager.DiscoveryListener? = null
 
-    private val discoveryListener = object : NsdManager.DiscoveryListener {
+    private fun newDiscoveryListener(): NsdManager.DiscoveryListener = object : NsdManager.DiscoveryListener {
         override fun onDiscoveryStarted(regType: String?) {
+            val self = this
             mainHandler.post {
-                if (!active) return@post
+                if (!active || activeListener !== self) return@post
+                AndroidDiagnostics.nsdActive = true
                 queue.start()
                 processNextResolution()
             }
         }
         override fun onServiceFound(info: NsdServiceInfo) {
+            val self = this
             mainHandler.post {
-                if (!active) return@post
+                if (!active || activeListener !== self) return@post
                 queue.enqueue(info.serviceName, info)
                 processNextResolution()
             }
         }
         override fun onServiceLost(info: NsdServiceInfo) {
+            val self = this
             mainHandler.post {
+                if (activeListener !== self) return@post
                 queue.removePending(info.serviceName)
                 onLost(info.serviceName)
             }
         }
         override fun onDiscoveryStopped(regType: String?) {
-            mainHandler.post { clearResolveTimeout(); queue.reset() }
+            val self = this
+            mainHandler.post {
+                if (activeListener === self) {
+                    AndroidDiagnostics.nsdActive = false
+                    clearActiveResolution()
+                    queue.reset()
+                }
+            }
         }
         override fun onStartDiscoveryFailed(regType: String?, code: Int) {
+            val self = this
             Log.w(TAG, "start discovery failed: $code")
-            mainHandler.post { clearResolveTimeout(); queue.reset() }
+            AndroidDiagnostics.nsdLastErrorCode = code
+            AndroidDiagnostics.recordEvent("nsd", "start discovery failed: $code", "WARN")
+            mainHandler.post {
+                if (activeListener === self) {
+                    active = false
+                    activeListener = null
+                    AndroidDiagnostics.nsdActive = false
+                    clearActiveResolution()
+                    queue.reset()
+                }
+            }
         }
         override fun onStopDiscoveryFailed(regType: String?, code: Int) {
             Log.w(TAG, "stop discovery failed: $code")
+            AndroidDiagnostics.nsdLastErrorCode = code
         }
     }
 
-    private fun clearResolveTimeout() {
+    private fun clearActiveResolution() {
         resolveTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
         resolveTimeoutRunnable = null
+        val cancel = activeCancelResolution
+        activeCancelResolution = null
+        runCatching { cancel?.invoke() }
     }
 
     private fun processNextResolution() {
         val (generation, name, nextService) = queue.nextToResolve() ?: return
 
-        clearResolveTimeout()
+        clearActiveResolution()
         val timeoutRunnable = Runnable {
             if (!queue.finish(generation)) return@Runnable
             resolveTimeoutRunnable = null
+            val cancel = activeCancelResolution
+            activeCancelResolution = null
+            runCatching { cancel?.invoke() }
             Log.w(TAG, "Resolve timeout (5s) for $name")
+            AndroidDiagnostics.recordNsdResolveTimeout()
+            AndroidDiagnostics.recordEvent("nsd", "Resolve timeout (5s) for $name", "WARN")
             processNextResolution()
         }
         resolveTimeoutRunnable = timeoutRunnable
         mainHandler.postDelayed(timeoutRunnable, RESOLVE_TIMEOUT_MS)
 
-        val listener = object : NsdManager.ResolveListener {
-            override fun onResolveFailed(info: NsdServiceInfo?, code: Int) {
-                mainHandler.post {
-                    if (!queue.finish(generation)) return@post
-                    mainHandler.removeCallbacks(timeoutRunnable)
-                    if (resolveTimeoutRunnable === timeoutRunnable) resolveTimeoutRunnable = null
-                    Log.w(TAG, "resolve failed for ${info?.serviceName ?: name}: $code")
-                    processNextResolution()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            var unregistered = false
+            lateinit var callback: NsdManager.ServiceInfoCallback
+            fun unregisterOnce() {
+                if (unregistered) return
+                unregistered = true
+                runCatching { nsd.unregisterServiceInfoCallback(callback) }
+            }
+            callback = object : NsdManager.ServiceInfoCallback {
+                override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
+                    mainHandler.post {
+                        if (!queue.finish(generation)) return@post
+                        unregistered = true
+                        mainHandler.removeCallbacks(timeoutRunnable)
+                        if (resolveTimeoutRunnable === timeoutRunnable) resolveTimeoutRunnable = null
+                        activeCancelResolution = null
+                        AndroidDiagnostics.nsdLastErrorCode = errorCode
+                        Log.w(TAG, "serviceInfoCallback registration failed for $name: $errorCode")
+                        processNextResolution()
+                    }
+                }
+
+                override fun onServiceUpdated(info: NsdServiceInfo) {
+                    mainHandler.post {
+                        if (!queue.finish(generation)) {
+                            unregisterOnce()
+                            return@post
+                        }
+                        unregisterOnce()
+                        mainHandler.removeCallbacks(timeoutRunnable)
+                        if (resolveTimeoutRunnable === timeoutRunnable) resolveTimeoutRunnable = null
+                        activeCancelResolution = null
+                        val host = DiscoveryUrlFormatter.pickBestAddress(info.hostAddresses)
+                        val url = host?.let { DiscoveryUrlFormatter.formatWsUrl(it, info.port) }
+                        if (url != null) {
+                            onFound(url, info.serviceName)
+                        }
+                        processNextResolution()
+                    }
+                }
+
+                override fun onServiceLost() {
+                    mainHandler.post {
+                        if (queue.finish(generation)) {
+                            unregisterOnce()
+                            mainHandler.removeCallbacks(timeoutRunnable)
+                            if (resolveTimeoutRunnable === timeoutRunnable) resolveTimeoutRunnable = null
+                            activeCancelResolution = null
+                            processNextResolution()
+                        }
+                    }
+                }
+
+                override fun onServiceInfoCallbackUnregistered() {
+                    unregistered = true
                 }
             }
+            activeCancelResolution = { unregisterOnce() }
+            try {
+                nsd.registerServiceInfoCallback(nextService, mainExecutor, callback)
+            } catch (e: Exception) {
+                Log.w(TAG, "registerServiceInfoCallback failed: ${e.message}")
+                mainHandler.removeCallbacks(timeoutRunnable)
+                if (resolveTimeoutRunnable === timeoutRunnable) resolveTimeoutRunnable = null
+                activeCancelResolution = null
+                queue.finish(generation)
+                processNextResolution()
+            }
+        } else {
+            val listener = object : NsdManager.ResolveListener {
+                override fun onResolveFailed(info: NsdServiceInfo?, code: Int) {
+                    mainHandler.post {
+                        if (!queue.finish(generation)) return@post
+                        mainHandler.removeCallbacks(timeoutRunnable)
+                        if (resolveTimeoutRunnable === timeoutRunnable) resolveTimeoutRunnable = null
+                        activeCancelResolution = null
+                        AndroidDiagnostics.nsdLastErrorCode = code
+                        Log.w(TAG, "resolve failed for ${info?.serviceName ?: name}: $code")
+                        processNextResolution()
+                    }
+                }
 
-            override fun onServiceResolved(info: NsdServiceInfo) {
-                mainHandler.post {
-                    if (!queue.finish(generation)) return@post
-                    mainHandler.removeCallbacks(timeoutRunnable)
-                    if (resolveTimeoutRunnable === timeoutRunnable) resolveTimeoutRunnable = null
-                    val host = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                        DiscoveryUrlFormatter.pickBestAddress(info.hostAddresses)
-                    } else {
+                override fun onServiceResolved(info: NsdServiceInfo) {
+                    mainHandler.post {
+                        if (!queue.finish(generation)) return@post
+                        mainHandler.removeCallbacks(timeoutRunnable)
+                        if (resolveTimeoutRunnable === timeoutRunnable) resolveTimeoutRunnable = null
+                        activeCancelResolution = null
                         @Suppress("DEPRECATION")
-                        info.host
+                        val host = info.host
+                        val url = host?.let { DiscoveryUrlFormatter.formatWsUrl(it, info.port) }
+                        if (url != null) {
+                            onFound(url, info.serviceName)
+                        }
+                        processNextResolution()
                     }
-                    val url = host?.let { DiscoveryUrlFormatter.formatWsUrl(it, info.port) }
-                    if (url != null) {
-                        onFound(url, info.serviceName)
-                    }
-                    processNextResolution()
                 }
             }
-        }
 
-        try {
-            @Suppress("DEPRECATION")
-            nsd.resolveService(nextService, listener)
-        } catch (e: Exception) {
-            Log.w(TAG, "resolveService failed: ${e.message}")
-            mainHandler.removeCallbacks(timeoutRunnable)
-            if (resolveTimeoutRunnable === timeoutRunnable) resolveTimeoutRunnable = null
-            queue.finish(generation)
-            processNextResolution()
+            try {
+                @Suppress("DEPRECATION")
+                nsd.resolveService(nextService, listener)
+            } catch (e: Exception) {
+                Log.w(TAG, "resolveService failed: ${e.message}")
+                mainHandler.removeCallbacks(timeoutRunnable)
+                if (resolveTimeoutRunnable === timeoutRunnable) resolveTimeoutRunnable = null
+                activeCancelResolution = null
+                queue.finish(generation)
+                processNextResolution()
+            }
         }
     }
 
+    @Synchronized
     fun start() {
         if (active || queue.started) return
         active = true
+        AndroidDiagnostics.nsdActive = true
         queue.start()
+        val freshListener = newDiscoveryListener()
+        activeListener = freshListener
         try {
-            nsd.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
+            nsd.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, freshListener)
         } catch (e: Exception) {
             Log.w(TAG, "discover failed: ${e.message}")
             active = false
+            activeListener = null
+            AndroidDiagnostics.nsdActive = false
             queue.reset()
         }
     }
 
+    @Synchronized
     fun stop() {
-        if (!active && !queue.started) return
+        val listenerToStop = activeListener
+        if (!active && !queue.started && listenerToStop == null) return
         active = false
-        clearResolveTimeout()
+        activeListener = null
+        AndroidDiagnostics.nsdActive = false
+        clearActiveResolution()
         queue.reset()
-        try {
-            nsd.stopServiceDiscovery(discoveryListener)
-        } catch (_: Exception) {
+        if (listenerToStop != null) {
+            try {
+                nsd.stopServiceDiscovery(listenerToStop)
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -161,7 +278,7 @@ class ServerDiscovery(
  * The instance name is a neutral id, not the user's device name.
  */
 class ReverseAdvertiser(context: Context) {
-    private val nsd = context.getSystemService(Context.NSD_SERVICE) as NsdManager
+    private val nsd = context.applicationContext.getSystemService(Context.NSD_SERVICE) as NsdManager
     @Volatile private var listener: NsdManager.RegistrationListener? = null
 
     fun start(port: Int, deviceId: String, addresses: List<String>) {

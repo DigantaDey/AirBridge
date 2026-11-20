@@ -39,6 +39,8 @@ export interface WifiJoiner {
   join(credentials: WifiCredentials): Promise<JoinResult>;
   /** Leaves the hotspot; returns the network rejoined, if any. */
   leave(ssid: string): Promise<string | null>;
+  /** Count of macOS `<redacted>` SSID hits encountered during join. */
+  getRedactedSsidHits?(): number;
 }
 
 export interface ExecResult { code: number; stdout: string; stderr: string }
@@ -72,6 +74,25 @@ export function parseMacCurrentNetwork(text: string): string | null {
   const m = /Current (?:Wi-Fi|AirPort) Network:\s*(.+)\s*$/im.exec(text);
   const ssid = m?.[1]?.trim();
   return ssid && ssid !== '<redacted>' ? ssid : null;
+}
+
+export function isMacNetworkRedacted(text: string): boolean {
+  const m = /Current (?:Wi-Fi|AirPort) Network:\s*(.+)\s*$/im.exec(text);
+  return m?.[1]?.trim() === '<redacted>';
+}
+
+/** Rejects SSIDs containing unsafe characters for Windows netsh key=value arguments. */
+export function validateNetshSsid(ssid: string): string {
+  for (let i = 0; i < ssid.length; i++) {
+    const code = ssid.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) {
+      throw new Error('Hotspot name contains control characters.');
+    }
+  }
+  if (/["%\r\n]/.test(ssid)) {
+    throw new Error('Hotspot name contains characters not supported by Windows Wi-Fi tools.');
+  }
+  return ssid;
 }
 
 /** networksetup reports join failures on stdout with exit status 0. */
@@ -159,7 +180,8 @@ export function createWifiJoiner(platform: NodeJS.Platform = process.platform, d
   const interfaces = deps.interfaces ?? os.networkInterfaces;
   const addressTimeoutMs = deps.addressTimeoutMs ?? 20_000;
   const retryDelayMs = deps.retryDelayMs ?? 2_500;
-  let state: { device: string; previous: string | null; ssid: string } | null = null;
+  let state: { device: string; previous: string | null; previousRedacted?: boolean; ssid: string } | null = null;
+  let redactedSsidHits = 0;
 
   const waitForAddress = async (device: string, before: string | null): Promise<string | null> => {
     const deadline = Date.now() + addressTimeoutMs;
@@ -179,12 +201,16 @@ export function createWifiJoiner(platform: NodeJS.Platform = process.platform, d
     const device = async () => parseMacWifiDevice((await exec('networksetup', ['-listallhardwareports'], 10_000)).stdout);
     return {
       platform,
+      getRedactedSsidHits: () => redactedSsidHits,
       async unsupportedReason() {
         return (await device()) ? null : 'This Mac has no Wi-Fi interface.';
       },
       async join(c) {
         const dev = (await device()) ?? fail('This Mac has no Wi-Fi interface.');
-        const previous = parseMacCurrentNetwork((await exec('networksetup', ['-getairportnetwork', dev], 10_000)).stdout);
+        const currentStdout = (await exec('networksetup', ['-getairportnetwork', dev], 10_000)).stdout;
+        const previousRedacted = isMacNetworkRedacted(currentStdout);
+        if (previousRedacted) redactedSsidHits++;
+        const previous = parseMacCurrentNetwork(currentStdout);
         const before = ipv4On(interfaces(), dev);
         // Wi-Fi may be switched off.
         await exec('networksetup', ['-setairportpower', dev, 'on'], 10_000);
@@ -193,7 +219,7 @@ export function createWifiJoiner(platform: NodeJS.Platform = process.platform, d
           const r = await exec('networksetup', ['-setairportnetwork', dev, c.ssid, c.psk], 45_000);
           const problem = r.code !== 0 ? (r.stderr || r.stdout || `exit ${r.code}`) : macJoinFailure(`${r.stdout}\n${r.stderr}`);
           if (!problem) {
-            state = { device: dev, previous, ssid: c.ssid };
+            state = { device: dev, previous, previousRedacted, ssid: c.ssid };
             return { device: dev, address: await waitForAddress(dev, before), previous };
           }
           lastError = problem === 'not-found' ? `The hotspot “${c.ssid}” is not visible to this Mac yet.` : problem;
@@ -212,6 +238,11 @@ export function createWifiJoiner(platform: NodeJS.Platform = process.platform, d
         if (s.previous && s.previous !== ssid) {
           const r = await exec('networksetup', ['-setairportnetwork', s.device, s.previous], 45_000);
           if (r.code === 0 && !macJoinFailure(r.stdout)) return s.previous;
+        }
+        // When macOS 14+ redacted the previous SSID due to missing Location Services,
+        // do not blindly power-cycle Wi-Fi off/on (which drops all active connections).
+        if (s.previousRedacted) {
+          return null;
         }
         // Let macOS pick its preferred network again.
         await exec('networksetup', ['-setairportpower', s.device, 'off'], 10_000);
@@ -273,10 +304,12 @@ export function createWifiJoiner(platform: NodeJS.Platform = process.platform, d
     const iface = async () => parseNetshInterfaces((await exec('netsh', ['wlan', 'show', 'interfaces'], 10_000)).stdout);
     return {
       platform,
+      getRedactedSsidHits: () => redactedSsidHits,
       async unsupportedReason() {
         return (await iface()).name ? null : 'No Wi-Fi adapter is available.';
       },
       async join(c) {
+        const safeSsid = validateNetshSsid(c.ssid);
         const { name, ssid: previous } = await iface();
         if (!name) return fail('No Wi-Fi adapter is available.');
         const before = ipv4On(interfaces(), name);
@@ -291,11 +324,11 @@ export function createWifiJoiner(platform: NodeJS.Platform = process.platform, d
         }
         let lastError = '';
         for (let attempt = 0; attempt < 4; attempt++) {
-          const r = await exec('netsh', ['wlan', 'connect', `name=${c.ssid}`, `ssid=${c.ssid}`, `interface=${name}`], 20_000);
+          const r = await exec('netsh', ['wlan', 'connect', `name=${safeSsid}`, `ssid=${safeSsid}`, `interface=${name}`], 20_000);
           if (r.code === 0) {
             const address = await waitForAddress(name, before);
             if (address) {
-              state = { device: name, previous: previous && previous !== c.ssid ? previous : null, ssid: c.ssid };
+              state = { device: name, previous: previous && previous !== safeSsid ? previous : null, ssid: safeSsid };
               return { device: name, address, previous: state.previous };
             }
             lastError = 'connected but no address was assigned';
@@ -304,16 +337,25 @@ export function createWifiJoiner(platform: NodeJS.Platform = process.platform, d
           }
           await sleep(retryDelayMs);
         }
-        await exec('netsh', ['wlan', 'delete', 'profile', `name=${c.ssid}`], 10_000);
-        return fail(`Could not join “${c.ssid}”: ${lastError}`, c);
+        await exec('netsh', ['wlan', 'delete', 'profile', `name=${safeSsid}`], 10_000);
+        return fail(`Could not join “${safeSsid}”: ${lastError}`, c);
       },
       async leave(ssid) {
         const s = state;
         state = null;
-        await exec('netsh', ['wlan', 'delete', 'profile', `name=${ssid}`], 10_000);
+        const safeSsid = validateNetshSsid(ssid);
+        await exec('netsh', ['wlan', 'delete', 'profile', `name=${safeSsid}`], 10_000);
         if (s?.previous) {
-          const r = await exec('netsh', ['wlan', 'connect', `name=${s.previous}`, `interface=${s.device}`], 20_000);
-          if (r.code === 0) return s.previous;
+          let safePrev: string | null;
+          try {
+            safePrev = validateNetshSsid(s.previous);
+          } catch {
+            safePrev = null;
+          }
+          if (safePrev) {
+            const r = await exec('netsh', ['wlan', 'connect', `name=${safePrev}`, `interface=${s.device}`], 20_000);
+            if (r.code === 0) return s.previous;
+          }
         }
         return null;
       },

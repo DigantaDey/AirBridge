@@ -85,6 +85,8 @@ export function buildMdnsAnnouncement(
 
 export interface MdnsHandle {
   active: boolean;
+  /** Last socket/multicast error encountered, or null when healthy. */
+  getLastError: () => string | null;
   /** Re-read the interface list (e.g. after the computer joined a hotspot) and re-announce. */
   refresh: () => void;
   close: () => void;
@@ -96,74 +98,127 @@ export interface MdnsOptions {
   getAddresses?: () => string[];
 }
 
+/**
+ * RFC 6762 §6: respond only to genuine DNS queries (QR === 0, QDCOUNT > 0),
+ * never to mDNS response/announcement packets (QR === 1), preventing multicast
+ * loopback response storms.
+ */
+export function isAirBridgeMdnsQuery(msg: Buffer): boolean {
+  if (msg.length < 12) return false;
+  const flags = msg.readUInt16BE(2);
+  if ((flags & 0x8000) !== 0) return false; // ignore responses
+  const qdCount = msg.readUInt16BE(4);
+  if (qdCount === 0) return false;
+  return msg.includes(Buffer.from('_airbridge'));
+}
+
 export function startMdnsResponder(port: number, options: MdnsOptions = {}): MdnsHandle {
   const getAddresses = options.getAddresses ?? (() => getLanIpv4Addresses());
   let socket: dgram.Socket | null = null;
   let timer: NodeJS.Timeout | null = null;
   let active = false;
+  let lastError: string | null = null;
+  let lastQueryAnnounceAt = 0;
+  const MIN_QUERY_REPLY_MS = 1_000;
   const joined = new Set<string>();
+
+  const closeSocket = () => {
+    active = false;
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+    const s = socket;
+    socket = null;
+    joined.clear();
+    if (s) {
+      try {
+        s.close();
+      } catch {
+        // ignore
+      }
+    }
+  };
 
   const announce = () => {
     if (!socket || !active) return;
-    for (const address of getAddresses()) {
+    const currentAddresses = new Set(getAddresses());
+    for (const oldAddress of [...joined]) {
+      if (!currentAddresses.has(oldAddress)) {
+        try {
+          socket.dropMembership(MDNS_MULTICAST_ADDR, oldAddress);
+        } catch {
+          // Interface may already be gone
+        }
+        joined.delete(oldAddress);
+      }
+    }
+    for (const address of currentAddresses) {
       try {
         if (!joined.has(address)) {
           socket.addMembership(MDNS_MULTICAST_ADDR, address);
           joined.add(address);
         }
-      } catch {
+      } catch (err) {
         // Already joined or the interface vanished; sending may still work.
+        lastError = err instanceof Error ? err.message : String(err);
       }
       try {
         socket.setMulticastInterface(address);
         const packet = buildMdnsAnnouncement(port, address, { protocol: options.protocol });
-        socket.send(packet, 0, packet.length, MDNS_PORT, MDNS_MULTICAST_ADDR, () => {});
-      } catch {
+        socket.send(packet, 0, packet.length, MDNS_PORT, MDNS_MULTICAST_ADDR, (err) => {
+          if (err) lastError = err.message;
+        });
+      } catch (err) {
         // Interface went away between listing and sending.
+        lastError = err instanceof Error ? err.message : String(err);
       }
     }
   };
 
   try {
     socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-    socket.on('error', () => {
+    socket.on('error', (err) => {
       // UDP multicast is often restricted inside sandboxes/containers.
-      active = false;
+      lastError = err instanceof Error ? err.message : String(err);
+      closeSocket();
     });
     socket.bind(MDNS_PORT, () => {
       try {
-        socket?.setMulticastTTL(255);
-        socket?.setMulticastLoopback(true);
+        if (!socket) return;
+        socket.setMulticastTTL(255);
+        socket.setMulticastLoopback(true);
         active = true;
         announce();
         timer = setInterval(announce, 30_000);
         timer.unref();
-        socket?.on('message', (msg) => {
-          if (msg.includes(Buffer.from('_airbridge'))) announce();
+        socket.on('message', (msg) => {
+          if (!isAirBridgeMdnsQuery(msg)) return;
+          const now = Date.now();
+          if (now - lastQueryAnnounceAt < MIN_QUERY_REPLY_MS) return;
+          lastQueryAnnounceAt = now;
+          announce();
         });
-      } catch {
-        active = false;
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        closeSocket();
       }
     });
-  } catch {
-    active = false;
+  } catch (err) {
+    lastError = err instanceof Error ? err.message : String(err);
+    closeSocket();
   }
 
   return {
     get active() {
       return active;
     },
+    getLastError() {
+      return lastError;
+    },
     refresh: announce,
     close() {
-      active = false;
-      if (timer) clearInterval(timer);
-      if (socket) {
-        try {
-          socket.close();
-        } catch {
-          // ignore
-        }
-      }
+      closeSocket();
     },
   };
 }

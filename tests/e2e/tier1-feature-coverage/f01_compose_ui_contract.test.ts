@@ -37,7 +37,7 @@ describe('F01: Jetpack Compose Native UI Contract', () => {
   it('implements adaptive Material 3 navigation (NavigationBar < 600dp, NavigationRail >= 600dp)', async () => {
     const app = await readRepoFile('android/app/src/main/kotlin/com/airbridge/app/ui/AirBridgeApp.kt');
     expect(app).toContain('enum class AirBridgeDestination');
-    expect(app).toContain('val useRail = uiState.isPaired && maxWidth >= 600.dp');
+    expect(app).toContain('val useRail = uiState.isPaired && (maxWidth >= 600.dp || maxHeight < 480.dp)');
     expect(app).toContain('NavigationBar {');
     expect(app).toContain('NavigationRail(');
     expect(app).toContain('contentWindowInsets = WindowInsets.safeDrawing');

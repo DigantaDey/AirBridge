@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { PeerSummary } from "../../shared/protocol.js";
-import type { ClipboardBeamItem } from "../engine/warpClient.js";
+import { isSafeHttpUrl, type ClipboardBeamItem } from "../engine/warpClient.js";
 
 interface ClipboardCenterProps {
   peers: PeerSummary[];
@@ -45,11 +45,17 @@ export function ClipboardCenter({
   onClose,
 }: ClipboardCenterProps) {
   const [text, setText] = useState(prefill ?? "");
-  const [peerId, setPeerId] = useState<string>(
+  const [selectedPeerId, setSelectedPeerId] = useState<string>(
     initialPeerId && peers.some((p) => p.peerId === initialPeerId)
       ? initialPeerId
       : (peers[0]?.peerId ?? ""),
   );
+  // Peers can arrive after the modal opened (e.g. right after the Share Sheet
+  // redirected in). Keep the destination select on a valid value.
+  const peerId =
+    selectedPeerId && peers.some((p) => p.peerId === selectedPeerId)
+      ? selectedPeerId
+      : (peers[0]?.peerId ?? "");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedBeamId, setCopiedBeamId] = useState<string | null>(null);
@@ -57,14 +63,6 @@ export function ClipboardCenter({
   const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
   const [imageName, setImageName] = useState<string>("");
   const imageInputRef = useRef<HTMLInputElement>(null);
-
-  // Peers can arrive after the modal opened (e.g. right after the Share Sheet
-  // redirected in). Keep the destination select on a valid value.
-  useEffect(() => {
-    if (!peerId && peers[0]) {
-      setPeerId(peers[0].peerId);
-    }
-  }, [peers, peerId]);
 
   useEffect(() => {
     textareaRef.current?.focus();
@@ -293,7 +291,7 @@ export function ClipboardCenter({
               <select
                 id="clipboard-peer"
                 value={peerId}
-                onChange={(event) => setPeerId(event.target.value)}
+                onChange={(event) => setSelectedPeerId(event.target.value)}
                 disabled={peers.length === 0}
               >
                 {peers.length === 0 ? (
@@ -357,7 +355,7 @@ export function ClipboardCenter({
                     <pre>{item.text}</pre>
                   )}
                   <div className="clipboard-item-actions">
-                    {item.contentType === "url" && (
+                    {item.contentType === "url" && isSafeHttpUrl(item.text) && (
                       <a
                         className="text-button"
                         href={item.text}

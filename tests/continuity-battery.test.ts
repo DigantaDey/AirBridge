@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { ContinuityManager, type ContinuityHost, type PhoneBatteryStatusView, type ScreenVideoFrame } from '../src/client/engine/continuity.js';
 import { encodeScreenFrame, encodeScreenFrameAad, encodeScreenH264Packet, SCREEN_CODEC_H264 } from '../src/shared/continuity.js';
 import type { ControlPayload, PeerSummary } from '../src/shared/protocol.js';

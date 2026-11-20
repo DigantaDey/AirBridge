@@ -1,4 +1,4 @@
-# AirBridge installer for Windows — no SmartScreen drama, no accounts, no fees.
+﻿# AirBridge installer for Windows — no SmartScreen drama, no accounts, no fees.
 #
 #   powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.ps1 -UseBasicParsing | iex"
 #
@@ -39,22 +39,37 @@ if (-not (Test-Path "$Exe.tmp") -or (Get-Item "$Exe.tmp").Length -eq 0) {
   throw "download produced an empty file"
 }
 
-# Integrity check against the release manifest (skipped if none is published).
+# Integrity check against the release manifest (fail closed if missing or unverified).
+$SumsUrl = if ($Version) { "$Base/download/$Version/SHA256SUMS.txt" } else { "$Base/latest/download/SHA256SUMS.txt" }
+$SumsFile = "$Exe.sums.tmp"
 try {
-  $SumsUrl = if ($Version) { "$Base/download/$Version/SHA256SUMS.txt" } else { "$Base/latest/download/SHA256SUMS.txt" }
-  $Sums = (& curl.exe -fsSL --proto "=https" --tlsv1.2 $SumsUrl) 2>$null
-  $line = $Sums | Where-Object { $_ -match [regex]::Escape($Asset) } | Select-Object -First 1
-  if ($line) {
-    $want = ($line -split '\s+')[0].ToLower()
-    $got  = (Get-FileHash "$Exe.tmp" -Algorithm SHA256).Hash.ToLower()
-    if ($want -ne $got) {
-      Remove-Item "$Exe.tmp" -ErrorAction SilentlyContinue
-      throw "checksum mismatch for $Asset (expected $want, got $got)"
-    }
-    Write-Host "▸ checksum verified (sha256 $($got.Substring(0,16))…)"
+  & curl.exe -fsSL --proto "=https" --tlsv1.2 --retry 2 -o $SumsFile $SumsUrl
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path $SumsFile) -or (Get-Item $SumsFile).Length -eq 0) {
+    throw "could not download SHA256SUMS.txt from $SumsUrl"
   }
+  $want = $null
+  foreach ($rawLine in (Get-Content -Path $SumsFile)) {
+    $trimmed = $rawLine.Trim()
+    if ($trimmed -match '^([0-9a-fA-F]{64})\s+\*?(\S+)$') {
+      if ($matches[2] -ceq $Asset) {
+        $want = $matches[1].ToLowerInvariant()
+        break
+      }
+    }
+  }
+  if (-not $want) {
+    throw "SHA256SUMS.txt has no valid SHA-256 entry for $Asset"
+  }
+  $got = (Get-FileHash "$Exe.tmp" -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($want -ne $got) {
+    throw "checksum mismatch for $Asset (expected $want, got $got)"
+  }
+  Write-Host "▸ checksum verified (sha256 $($got.Substring(0,16))…)"
 } catch {
-  if ("$($_.Exception.Message)" -like "checksum mismatch*") { throw }
+  Remove-Item "$Exe.tmp" -ErrorAction SilentlyContinue
+  throw
+} finally {
+  Remove-Item $SumsFile -ErrorAction SilentlyContinue
 }
 
 Move-Item -Force "$Exe.tmp" $Exe

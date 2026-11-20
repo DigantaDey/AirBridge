@@ -5,27 +5,37 @@ import java.net.InetAddress
 import java.util.ArrayDeque
 
 /**
- * Sequential mDNS resolution state machine with deduplication and generation
- * tokens. Android's NsdManager allows only one `resolveService` call at a
- * time; using explicit generation tokens guarantees a slow callback arriving
- * after a timeout cannot clear `inFlightName` or launch overlapping resolves.
+ * Thread-safe sequential mDNS resolution state machine with deduplication and
+ * generation tokens. Android's NsdManager allows only one active resolution
+ * at a time on older APIs; using explicit generation tokens and `@Synchronized`
+ * state transitions guarantees concurrent callers (`worker`, `ViewModel`, and
+ * `mainHandler`) or late callbacks arriving after a timeout cannot corrupt
+ * `inFlightName` or launch overlapping resolves.
  */
 class DiscoveryQueue<T> {
     private data class QueuedItem<T>(val name: String, val item: T)
 
     private val pending = ArrayDeque<QueuedItem<T>>()
+
     var activeGeneration: Long = 0L
-        private set
-    var inFlightName: String? = null
-        private set
-    var started: Boolean = false
+        @Synchronized get
         private set
 
+    var inFlightName: String? = null
+        @Synchronized get
+        private set
+
+    var started: Boolean = false
+        @Synchronized get
+        private set
+
+    @Synchronized
     fun start() {
         started = true
     }
 
     /** Adds [item] if not already queued or actively resolving. Returns true if queued. */
+    @Synchronized
     fun enqueue(name: String, item: T): Boolean {
         if (!started) return false
         if (name == inFlightName) return false
@@ -35,6 +45,7 @@ class DiscoveryQueue<T> {
     }
 
     /** Removes a lost service from the pending queue. */
+    @Synchronized
     fun removePending(name: String) {
         val it = pending.iterator()
         while (it.hasNext()) {
@@ -46,6 +57,7 @@ class DiscoveryQueue<T> {
      * Pops the next item to resolve if idle and started, advancing
      * [activeGeneration]. Returns `(generation, name, item)` or null.
      */
+    @Synchronized
     fun nextToResolve(): Triple<Long, String, T>? {
         if (!started || inFlightName != null || pending.isEmpty()) return null
         val next = pending.removeFirst()
@@ -58,14 +70,17 @@ class DiscoveryQueue<T> {
      * Completes or times out an active resolution ONLY if [generation] still
      * matches [activeGeneration]. Returns true if this completion was current.
      */
+    @Synchronized
     fun finish(generation: Long): Boolean {
         if (generation != activeGeneration || inFlightName == null) return false
         inFlightName = null
         return true
     }
 
+    @Synchronized
     fun pendingCount(): Int = pending.size
 
+    @Synchronized
     fun reset() {
         started = false
         pending.clear()

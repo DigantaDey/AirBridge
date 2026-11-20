@@ -51,9 +51,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSHumanReadableCopyright</key><string>AirBridge — open source, end-to-end encrypted</string>
+  <key>NSHumanReadableCopyright</key><string>© 2026 Diganta Dey — AirBridge (open source, end-to-end encrypted)</string>
   <key>NSLocalNetworkUsageDescription</key><string>AirBridge connects directly to your phone on the local network to transfer files and clipboard content.</string>
   <key>NSBluetoothAlwaysUsageDescription</key><string>Your paired phone can hand over its hotspot over Bluetooth when it and this Mac share no network. Only the paired phone can use it.</string>
+  <key>NSMicrophoneUsageDescription</key><string>AirBridge uses your Mac microphone when you route a paired phone call's audio to your Mac.</string>
   <key>NSBonjourServices</key><array><string>_airbridge._tcp</string><string>_airbridge-rv._tcp</string></array>
 </dict></plist>
 PLIST

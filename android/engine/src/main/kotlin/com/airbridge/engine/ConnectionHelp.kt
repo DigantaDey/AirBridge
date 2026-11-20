@@ -116,9 +116,9 @@ object ConnectionHelp {
         val lower = text.lowercase()
         when (phase) {
             ConnectPhase.TCP -> return when {
+                chain(t).any { it is UnknownHostException } -> FailureKind.DNS
                 chain(t).any { it is SocketTimeoutException } || "timed out" in lower -> FailureKind.TCP_TIMEOUT
                 chain(t).any { it is NoRouteToHostException } || "unreachable" in lower || "no route" in lower -> FailureKind.NO_ROUTE
-                chain(t).any { it is UnknownHostException } -> FailureKind.DNS
                 chain(t).any { it is ConnectException } || "refused" in lower -> FailureKind.TCP_REFUSED
                 // Only a close *we* initiated is a cancellation (handled by
                 // closedLocally above); anything else must stay visible.

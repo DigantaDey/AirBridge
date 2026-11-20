@@ -25,6 +25,7 @@ import android.telephony.PhoneStateListener
 import android.telephony.TelephonyManager
 import android.util.Log
 import com.airbridge.engine.AirCrypto
+import com.airbridge.engine.CallAudioState
 import com.airbridge.engine.CallCommand
 import com.airbridge.engine.CallCommandResult
 import com.airbridge.engine.CallController
@@ -37,6 +38,7 @@ import com.airbridge.engine.ContactShareItem
 import com.airbridge.engine.Continuity
 import com.airbridge.engine.ContinuityChannel
 import com.airbridge.engine.ContinuityException
+import com.airbridge.engine.ScreenKeyframeRequester
 import com.airbridge.engine.ScreenShareRequest
 import java.util.concurrent.Executors
 import kotlin.math.abs
@@ -58,12 +60,16 @@ object ContinuityPermissions {
         Manifest.permission.CALL_PHONE,
     )
 
+    const val CALL_AUDIO = Manifest.permission.RECORD_AUDIO
+
     private fun granted(context: Context, permission: String) =
         context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 
     fun contactsGranted(context: Context) = granted(context, Manifest.permission.READ_CONTACTS)
 
     fun callsGranted(context: Context) = CALLS.all { granted(context, it) }
+
+    fun callAudioGranted(context: Context) = granted(context, CALL_AUDIO)
 
     fun hasTelephony(context: Context) = context.packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)
 
@@ -357,7 +363,19 @@ class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
 
     private val contacts = AndroidContactProvider(context)
     @Volatile private var channel: ContinuityChannel? = null
-    private val calls = CallMonitor(context, contacts) { call -> channel?.publishCallState(call) }
+    private val callAudio = CallAudioBridge(
+        context = context,
+        onSendAudio = { peerId, callId, pcm, sr, ch, frames, ptsMs ->
+            channel?.sendCallAudio(peerId, callId, pcm, sr, ch, frames, ptsMs) ?: false
+        },
+        onStateChanged = { peerId, callId, state ->
+            channel?.publishCallAudioState(peerId, callId, state)
+        },
+    )
+    private val calls = CallMonitor(context, contacts) { call ->
+        if (call.state == "ended") callAudio.onCallEnded(call.callId)
+        channel?.publishCallState(call)
+    }
     private var lastFeatures: List<String> = emptyList()
     @Volatile private var lastBattery: BatteryReading? = null
     private var batteryReceiverRegistered = false
@@ -397,6 +415,10 @@ class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
         this.channel = channel
         channel.contactProvider = contacts
         channel.callController = calls
+        channel.callAudioController = callAudio
+        channel.screenKeyframeRequester = ScreenKeyframeRequester { sessionId, reason ->
+            ScreenShareService.requestKeyFrame(sessionId, reason)
+        }
         refresh(announce = false)
         lastBattery?.let(::publishBattery)
     }
@@ -430,7 +452,12 @@ class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
         ch.callsReady = callsOk
         val screenSharingEnabled = prefs.screenSharing && ContinuityPermissions.screenCaptureSupported(context)
         ch.screenSourceAvailable = screenSharingEnabled
-        if (callsOk) calls.start() else calls.stop()
+        if (callsOk) {
+            calls.start()
+        } else {
+            callAudio.stopAll()
+            calls.stop()
+        }
         if (!screenSharingEnabled) {
             // A switch-off is a real revocation, not just a change to the next
             // feature advertisement: reject queued requests and terminate any
@@ -465,6 +492,7 @@ class PhoneContinuity(private val context: Context, private val prefs: Prefs) {
     }
 
     fun detach() {
+        callAudio.stopAll()
         calls.shutdown()
         if (batteryReceiverRegistered) {
             runCatching { context.unregisterReceiver(batteryReceiver) }

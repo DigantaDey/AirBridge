@@ -185,8 +185,8 @@ function setNativeValue(
 
 describe("AirBridge app UI", () => {
   beforeEach(async () => {
-    try { window.localStorage?.clear(); } catch (_e) { /* ignore */ }
-    try { localStorage?.clear(); } catch (_e) { /* ignore */ }
+    try { window.localStorage?.clear(); } catch { /* ignore */ }
+    try { localStorage?.clear(); } catch { /* ignore */ }
     FakeSocket.instances = [];
     FakeSocket.lastInstance = null;
     const peerKeys = await webcrypto.subtle.generateKey(
@@ -199,8 +199,7 @@ describe("AirBridge app UI", () => {
     );
     peerPublicKeyB64 = bytesToBase64Url(rawPeerPub);
     peerPrivateKey = peerKeys.privateKey;
-    // @ts-expect-error fake socket
-    globalThis.WebSocket = FakeSocket;
+    (globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeSocket;
     if (!navigator.clipboard) {
       Object.defineProperty(navigator, "clipboard", {
         value: {
@@ -470,8 +469,7 @@ describe("AirBridge app UI", () => {
   it("shows the received-files folder in Settings, saves a new path, and locates it with the folder icon", async () => {
     const calls: Array<{ url: string; method?: string; body?: string }> = [];
     const originalFetch = globalThis.fetch;
-    // @ts-expect-error test fetch stub
-    globalThis.fetch = async (url: string, init?: { method?: string; body?: string }) => {
+    (globalThis as unknown as { fetch: unknown }).fetch = async (url: string, init?: { method?: string; body?: string }) => {
       calls.push({ url: String(url), method: init?.method, body: init?.body });
       if (String(url) === "/api/received-folder" && !init?.method) {
         return { ok: true, json: async () => ({ downloadDir: "/Users/test/Downloads/AirBridge", enabled: true, autoSaveToDownloads: true }) };

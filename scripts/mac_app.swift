@@ -36,6 +36,23 @@ struct ServerHealth {
     let pid: Int32?
 }
 
+enum LoopbackHTTP {
+    static let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.connectionProxyDictionary = [:]
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 600
+        return URLSession(configuration: config)
+    }()
+}
+
+private func airbridgeStateDir() -> URL {
+    if let envHome = ProcessInfo.processInfo.environment["HOME"], !envHome.isEmpty {
+        return URL(fileURLWithPath: envHome, isDirectory: true).appendingPathComponent(".airbridge")
+    }
+    return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".airbridge")
+}
+
 final class ServiceSupervisor {
     let port: String
     let binaryPath: String
@@ -49,14 +66,16 @@ final class ServiceSupervisor {
     }
     private var process: Process?
     private let stateLock = NSLock()
+    private let logLock = NSLock()
     private var _quitting = false
     private var _ownPid: Int32 = 0
+    private var _earlyExits = 0
     /// Set from the main thread on quit while the supervisor queue may be busy.
     private var quitting: Bool {
         get { stateLock.lock(); defer { stateLock.unlock() }; return _quitting }
         set { stateLock.lock(); _quitting = newValue; stateLock.unlock() }
     }
-    private var ownPid: Int32 {
+    private(set) var ownPid: Int32 {
         get { stateLock.lock(); defer { stateLock.unlock() }; return _ownPid }
         set { stateLock.lock(); _ownPid = newValue; stateLock.unlock() }
     }
@@ -65,7 +84,10 @@ final class ServiceSupervisor {
     /// healthy service immediately after wake before its event loop resumed.
     private var unresponsiveSince: DispatchTime?
     /// Crash-loop backoff: consecutive starts that exited early, and when the next start may happen.
-    private var earlyExits = 0
+    private(set) var earlyExits: Int {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _earlyExits }
+        set { stateLock.lock(); _earlyExits = newValue; stateLock.unlock() }
+    }
     private var nextStartAllowed = Date.distantPast
     private var startedAt = Date.distantPast
     /// A live service that is merely busy (first-run TLS setup, a large transfer,
@@ -111,10 +133,22 @@ final class ServiceSupervisor {
 
     /// Stop the service this app started (not one started elsewhere).
     func stop() {
-        quitting = true
+        stateLock.lock()
+        _quitting = true
+        let pid = _ownPid
+        _ownPid = 0
+        stateLock.unlock()
         // Never block quitting behind a start-up wait on the supervisor queue.
-        let pid = ownPid
-        if pid > 1 { kill(pid, SIGTERM) }
+        if pid > 1 {
+            kill(pid, SIGTERM)
+            for _ in 0..<20 {
+                if kill(pid, 0) != 0 { break }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            if kill(pid, 0) == 0 {
+                kill(pid, SIGKILL)
+            }
+        }
         queue.async { self.timer?.cancel() }
     }
 
@@ -363,7 +397,7 @@ final class ServiceSupervisor {
         request.httpMethod = "GET"
         let semaphore = DispatchSemaphore(value: 0)
         var result: ServerHealth?
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+        let task = LoopbackHTTP.session.dataTask(with: request) { data, response, error in
             defer { semaphore.signal() }
             guard error == nil, let http = response as? HTTPURLResponse, http.statusCode == 200, let data = data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -379,27 +413,32 @@ final class ServiceSupervisor {
     // MARK: - Logging
 
     private var logURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".airbridge/server.log")
+        airbridgeStateDir().appendingPathComponent("server.log")
     }
 
     private func logHandle() -> FileHandle? {
+        logLock.lock()
+        defer { logLock.unlock() }
+        return unlockedLogHandle()
+    }
+
+    private func unlockedLogHandle() -> FileHandle? {
         let url = logURL
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
            let size = attrs[.size] as? NSNumber, size.intValue > 5_000_000 {
             try? FileManager.default.removeItem(at: url)
         }
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-        }
-        guard let handle = try? FileHandle(forWritingTo: url) else { return nil }
-        handle.seekToEndOfFile()
-        return handle
+        let fd = open(url.path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        guard fd >= 0 else { return nil }
+        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
     }
 
     func log(_ message: String) {
+        logLock.lock()
+        defer { logLock.unlock() }
         let line = "[\(ISO8601DateFormatter().string(from: Date()))] [app] \(message)\n"
-        if let handle = logHandle(), let data = line.data(using: .utf8) {
+        if let handle = unlockedLogHandle(), let data = line.data(using: .utf8) {
             handle.write(data)
             try? handle.close()
         }
@@ -412,12 +451,24 @@ final class ServiceSupervisor {
 /// on the main queue as (type, JSON object).
 final class ShellEventStream: NSObject, URLSessionDataDelegate {
     private let url: URL
+    private let lock = NSLock()
+    private let retryQueue = DispatchQueue(label: "airbridge.events")
     private var session: URLSession!
     private var task: URLSessionDataTask?
     private var buffer = Data()
     private var retryDelay: TimeInterval = 1
     private var stopped = false
+    private var _connected = false
+    private var _lastError: String?
     var onEvent: ((String, [String: Any]) -> Void)?
+
+    var isConnected: Bool {
+        lock.lock(); defer { lock.unlock() }; return _connected
+    }
+
+    var lastError: String? {
+        lock.lock(); defer { lock.unlock() }; return _lastError
+    }
 
     init(port: String, capabilities: [String]) {
         var components = URLComponents(string: "http://localhost:\(port)/api/local/events")!
@@ -425,61 +476,117 @@ final class ShellEventStream: NSObject, URLSessionDataDelegate {
         url = components.url!
         super.init()
         let config = URLSessionConfiguration.ephemeral
+        config.connectionProxyDictionary = [:]
         config.timeoutIntervalForRequest = 45 // heartbeats arrive every 15 s
         config.timeoutIntervalForResource = .infinity
         session = URLSession(configuration: config, delegate: self, delegateQueue: OperationQueue())
     }
 
     func start() {
+        lock.lock()
         stopped = false
+        lock.unlock()
         connect()
     }
 
     func stop() {
+        lock.lock()
         stopped = true
-        task?.cancel()
+        _connected = false
+        let currentTask = task
+        task = nil
+        lock.unlock()
+        currentTask?.cancel()
         session.invalidateAndCancel()
     }
 
+    func reconnectNowIfDisconnected() {
+        lock.lock()
+        let shouldConnect = !stopped && !_connected && task == nil
+        if shouldConnect {
+            retryDelay = 1
+        }
+        lock.unlock()
+        if shouldConnect {
+            retryQueue.async { [weak self] in self?.connect() }
+        }
+    }
+
     private func connect() {
-        guard !stopped else { return }
+        lock.lock()
+        if stopped || task != nil {
+            lock.unlock()
+            return
+        }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 45)
         request.setValue("1", forHTTPHeaderField: "X-AirBridge-Shell")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         buffer = Data()
-        task = session.dataTask(with: request)
-        task?.resume()
+        let newTask = session.dataTask(with: request)
+        task = newTask
+        lock.unlock()
+        newTask.resume()
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        let ok = (response as? HTTPURLResponse)?.statusCode == 200
-        if ok { retryDelay = 1 }
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let ok = code == 200
+        lock.lock()
+        if ok {
+            retryDelay = 1
+            _connected = true
+            _lastError = nil
+        } else {
+            _connected = false
+            _lastError = "HTTP \(code)"
+        }
+        lock.unlock()
         completionHandler(ok ? .allow : .cancel)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
         buffer.append(data)
         let separator = Data("\n\n".utf8)
+        var eventsToDispatch: [(String, [String: Any])] = []
         while let range = buffer.range(of: separator) {
             let block = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
             buffer.removeSubrange(buffer.startIndex..<range.upperBound)
             guard let text = String(data: block, encoding: .utf8) else { continue }
             var type = "message"
-            var payload = ""
+            var dataLines: [String] = []
             for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
                 if line.hasPrefix("event: ") { type = String(line.dropFirst(7)) }
-                else if line.hasPrefix("data: ") { payload += String(line.dropFirst(6)) }
+                else if line.hasPrefix("data: ") { dataLines.append(String(line.dropFirst(6))) }
+                else if line.hasPrefix("data:") { dataLines.append(String(line.dropFirst(5))) }
             }
+            let payload = dataLines.joined(separator: "\n")
             guard !payload.isEmpty, let json = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { continue }
+            eventsToDispatch.append((type, json))
+        }
+        lock.unlock()
+        for (type, json) in eventsToDispatch {
             DispatchQueue.main.async { self.onEvent?(type, json) }
         }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard !stopped else { return }
+        lock.lock()
+        if self.task === task {
+            self.task = nil
+        }
+        _connected = false
+        if let error = error {
+            _lastError = error.localizedDescription
+        }
+        if stopped {
+            lock.unlock()
+            return
+        }
         let delay = retryDelay
         retryDelay = min(10, retryDelay * 2)
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.connect() }
+        lock.unlock()
+        retryQueue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.connect() }
     }
 }
 
@@ -508,6 +615,26 @@ final class HandoffPeripheral: NSObject, CBPeripheralManagerDelegate {
     private var advertisingWanted = false
     private var stopped = false
     private var warnedNoUsageString = false
+    private var pendingStatusUpdate = false
+
+    var bleStateDescription: String {
+        guard let manager = manager else {
+            return warnedNoUsageString ? "disabled-no-usage-key" : "uninitialized"
+        }
+        switch manager.state {
+        case .poweredOn: return "poweredOn"
+        case .poweredOff: return "poweredOff"
+        case .unauthorized: return "unauthorized"
+        case .unsupported: return "unsupported"
+        case .resetting: return "resetting"
+        case .unknown: return "unknown"
+        @unknown default: return "unknown"
+        }
+    }
+
+    var isAdvertisingActive: Bool {
+        manager?.isAdvertising ?? false
+    }
 
     init(port: String, log: @escaping (String) -> Void) {
         self.port = port
@@ -537,7 +664,7 @@ final class HandoffPeripheral: NSObject, CBPeripheralManagerDelegate {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         }
-        URLSession.shared.dataTask(with: req) { data, response, _ in
+        LoopbackHTTP.session.dataTask(with: req) { data, response, _ in
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             DispatchQueue.main.async { completion(code, json) }
@@ -549,7 +676,7 @@ final class HandoffPeripheral: NSObject, CBPeripheralManagerDelegate {
         guard !stopped else { return }
         HandoffPeripheral.shellRequest(port: port, path: "/api/local/handoff/beacon") { [weak self] code, json in
             guard let self = self, !self.stopped else { return }
-            var next: TimeInterval = 60
+            var next: TimeInterval = code == 0 ? 3 : 60
             if code == 200, let json = json, json["enabled"] as? Bool == true, json["shared"] as? Bool == true,
                let tagB64 = json["tag"] as? String, let tag = Data(base64Encoded: tagB64),
                let uuids = json["uuids"] as? [String: String] {
@@ -648,7 +775,7 @@ final class HandoffPeripheral: NSObject, CBPeripheralManagerDelegate {
         }
         var envelope = Data()
         for r in requests.sorted(by: { $0.offset < $1.offset }) {
-            guard let v = r.value, r.offset == envelope.count, envelope.count + v.count <= 1024 else {
+            guard let v = r.value, r.offset == envelope.count, envelope.count + v.count <= 512 else {
                 peripheral.respond(to: first, withResult: .invalidAttributeValueLength)
                 return
             }
@@ -656,6 +783,13 @@ final class HandoffPeripheral: NSObject, CBPeripheralManagerDelegate {
         }
         peripheral.respond(to: first, withResult: .success)
         submit(envelope)
+    }
+
+    func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
+        guard pendingStatusUpdate, let c = statusChar else { return }
+        if peripheral.updateValue(status, for: c, onSubscribedCentrals: nil) {
+            pendingStatusUpdate = false
+        }
     }
 
     private func submit(_ envelope: Data) {
@@ -692,7 +826,9 @@ final class HandoffPeripheral: NSObject, CBPeripheralManagerDelegate {
         let body: [String: String] = ["s": state, "r": String(reason.prefix(120))]
         guard let data = try? JSONSerialization.data(withJSONObject: body), data != status else { return }
         status = data
-        if let c = statusChar { _ = manager?.updateValue(data, for: c, onSubscribedCentrals: nil) }
+        if let c = statusChar, let mgr = manager {
+            pendingStatusUpdate = !mgr.updateValue(data, for: c, onSubscribedCentrals: nil)
+        }
     }
 }
 
@@ -703,7 +839,7 @@ enum LocalAPI {
         guard let url = URL(string: "http://localhost:\(port)\(path)") else { completion(0, nil); return }
         var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: timeout)
         req.httpMethod = method
-        URLSession.shared.dataTask(with: req) { data, response, _ in
+        LoopbackHTTP.session.dataTask(with: req) { data, response, _ in
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             DispatchQueue.main.async { completion(status, json) }
@@ -712,7 +848,7 @@ enum LocalAPI {
 
     static func raw(port: String, path: String, completion: @escaping (Data?) -> Void) {
         guard let url = URL(string: "http://localhost:\(port)\(path)") else { completion(nil); return }
-        URLSession.shared.dataTask(with: URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 15)) { data, response, _ in
+        LoopbackHTTP.session.dataTask(with: URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 15)) { data, response, _ in
             let ok = (response as? HTTPURLResponse)?.statusCode == 200
             DispatchQueue.main.async { completion(ok ? data : nil) }
         }.resume()
@@ -778,6 +914,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     var events: ShellEventStream?
     var handoffPeripheral: HandoffPeripheral?
     var pageLoaded = false
+    var webViewLastError: String?
+    var notificationAuthStatus = "notDetermined"
     var loginMenuItem: NSMenuItem?
     var updateMenuItem: NSMenuItem?
     /// "AirBridge 0.0.6" at the top of the menu-bar menu (like any Mac utility).
@@ -787,6 +925,79 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     /// Launched at login (or relaunched while hidden): no window until asked.
     let launchedInBackground = CommandLine.arguments.contains("--background")
     var relaunching = false
+
+    static func sanitizeDownloadFilename(_ raw: String) -> String {
+        let normalized = raw.replacingOccurrences(of: "\\", with: "/")
+        let base = (normalized as NSString).lastPathComponent
+        var cleaned = ""
+        for scalar in base.unicodeScalars {
+            let v = scalar.value
+            if v < 0x20 || v == 0x7F || ["/", "\\", ":", "<", ">", "\"", "|", "?", "*"].contains(Character(scalar)) {
+                cleaned.append("_")
+            } else {
+                cleaned.append(Character(scalar))
+            }
+        }
+        while cleaned.hasPrefix(".") {
+            cleaned.removeFirst()
+        }
+        let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == "." || trimmed == ".." {
+            return "airbridge-download"
+        }
+        return String(trimmed.prefix(200))
+    }
+
+    static func uniqueDownloadDestination(in directory: URL, suggestedFilename: String) -> URL {
+        let safeName = sanitizeDownloadFilename(suggestedFilename)
+        let ext = (safeName as NSString).pathExtension
+        let stem = (safeName as NSString).deletingPathExtension
+        let dirStandard = directory.standardizedFileURL.path
+        for index in 0..<10_000 {
+            let candidateName: String
+            if index == 0 {
+                candidateName = safeName
+            } else if ext.isEmpty {
+                candidateName = "\(stem) (\(index))"
+            } else {
+                candidateName = "\(stem) (\(index)).\(ext)"
+            }
+            let candidateURL = directory.appendingPathComponent(candidateName)
+            let candidateStandard = candidateURL.standardizedFileURL.path
+            guard candidateStandard.hasPrefix(dirStandard + "/") else {
+                continue
+            }
+            if !FileManager.default.fileExists(atPath: candidateStandard) {
+                return candidateURL
+            }
+        }
+        return directory.appendingPathComponent("airbridge-download-\(Int(Date().timeIntervalSince1970))")
+    }
+
+    static func scrubDiagnosticsText(_ input: String) -> String {
+        var out = input
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if !home.isEmpty {
+            out = out.replacingOccurrences(of: home, with: "~")
+        }
+        let replacements: [(String, String)] = [
+            ("/Users/[A-Za-z0-9._-]+", "~"),
+            ("([?&](?:pair|token|ca|key)=)[^&\\s\"']+", "$1<redacted>"),
+            ("/api/beam/[A-Za-z0-9_-]+", "/api/beam/<redacted>"),
+            ("(\"?(?:pairCode|token|password|psk|ssid)\"?\\s*:\\s*\")[^\"]*\"", "$1<redacted>\""),
+            ("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", "<redacted-mac>"),
+            ("Join “[^”]+”", "Join “<redacted-ssid>”"),
+            ("Joining “[^”]+”", "Joining “<redacted-ssid>”"),
+            ("Connected to “[^”]+”", "Connected to “<redacted-ssid>”"),
+        ]
+        for (pattern, template) in replacements {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+                let range = NSRange(out.startIndex..<out.endIndex, in: out)
+                out = regex.stringByReplacingMatches(in: out, options: [], range: range, withTemplate: template)
+            }
+        }
+        return out
+    }
 
     private static func resource(_ name: String) -> String? {
         guard let dir = Bundle.main.resourcePath else { return nil }
@@ -799,7 +1010,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     private static func configuredPort() -> String {
         if let env = ProcessInfo.processInfo.environment["PORT"], !env.isEmpty { return env }
         // Prebuilt (signed) bundles are never modified after install: per-user settings live in ~/.airbridge.
-        let file = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".airbridge/port")
+        let file = airbridgeStateDir().appendingPathComponent("port")
         if let text = try? String(contentsOf: file, encoding: .utf8) {
             let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if let n = Int(value), n > 0, n < 65536 { return value }
@@ -838,6 +1049,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         if let button = statusItem.button {
             button.title = "A"
             button.toolTip = "AirBridge — Fast E2EE File Transfer"
+            button.setAccessibilityLabel("AirBridge")
 
             let menu = NSMenu()
             menu.delegate = self
@@ -876,13 +1088,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         let rect = NSRect(x: 0, y: 0, width: 960, height: 720)
         window = NSWindow(
             contentRect: rect,
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "AirBridge"
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
+        window.backgroundColor = NSColor.windowBackgroundColor
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.center()
@@ -891,10 +1102,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
 
         // 3. WKWebView (+ "Restart AirBridge" bridge for the page)
         let config = WKWebViewConfiguration()
-        config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        let bundleId = Bundle.main.bundleIdentifier ?? ""
+        if bundleId.hasSuffix(".test") || bundleId.hasSuffix(".ci") || ProcessInfo.processInfo.environment["AIRBRIDGE_TEST_PORT"] != nil {
+            config.websiteDataStore = .nonPersistent()
+        }
+        let developerExtrasEnabled = ProcessInfo.processInfo.environment["AIRBRIDGE_DEV_EXTRAS"] == "1"
+        config.preferences.setValue(developerExtrasEnabled, forKey: "developerExtrasEnabled")
         config.userContentController.add(self, name: "airbridgeShell")
 
         webView = WKWebView(frame: window.contentView!.bounds, configuration: config)
+        webView.setValue(false, forKey: "drawsBackground")
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -905,6 +1122,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         supervisor.onServiceReady = { [weak self] in
             self?.loadUI()
             self?.refreshVersionLabels()
+            self?.events?.reconnectNowIfDisconnected()
         }
         supervisor.start()
 
@@ -961,13 +1179,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         }
         center.getNotificationSettings { settings in
             switch settings.authorizationStatus {
-            case .authorized, .provisional:
+            case .authorized:
+                DispatchQueue.main.async { self.notificationAuthStatus = "authorized" }
+                upgrade()
+            case .provisional:
+                DispatchQueue.main.async { self.notificationAuthStatus = "provisional" }
                 upgrade()
             case .denied:
+                DispatchQueue.main.async { self.notificationAuthStatus = "denied" }
                 self.supervisor.log("notifications are turned off for AirBridge in System Settings; using osascript")
             default:
+                DispatchQueue.main.async { self.notificationAuthStatus = "notDetermined" }
                 // Completes only when the user answers the prompt (possibly much later).
                 center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+                    DispatchQueue.main.async {
+                        self.notificationAuthStatus = granted ? "authorized" : "denied"
+                    }
                     if let error = error { self.supervisor.log("notifications unavailable: \(error.localizedDescription)") }
                     if granted { upgrade() }
                 }
@@ -1035,7 +1262,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["allow": allow, "always": always])
-        URLSession.shared.dataTask(with: req) { _, response, _ in
+        LoopbackHTTP.session.dataTask(with: req) { _, response, _ in
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code != 200 { self.supervisor.log("handoff response failed (HTTP \(code))") }
         }.resume()
@@ -1140,28 +1367,68 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     @objc func copyDiagnostics() {
         LocalAPI.raw(port: supervisor.port, path: "/api/diagnostics") { [weak self] data in
             guard let self = self else { return }
+            let logFile = airbridgeStateDir().appendingPathComponent("server.log")
+            let rawLog = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
+            let appLogTail = rawLog
+                .split(separator: "\n")
+                .filter { $0.contains("[app]") }
+                .suffix(40)
+                .map { AppDelegate.scrubDiagnosticsText(String($0)) }
+            let policyName: String
+            switch NSApp.activationPolicy() {
+            case .regular: policyName = "regular"
+            case .accessory: policyName = "accessory"
+            case .prohibited: policyName = "prohibited"
+            @unknown default: policyName = "unknown"
+            }
+            let macAppBlock: [String: Any] = [
+                "bundleId": Bundle.main.bundleIdentifier ?? "com.airbridge.launcher",
+                "shortVersion": self.appVersion ?? "unknown",
+                "bundlePath": AppDelegate.scrubDiagnosticsText(Bundle.main.bundlePath),
+                "serviceBinaryPath": AppDelegate.scrubDiagnosticsText(self.supervisor.binaryPath),
+                "launchedInBackground": self.launchedInBackground,
+                "activationPolicy": policyName,
+                "notificationAuthStatus": self.notificationAuthStatus,
+                "bleState": self.handoffPeripheral?.bleStateDescription ?? "disabled",
+                "bleAdvertising": self.handoffPeripheral?.isAdvertisingActive ?? false,
+                "sseConnected": self.events?.isConnected ?? false,
+                "sseLastError": self.events?.lastError as Any,
+                "webViewLoaded": self.pageLoaded,
+                "webViewLastError": self.webViewLastError as Any,
+                "microphonePermissionPolicy": "loopback-only",
+                "launchAgentPresent": LoginItem.isEnabled,
+                "supervisorEarlyExits": self.supervisor.earlyExits,
+                "appLogTail": appLogTail,
+            ]
             var text = "AirBridge diagnostics (macOS app)\n"
-            text += "app: \(Bundle.main.bundlePath) pid \(getpid())\n"
+            text += "app: \(AppDelegate.scrubDiagnosticsText(Bundle.main.bundlePath)) pid \(getpid())\n"
             text += "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)\n"
-            text += "service binary: \(self.supervisor.binaryPath) (\(self.supervisor.installedVersion ?? "unknown version"))\n"
+            text += "service binary: \(AppDelegate.scrubDiagnosticsText(self.supervisor.binaryPath)) (\(self.supervisor.installedVersion ?? "unknown version"))\n"
             text += "open at login: \(LoginItem.isEnabled)\n"
+            if let macAppData = try? JSONSerialization.data(withJSONObject: ["macApp": macAppBlock], options: [.prettyPrinted, .sortedKeys]),
+               let macAppJson = String(data: macAppData, encoding: .utf8) {
+                text += "```json\n\(AppDelegate.scrubDiagnosticsText(macAppJson))\n```\n"
+            }
             if let data = data, let json = String(data: data, encoding: .utf8) {
-                text += "```json\n\(json)\n```\n"
+                text += "```json\n\(AppDelegate.scrubDiagnosticsText(json))\n```\n"
             } else {
                 text += "service: not reachable on port \(self.supervisor.port)\n"
-                let log = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".airbridge/server.log")
-                if let tail = try? String(contentsOf: log, encoding: .utf8) {
-                    text += "--- server.log (tail)\n" + tail.split(separator: "\n").suffix(80).joined(separator: "\n") + "\n"
+                if !rawLog.isEmpty {
+                    let scrubbedTail = AppDelegate.scrubDiagnosticsText(
+                        rawLog.split(separator: "\n").suffix(80).joined(separator: "\n")
+                    )
+                    text += "--- server.log (tail)\n" + scrubbedTail + "\n"
                 }
             }
+            let scrubbedText = AppDelegate.scrubDiagnosticsText(text)
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
+            NSPasteboard.general.setString(scrubbedText, forType: .string)
             self.postNotification(title: "Diagnostics copied", body: "Paste them into your support request or GitHub issue.", appName: nil)
         }
     }
 
     @objc func showLog() {
-        let log = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".airbridge/server.log")
+        let log = airbridgeStateDir().appendingPathComponent("server.log")
         if !NSWorkspace.shared.open(log) {
             NSWorkspace.shared.activateFileViewerSelecting([log])
         }
@@ -1252,9 +1519,62 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     }
 
     @objc func showAbout() {
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.paragraphSpacing = 4
+
+        let credits = NSMutableAttributedString(
+            string: "Private, end-to-end encrypted file transfers, bidirectional text & photo clipboard sync, persistent contacts, two-way Mac call audio, and smooth H.264 screen sharing between Android and macOS.\n\n",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: style,
+            ]
+        )
+        credits.append(NSAttributedString(
+            string: "ECDH P-256 + AES-256-GCM · SPAKE2 Verified Pairing · Zero Cloud Accounts\n\n",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: style,
+            ]
+        ))
+        credits.append(NSAttributedString(
+            string: "Created by Diganta Dey  ·  ",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: style,
+            ]
+        ))
+        credits.append(NSAttributedString(
+            string: "airbridge.fyi",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .link: "https://airbridge.fyi/",
+                .paragraphStyle: style,
+            ]
+        ))
+        credits.append(NSAttributedString(
+            string: "  ·  ",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: style,
+            ]
+        ))
+        credits.append(NSAttributedString(
+            string: "GitHub",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .link: "https://github.com/DigantaDey/AirBridge",
+                .paragraphStyle: style,
+            ]
+        ))
+
         var options: [NSApplication.AboutPanelOptionKey: Any] = [
             .applicationName: "AirBridge",
-            .credits: NSAttributedString(string: "End-to-end encrypted file transfer, clipboard, contacts, calls and screen sharing between your devices."),
+            .credits: credits,
         ]
         if let v = appVersion { options[.applicationVersion] = v; options[.version] = "" }
         NSApp.activate(ignoringOtherApps: true)
@@ -1282,6 +1602,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     }
 
     @objc func showWindow() {
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+        }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         if !pageLoaded { loadUI() }
@@ -1330,18 +1653,78 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
             }
+        } else if action == "open-external",
+                  let rawUrl = body["url"] as? String,
+                  let url = URL(string: rawUrl),
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" {
+            DispatchQueue.main.async {
+                if !NSWorkspace.shared.open(url) {
+                    self.supervisor?.log("failed to open external URL: \(AppDelegate.scrubDiagnosticsText(rawUrl))")
+                }
+            }
         }
     }
 
-    // --- Navigation state (the watchdog reloads after a failed load) ---
+    private func isLocalServiceURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = url.host?.lowercased() else { return false }
+        return ["localhost", "127.0.0.1", "::1"].contains(host)
+    }
+
+    // --- Navigation state & external link routing ---
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = navigationAction.request.url, let scheme = url.scheme?.lowercased() else {
+            decisionHandler(.cancel)
+            return
+        }
+        if scheme == "mailto" {
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+            return
+        }
+        if scheme == "http" || scheme == "https" {
+            if !isLocalServiceURL(url) || navigationAction.targetFrame == nil {
+                if !NSWorkspace.shared.open(url) {
+                    supervisor?.log("failed to open external navigation URL")
+                }
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+            return
+        }
+        if scheme == "about" || scheme == "blob" || scheme == "data" {
+            decisionHandler(.allow)
+            return
+        }
+        decisionHandler(.cancel)
+    }
+
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url,
+           let scheme = url.scheme?.lowercased(),
+           scheme == "http" || scheme == "https" || scheme == "mailto" {
+            if !NSWorkspace.shared.open(url) {
+                supervisor?.log("failed to open popup URL in external browser")
+            }
+        }
+        return nil
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         pageLoaded = true
+        webViewLastError = nil
         flushPendingPanel()
     }
 
-
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         pageLoaded = false
+        webViewLastError = error.localizedDescription
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        webViewLastError = error.localizedDescription
     }
 
     // --- WKUIDelegate Native File Picker & Alerts ---
@@ -1378,6 +1761,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         completionHandler(res == .alertFirstButtonReturn)
     }
 
+    @available(macOS 12.0, *)
+    func webView(
+        _ webView: WKWebView,
+        requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+        initiatedByFrame frame: WKFrameInfo,
+        type: WKMediaCaptureType,
+        decisionHandler: @escaping (WKPermissionDecision) -> Void
+    ) {
+        let host = origin.host.lowercased()
+        let isLoopbackHost = host == "localhost" || host == "127.0.0.1"
+        let expectedPort = supervisor != nil ? (Int(supervisor.port) ?? 0) : 0
+        if type == .microphone && isLoopbackHost && expectedPort > 0 && origin.port == expectedPort {
+            decisionHandler(.grant)
+        } else {
+            decisionHandler(.deny)
+        }
+    }
+
     // --- WKDownloadDelegate Direct File Downloads ---
     func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
         download.delegate = self
@@ -1386,9 +1787,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let downloadsDir = home.appendingPathComponent("Downloads/AirBridge")
-        try? FileManager.default.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
-        let fileUrl = downloadsDir.appendingPathComponent(suggestedFilename)
-        completionHandler(fileUrl)
+        do {
+            try FileManager.default.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
+            let fileUrl = AppDelegate.uniqueDownloadDestination(in: downloadsDir, suggestedFilename: suggestedFilename)
+            completionHandler(fileUrl)
+        } catch {
+            supervisor?.log("download destination creation failed: \(error.localizedDescription)")
+            completionHandler(nil)
+        }
+    }
+
+    func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+        supervisor?.log("download failed: \(error.localizedDescription)")
     }
 }
 
@@ -1396,15 +1806,22 @@ let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
 
-// SIGTERM/SIGINT (logout, `kill`, Activity Monitor) → normal quit, so the
-// service this app started is stopped too instead of being orphaned.
+// SIGTERM/SIGINT (logout, `kill`, Activity Monitor) → stop supervised service
+// immediately on a background queue, then ask AppKit to terminate so a blocked
+// main thread can never orphan the child service.
+let signalQueue = DispatchQueue(label: "airbridge.signal")
 var signalSources: [DispatchSourceSignal] = []
 for sig in [SIGTERM, SIGINT] {
     signal(sig, SIG_IGN)
-    let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-    source.setEventHandler { NSApp.terminate(nil) }
+    let source = DispatchSource.makeSignalSource(signal: sig, queue: signalQueue)
+    source.setEventHandler {
+        delegate.events?.stop()
+        if !delegate.relaunching { delegate.supervisor?.stop() }
+        DispatchQueue.main.async { NSApp.terminate(nil) }
+        signalQueue.asyncAfter(deadline: .now() + 2.0) { _exit(0) }
+    }
     source.resume()
     signalSources.append(source)
 }
-app.setActivationPolicy(.regular)
+app.setActivationPolicy(delegate.launchedInBackground ? .accessory : .regular)
 app.run()

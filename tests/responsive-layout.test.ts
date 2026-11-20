@@ -45,7 +45,7 @@ describe("responsive desktop web and native Android Compose UI", () => {
   it("adapts Compose navigation (NavigationBar vs NavigationRail) and two-pane layouts by window width", () => {
     const app = read("android/app/src/main/kotlin/com/airbridge/app/ui/AirBridgeApp.kt");
     expect(app).toContain("BoxWithConstraints(modifier = Modifier.fillMaxSize())");
-    expect(app).toContain("val useRail = uiState.isPaired && maxWidth >= 600.dp");
+    expect(app).toContain("val useRail = uiState.isPaired && (maxWidth >= 600.dp || maxHeight < 480.dp)");
     expect(app).toContain("NavigationBar");
     expect(app).toContain("NavigationRail(");
     expect(app).toContain("contentWindowInsets = WindowInsets.safeDrawing");
@@ -76,8 +76,15 @@ describe("responsive desktop web and native Android Compose UI", () => {
     expect(activity).toContain("SystemBarStyle.dark");
     expect(activity).toContain("SystemBarStyle.light");
 
+    const app = read("android/app/src/main/kotlin/com/airbridge/app/ui/AirBridgeApp.kt");
+    expect(app).toContain("contentWindowInsets = WindowInsets.safeDrawing");
+    expect(app).toContain(".consumeWindowInsets(innerPadding)");
+
     const clipboard = read("android/app/src/main/kotlin/com/airbridge/app/ui/screens/ClipboardScreen.kt");
-    expect(clipboard).toContain(".imePadding()");
+    expect(clipboard).toContain("contentPadding.calculateBottomPadding()");
+
+    const pairingSheet = read("android/app/src/main/kotlin/com/airbridge/app/ui/components/PairingSheet.kt");
+    expect(pairingSheet).toContain(".imePadding()");
 
     const connect = read("android/app/src/main/kotlin/com/airbridge/app/ui/screens/ConnectScreen.kt");
     expect(connect).toContain(".imePadding()");

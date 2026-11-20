@@ -52,7 +52,7 @@ port_free() { [ -z "$(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
 
 echo "▸ building test app bundle"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -60,7 +60,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>AirBridgeTest</string>
   <key>CFBundleExecutable</key><string>AirBridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>${WANT}</string>
+  <key>CFBundleVersion</key><string>${WANT}</string>
+  <key>LSUIElement</key><true/>
+  <key>NSLocalNetworkUsageDescription</key><string>AirBridge connects directly to your phone on the local network to transfer files and clipboard content.</string>
   <key>NSBluetoothAlwaysUsageDescription</key><string>Your paired phone can hand over its hotspot over Bluetooth when it and this Mac share no network.</string>
+  <key>NSBonjourServices</key><array><string>_airbridge._tcp</string><string>_airbridge-rv._tcp</string></array>
 </dict></plist>
 PLIST
 printf '%s\n' "$BIN" > "$APP/Contents/Resources/binary-path"

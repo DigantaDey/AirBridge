@@ -105,8 +105,9 @@ export function loadOrCreateHandoffKeys(stateDir: string): HandoffKeys {
   const keys = generateHandoffKeys();
   try {
     fs.mkdirSync(stateDir, { recursive: true });
-    fs.writeFileSync(`${file}.tmp`, JSON.stringify({ v: 1, d: b64u(keys.privateKey), beacon: b64u(keys.beaconSecret) }), { mode: 0o600 });
-    fs.renameSync(`${file}.tmp`, file);
+    const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ v: 1, d: b64u(keys.privateKey), beacon: b64u(keys.beaconSecret) }), { mode: 0o600 });
+    fs.renameSync(tmp, file);
   } catch {
     // Unwritable state dir: keys for this run only (phones re-learn them on the next join).
   }
@@ -157,12 +158,28 @@ export function offerMac(authKey: Uint8Array, p: Omit<HandoffPayload, 'mac' | 'v
   return b64u(crypto.createHmac('sha256', Buffer.from(authKey)).update(msg, 'utf8').digest().subarray(0, 16));
 }
 
+function hasControlChar(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+function replaceControlCharsWithSpace(s: string): string {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    out += code <= 0x1f || code === 0x7f ? ' ' : s[i]!;
+  }
+  return out;
+}
+
 /** Rejects anything a Wi-Fi tool could misread: lengths, control characters, an open network. */
 export function validateCredentials(p: { ssid: unknown; psk: unknown; sec: unknown }): WifiCredentials {
   if (typeof p.ssid !== 'string' || typeof p.psk !== 'string' || typeof p.sec !== 'string') throw new HandoffError('BAD_CREDENTIALS', 'missing hotspot details');
   const ssidBytes = Buffer.byteLength(p.ssid, 'utf8');
-  // eslint-disable-next-line no-control-regex
-  if (ssidBytes < 1 || ssidBytes > 32 || /[\u0000-\u001f\u007f]/.test(p.ssid)) throw new HandoffError('BAD_CREDENTIALS', 'invalid hotspot name');
+  if (ssidBytes < 1 || ssidBytes > 32 || hasControlChar(p.ssid)) throw new HandoffError('BAD_CREDENTIALS', 'invalid hotspot name');
   const hex64 = /^[0-9a-fA-F]{64}$/.test(p.psk);
   if (!hex64 && (p.psk.length < 8 || p.psk.length > 63 || !/^[\x20-\x7e]+$/.test(p.psk))) throw new HandoffError('BAD_CREDENTIALS', 'invalid hotspot password');
   if (p.sec !== 'wpa2' && p.sec !== 'wpa3' && p.sec !== 'wpa2-wpa3') throw new HandoffError('BAD_CREDENTIALS', 'unsupported hotspot security (open networks are refused)');
@@ -240,10 +257,13 @@ export function openOffer(envelope: Uint8Array, keys: HandoffKeys, pairCodes: re
   if (!payload || payload.v !== 1 || typeof payload.n !== 'string' || typeof payload.mac !== 'string' || !Number.isInteger(payload.t)) {
     throw new HandoffError('MALFORMED', 'offer payload is incomplete');
   }
+  if (typeof payload.ssid !== 'string' || typeof payload.psk !== 'string' || typeof payload.sec !== 'string') {
+    throw new HandoffError('BAD_CREDENTIALS', 'missing hotspot details');
+  }
   const rp = Number(payload.rp);
   if (!Number.isInteger(rp) || rp < 1 || rp > 65535) throw new HandoffError('MALFORMED', 'bad reverse port');
   const fields = {
-    ssid: String(payload.ssid), psk: String(payload.psk), sec: payload.sec, rp,
+    ssid: payload.ssid, psk: payload.psk, sec: payload.sec, rp,
     id: typeof payload.id === 'string' ? payload.id : '',
     name: typeof payload.name === 'string' ? payload.name : '',
     t: payload.t, n: payload.n,
@@ -257,8 +277,7 @@ export function openOffer(envelope: Uint8Array, keys: HandoffKeys, pairCodes: re
   if (Math.abs(now - payload.t * 1000) > MAX_CLOCK_SKEW_MS) throw new HandoffError('STALE', 'offer is too old (or the clocks differ by more than 10 minutes)');
   const credentials = validateCredentials(payload);
   // Display only: cap and strip control characters after authentication.
-  // eslint-disable-next-line no-control-regex
-  const name = fields.name.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 64);
+  const name = replaceControlCharsWithSpace(fields.name).trim().slice(0, 64);
   return { payload: { ...payload, ...fields, name }, credentials };
 }
 
@@ -281,6 +300,7 @@ export interface HandoffOfferView {
 }
 
 interface OfferRecord extends HandoffOfferView {
+  deviceIdentity: string;
   credentials: WifiCredentials;
   reversePort: number;
   timer?: NodeJS.Timeout;
@@ -308,6 +328,8 @@ export class HandoffService extends EventEmitter {
   private keysShared: boolean;
   private active: OfferRecord | null = null;
   private readonly now: () => number;
+  private rejectedCount = 0;
+  private readonly recentFailureReasons: string[] = [];
 
   constructor(private readonly o: HandoffServiceOptions) {
     super();
@@ -343,13 +365,18 @@ export class HandoffService extends EventEmitter {
 
   private saveSettings(): void {
     if (!this.o.stateDir) return;
+    const file = path.join(this.o.stateDir, 'handoff.json');
+    const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
     try {
+      fs.mkdirSync(this.o.stateDir, { recursive: true });
       fs.writeFileSync(
-        path.join(this.o.stateDir, 'handoff.json'),
+        tmp,
         JSON.stringify({ policy: this.policy, shared: this.keysShared }),
         { mode: 0o600 },
       );
+      fs.renameSync(tmp, file);
     } catch {
+      try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
       // keep in memory
     }
   }
@@ -401,6 +428,7 @@ export class HandoffService extends EventEmitter {
 
     const record: OfferRecord = {
       ...base,
+      deviceIdentity: opened.payload.id || `peer:${peerId ?? opened.payload.name}`,
       deviceName: opened.payload.name || 'Your phone',
       ssid: opened.credentials.ssid,
       state: 'pending',
@@ -409,9 +437,11 @@ export class HandoffService extends EventEmitter {
       credentials: opened.credentials,
       reversePort: opened.payload.rp,
     };
-    // A newer offer from the same phone replaces an unanswered one.
+    // A newer offer from the same phone (matched by cryptographic identity key, or fallback peer/name when empty) replaces an unanswered one.
     for (const other of this.offers.values()) {
-      if (other.state === 'pending' && other.deviceName === record.deviceName) this.finish(other, 'expired', 'Replaced by a newer request');
+      if (other.state === 'pending' && other.deviceIdentity === record.deviceIdentity) {
+        this.finish(other, 'expired', 'Replaced by a newer request');
+      }
     }
     this.offers.set(id, record);
     this.log(`handoff: ${record.deviceName} offers its hotspot via ${via}`);
@@ -486,13 +516,48 @@ export class HandoffService extends EventEmitter {
   }
 
   private reject(base: Pick<OfferRecord, 'id' | 'via' | 'peerId' | 'createdAt' | 'deviceName' | 'ssid'>, state: HandoffState, reason: string): HandoffOfferView {
+    this.rejectedCount++;
+    this.recordFailureReason(reason);
     const view: HandoffOfferView = { ...base, state, reason, expiresAt: base.createdAt };
     this.emit('status', view);
     return view;
   }
 
+  private recordFailureReason(reason: string): void {
+    const clean = reason.replace(/“[^”]*”|"[^"]*"/g, '<ssid>').slice(0, 160);
+    this.recentFailureReasons.push(clean);
+    if (this.recentFailureReasons.length > 20) {
+      this.recentFailureReasons.splice(0, this.recentFailureReasons.length - 20);
+    }
+  }
+
+  getTelemetry(): {
+    policy: HandoffPolicy;
+    shared: boolean;
+    activeOffers: number;
+    rejectedOffers: number;
+    redactedSsidHits: number;
+    recentFailureReasons: string[];
+  } {
+    let activeOffers = 0;
+    for (const o of this.offers.values()) {
+      if (o.state === 'pending' || o.state === 'joining' || o.state === 'joined') activeOffers++;
+    }
+    return {
+      policy: this.policy,
+      shared: this.keysShared,
+      activeOffers,
+      rejectedOffers: this.rejectedCount,
+      redactedSsidHits: this.o.joiner.getRedactedSsidHits?.() ?? 0,
+      recentFailureReasons: [...this.recentFailureReasons],
+    };
+  }
+
   private finish(record: OfferRecord, state: HandoffState, reason: string): void {
     if (record.timer) clearTimeout(record.timer);
+    if (state === 'failed' || state === 'invalid') {
+      this.recordFailureReason(reason);
+    }
     record.state = state;
     record.reason = reason;
     this.changed(record);

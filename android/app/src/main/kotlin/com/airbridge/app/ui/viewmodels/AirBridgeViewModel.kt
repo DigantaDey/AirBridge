@@ -8,11 +8,15 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.PowerManager
+import androidx.compose.runtime.Immutable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.airbridge.app.AndroidDiagnostics
 import com.airbridge.app.ClipboardImageProvider
 import com.airbridge.app.ClipboardText
 import com.airbridge.app.ConnectionService
+import com.airbridge.app.ContinuityPermissions
+import com.airbridge.app.NativeEngineHost
 import com.airbridge.app.NativeEngineUiState
 import com.airbridge.app.NativeFiles
 import com.airbridge.app.Prefs
@@ -31,8 +35,40 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+@Immutable
 data class NearbyHost(val name: String, val address: String)
 
+/**
+ * Pure policy for `airbridge://` `ACTION_VIEW` deep-link handling (`AND-03`).
+ *
+ * When a phone is already paired (`existingTarget.isNotBlank()`), an external
+ * `airbridge://` link must never silently overwrite the paired computer or TLS
+ * pin; it requires explicit user confirmation first.
+ */
+object DeepLinkConfirmationPolicy {
+    enum class Decision {
+        REJECT,
+        CONNECT_IMMEDIATELY,
+        REQUIRE_CONFIRMATION,
+    }
+
+    fun evaluate(scheme: String?, rawUri: String?, existingTarget: String): Pair<Decision, PairingLink?> {
+        if (!scheme.equals("airbridge", ignoreCase = true) || rawUri.isNullOrBlank()) {
+            return Decision.REJECT to null
+        }
+        val link = PairingLink.parse(rawUri) ?: return Decision.REJECT to null
+        if (link.host.isBlank()) {
+            return Decision.REJECT to null
+        }
+        return if (existingTarget.isNotBlank()) {
+            Decision.REQUIRE_CONFIRMATION to link
+        } else {
+            Decision.CONNECT_IMMEDIATELY to link
+        }
+    }
+}
+
+@Immutable
 data class AirBridgeAppUiState(
     val isPaired: Boolean = false,
     val configuredTarget: String = "",
@@ -44,6 +80,14 @@ data class AirBridgeAppUiState(
     val receiveClipboard: Boolean = true,
     val connectionContinuity: Boolean = true,
     val batteryExempt: Boolean = false,
+    val contactsOnComputer: Boolean = false,
+    val callsFromComputer: Boolean = false,
+    val screenSharing: Boolean = false,
+    val contactsPermissionGranted: Boolean = false,
+    val callsPermissionGranted: Boolean = false,
+    val callAudioPermissionGranted: Boolean = false,
+    val hasTelephony: Boolean = false,
+    val localNetworkPermissionGranted: Boolean = true,
     val hasCamera: Boolean = true,
     val nearbyHosts: List<NearbyHost> = emptyList(),
     val stagedFiles: List<NativeFiles.PickedUriMeta> = emptyList(),
@@ -51,6 +95,7 @@ data class AirBridgeAppUiState(
     val engine: NativeEngineUiState = NativeEngineUiState(),
     val scannerOpen: Boolean = false,
     val pairingSheetOpen: Boolean = false,
+    val pendingDeepLink: PairingLink? = null,
     val connectError: String? = null,
     val isSending: Boolean = false,
     val isConnecting: Boolean = false,
@@ -67,11 +112,20 @@ private data class LocalPrefsSnapshot(
     val receiveClipboard: Boolean,
     val connectionContinuity: Boolean,
     val batteryExempt: Boolean,
+    val contactsOnComputer: Boolean,
+    val callsFromComputer: Boolean,
+    val screenSharing: Boolean,
+    val contactsPermissionGranted: Boolean,
+    val callsPermissionGranted: Boolean,
+    val callAudioPermissionGranted: Boolean,
+    val hasTelephony: Boolean,
+    val localNetworkPermissionGranted: Boolean,
 )
 
 private data class UiOverlaysSnapshot(
     val scannerOpen: Boolean,
     val pairingSheetOpen: Boolean,
+    val pendingDeepLink: PairingLink?,
     val connectError: String?,
     val isSending: Boolean,
     val isConnecting: Boolean,
@@ -92,6 +146,7 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
         UiOverlaysSnapshot(
             scannerOpen = false,
             pairingSheetOpen = false,
+            pendingDeepLink = null,
             connectError = null,
             isSending = false,
             isConnecting = false,
@@ -128,6 +183,14 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             receiveClipboard = if (engine.ready) engine.receiveClipboard else local.receiveClipboard,
             connectionContinuity = local.connectionContinuity,
             batteryExempt = local.batteryExempt,
+            contactsOnComputer = local.contactsOnComputer,
+            callsFromComputer = local.callsFromComputer,
+            screenSharing = local.screenSharing,
+            contactsPermissionGranted = local.contactsPermissionGranted,
+            callsPermissionGranted = local.callsPermissionGranted,
+            callAudioPermissionGranted = local.callAudioPermissionGranted,
+            hasTelephony = local.hasTelephony,
+            localNetworkPermissionGranted = local.localNetworkPermissionGranted,
             hasCamera = hasCamera,
             nearbyHosts = nearby,
             stagedFiles = staged,
@@ -135,6 +198,7 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             engine = engine,
             scannerOpen = overlay.scannerOpen,
             pairingSheetOpen = overlay.pairingSheetOpen,
+            pendingDeepLink = overlay.pendingDeepLink,
             // Input validation first, else the engine's classified failure
             // (TCP timeout vs TLS vs pair code) so the connect screen shows
             // the same layer-specific guidance as the status card.
@@ -177,11 +241,20 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             receiveClipboard = prefs.receiveClipboard,
             connectionContinuity = prefs.connectionContinuity,
             batteryExempt = runCatching { power.isIgnoringBatteryOptimizations(appContext.packageName) }.getOrDefault(false),
+            contactsOnComputer = prefs.contactsOnComputer,
+            callsFromComputer = prefs.callsFromComputer,
+            screenSharing = prefs.screenSharing,
+            contactsPermissionGranted = ContinuityPermissions.contactsGranted(appContext),
+            callsPermissionGranted = ContinuityPermissions.callsGranted(appContext),
+            callAudioPermissionGranted = ContinuityPermissions.callAudioGranted(appContext),
+            hasTelephony = ContinuityPermissions.hasTelephony(appContext),
+            localNetworkPermissionGranted = AndroidDiagnostics.isLocalNetworkPermissionGranted(appContext),
         )
     }
 
     fun refreshSystemStatus() {
         _local.value = readLocalSnapshot()
+        NativeEngineHost.instance?.refreshContinuity()
     }
 
     fun startDiscovery() {
@@ -194,12 +267,14 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                 synchronized(nearbyLock) {
                     nearbyMap[address] = NearbyHost(name = name, address = address)
                     _nearbyHosts.value = nearbyMap.values.toList()
+                    AndroidDiagnostics.recordNsdDiscovered(nearbyMap.size)
                 }
             },
             onLost = { name ->
                 synchronized(nearbyLock) {
                     nearbyMap.entries.removeAll { it.value.name == name }
                     _nearbyHosts.value = nearbyMap.values.toList()
+                    AndroidDiagnostics.recordNsdDiscovered(nearbyMap.size)
                 }
             },
         )
@@ -260,6 +335,48 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
         connectWithLink(link)
     }
 
+    /**
+     * AND-03: Handles an incoming `airbridge://` deep link safely.
+     * When `prefs.target.isNotEmpty()`, stages the link for explicit user confirmation
+     * rather than silently overwriting the existing paired computer and TLS pin.
+     */
+    fun handleIncomingDeepLink(scheme: String?, rawUri: String?) {
+        val (decision, link) = DeepLinkConfirmationPolicy.evaluate(scheme, rawUri, prefs.target)
+        when (decision) {
+            DeepLinkConfirmationPolicy.Decision.REJECT -> {
+                AndroidDiagnostics.recordEvent("deepLink", "Rejected invalid deep link", "WARN")
+            }
+            DeepLinkConfirmationPolicy.Decision.CONNECT_IMMEDIATELY -> {
+                val validLink = link ?: return
+                AndroidDiagnostics.recordEvent("deepLink", "Connecting unpaired deep link to ${validLink.host}:${validLink.port}")
+                connectWithLink(validLink)
+            }
+            DeepLinkConfirmationPolicy.Decision.REQUIRE_CONFIRMATION -> {
+                val validLink = link ?: return
+                AndroidDiagnostics.recordEvent(
+                    "deepLink",
+                    "Prompting confirmation for deep link to ${validLink.host}:${validLink.port} (already paired)",
+                )
+                _overlays.value = _overlays.value.copy(pendingDeepLink = validLink)
+            }
+        }
+    }
+
+    fun confirmPendingDeepLink() {
+        val link = _overlays.value.pendingDeepLink ?: return
+        _overlays.value = _overlays.value.copy(pendingDeepLink = null)
+        AndroidDiagnostics.recordEvent("deepLink", "User confirmed deep link switch to ${link.host}:${link.port}")
+        connectWithLink(link)
+    }
+
+    fun dismissPendingDeepLink() {
+        val link = _overlays.value.pendingDeepLink
+        if (link != null) {
+            AndroidDiagnostics.recordEvent("deepLink", "User declined deep link switch to ${link.host}:${link.port}")
+        }
+        _overlays.value = _overlays.value.copy(pendingDeepLink = null)
+    }
+
     fun connectWithLink(link: PairingLink) {
         stopDiscovery()
         // Replaces the whole previous invitation: target, staged code (cleared
@@ -271,6 +388,7 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
         _overlays.value = _overlays.value.copy(
             scannerOpen = false,
             pairingSheetOpen = false,
+            pendingDeepLink = null,
             connectError = null,
             isConnecting = true,
         )
@@ -323,6 +441,7 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
         _overlays.value = UiOverlaysSnapshot(
             scannerOpen = false,
             pairingSheetOpen = false,
+            pendingDeepLink = null,
             connectError = null,
             isSending = false,
             isConnecting = false,
@@ -563,18 +682,47 @@ class AirBridgeViewModel(application: Application) : AndroidViewModel(applicatio
         _local.value = readLocalSnapshot()
     }
 
+    fun setContactsOnComputer(enabled: Boolean) {
+        prefs.contactsOnComputer = enabled
+        refreshSystemStatus()
+    }
+
+    fun setCallsFromComputer(enabled: Boolean) {
+        prefs.callsFromComputer = enabled
+        refreshSystemStatus()
+    }
+
+    fun setScreenSharing(enabled: Boolean) {
+        prefs.screenSharing = enabled
+        refreshSystemStatus()
+    }
+
+    fun copyDiagnosticsReport() {
+        val snap = uiState.value
+        viewModelScope.launch(Dispatchers.IO) {
+            AndroidDiagnostics.copyDiagnosticsToClipboard(appContext, snap)
+            _events.tryEmit("Diagnostic report copied to clipboard")
+        }
+    }
+
+    fun shareDiagnosticsReport() {
+        val snap = uiState.value
+        viewModelScope.launch(Dispatchers.IO) {
+            AndroidDiagnostics.shareDiagnosticsReport(appContext, snap)
+        }
+    }
+
     fun startConnectionService(action: String = ConnectionService.ACTION_START) {
         if (prefs.target.isEmpty()) return
-        if (action == ConnectionService.ACTION_UI_DETACH && ConnectionService.currentHost() == null) return
+        if (action == ConnectionService.ACTION_UI_DETACH) {
+            ConnectionService.detachUi()
+            return
+        }
         val intent = Intent(appContext, ConnectionService::class.java)
             .setPackage(appContext.packageName)
             .setAction(action)
         runCatching {
-            if (action != ConnectionService.ACTION_UI_DETACH) {
-                appContext.startForegroundService(intent)
-            } else {
-                appContext.startService(intent)
-            }
+            appContext.startForegroundService(intent)
         }
     }
 

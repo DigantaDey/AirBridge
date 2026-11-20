@@ -56,14 +56,14 @@ function device() {
 
 interface Session {
   ws: WebSocket;
-  messages: Array<Record<string, any>>;
-  next: (type: string, timeoutMs?: number) => Promise<Record<string, any>>;
+  messages: Array<Record<string, unknown>>;
+  next: (type: string, timeoutMs?: number) => Promise<Record<string, unknown>>;
 }
 
 async function connect(server: AirBridgeServerInstance): Promise<Session> {
   const ws = new WebSocket(`wss://127.0.0.1:${server.port}/ws`, { ca: server.tls!.caCertPem });
-  const messages: Array<Record<string, any>> = [];
-  ws.on('message', (raw) => messages.push(JSON.parse(String(raw))));
+  const messages: Array<Record<string, unknown>> = [];
+  ws.on('message', (raw) => messages.push(JSON.parse(String(raw)) as Record<string, unknown>));
   await new Promise<void>((resolve, reject) => {
     ws.once('open', () => resolve());
     ws.once('error', reject);
@@ -81,13 +81,13 @@ async function connect(server: AirBridgeServerInstance): Promise<Session> {
   return { ws, messages, next };
 }
 
-function getJson(server: AirBridgeServerInstance, pathname: string): Promise<any> {
+function getJson(server: AirBridgeServerInstance, pathname: string): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     https
       .get(`https://127.0.0.1:${server.port}${pathname}`, { ca: server.tls!.caCertPem, agent: false }, (res) => {
         let body = '';
         res.on('data', (c) => (body += c));
-        res.on('end', () => resolve(JSON.parse(body)));
+        res.on('end', () => resolve(JSON.parse(body) as Record<string, unknown>));
       })
       .on('error', reject);
   });
@@ -140,32 +140,37 @@ describe('hotspot pairing: advertised endpoints, QR and certificate stay consist
     const session = await connect(server);
     try {
       const welcome = await session.next('welcome');
-      expect(welcome.lanUrls).toEqual(server.lanUrls);
-      expect(welcome.lanEndpoints.map((e: { url: string }) => e.url)).toEqual(server.lanUrls);
-      expect(welcome.tlsPin).toBe(anchorPin(server.tls!.cert));
-      expect(welcome.tlsPin).toBe(chainAnchorPinSha256(server.tls!.cert));
-      expect(welcome.tlsPin).toBe(anchorPin(server.tls!.caCertPem!));
+      const welcomeLanUrls = welcome.lanUrls as string[];
+      const welcomeLanEndpoints = welcome.lanEndpoints as Array<{ url: string }>;
+      const welcomeTlsPin = welcome.tlsPin as string;
+      const welcomePairCode = welcome.pairCode as string;
+      expect(welcomeLanUrls).toEqual(server.lanUrls);
+      expect(welcomeLanEndpoints.map((e) => e.url)).toEqual(server.lanUrls);
+      expect(welcomeTlsPin).toBe(anchorPin(server.tls!.cert));
+      expect(welcomeTlsPin).toBe(chainAnchorPinSha256(server.tls!.cert));
+      expect(welcomeTlsPin).toBe(anchorPin(server.tls!.caCertPem!));
 
       const health = await getJson(server, '/api/health');
-      expect(health.lanEndpoints.map((e: { url: string }) => e.url)).toEqual(server.lanUrls);
-      expect(health.tlsPin).toBe(welcome.tlsPin);
+      const healthEndpoints = health.lanEndpoints as Array<{ url: string }>;
+      expect(healthEndpoints.map((e) => e.url)).toEqual(server.lanUrls);
+      expect(health.tlsPin).toBe(welcomeTlsPin);
 
       const qr = new URL(
         buildPairingUrl({
-          pairCode: welcome.pairCode,
-          lanUrls: welcome.lanUrls,
+          pairCode: welcomePairCode,
+          lanUrls: welcomeLanUrls,
           pageOrigin: `https://localhost:${server.port}`,
           pageHostname: 'localhost',
-          tlsPin: welcome.tlsPin,
+          tlsPin: welcomeTlsPin,
         })
       );
       const qrHosts = [qr.hostname, ...(qr.searchParams.get('alt') ?? '').split(',').filter(Boolean)];
       expect(qrHosts.sort()).toEqual(['10.205.95.167', '10.42.61.23']);
       for (const host of qrHosts) {
-        expect(welcome.lanUrls).toContain(`https://${host}:${server.port}`);
+        expect(welcomeLanUrls).toContain(`https://${host}:${server.port}`);
         expect(certificateCoversIp(server.tls!.cert, host)).toBe(true);
       }
-      expect(qr.searchParams.get('ca')).toBe(welcome.tlsPin);
+      expect(qr.searchParams.get('ca')).toBe(welcomeTlsPin);
     } finally {
       session.ws.close();
     }
@@ -188,7 +193,8 @@ describe('hotspot pairing: advertised endpoints, QR and certificate stay consist
       expect(certificateCoversIp(server.tls!.cert, '10.42.99.17')).toBe(true);
       // New TLS connections are served the re-issued leaf.
       const health = await getJson(server, '/api/health');
-      expect(health.lanEndpoints.map((e: { address: string }) => e.address)).toContain('10.42.99.17');
+      const healthEndpoints = health.lanEndpoints as Array<{ address: string }>;
+      expect(healthEndpoints.map((e) => e.address)).toContain('10.42.99.17');
       // Nothing changed → no broadcast.
       await expect(server.refreshNetwork()).resolves.toBe(false);
     } finally {

@@ -62,10 +62,12 @@ describe('F02: Connection & Discovery Screen', () => {
     expect(manifest).toContain('<data android:scheme="airbridge" />');
 
     const activity = await readRepoFile('android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt');
-    expect(activity).toContain('PairingLink.parse(data.toString())');
-    expect(activity).toContain('viewModel.connectWithLink(link)');
+    expect(activity).toContain('viewModel.handleIncomingDeepLink(data.scheme, data.toString())');
 
     const vm = await readRepoFile('android/app/src/main/kotlin/com/airbridge/app/ui/viewmodels/AirBridgeViewModel.kt');
+    expect(vm).toContain('fun handleIncomingDeepLink(scheme: String?, rawUri: String?)');
+    expect(vm).toContain('PairingLink.parse(rawUri)');
+    expect(vm).toContain('connectWithLink(link)');
     expect(vm).toContain('fun handleScannedQr(payload: String): Boolean');
   });
 });

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
@@ -18,6 +19,7 @@ import {
   FRAME_ROUTED_RELAY,
   ROUTING_HEADER_LENGTH,
   generatePairCode,
+  isValidClipboardImageDataUrl,
   isValidPairCode,
   normalizePairCode,
   overwriteRoutedSourcePeerId,
@@ -36,7 +38,7 @@ import {
   vouchKeyFrom,
 } from '../shared/pairingProof.js';
 import { Spake2, constantTimeEqual, type Spake2Result } from '../shared/spake2.js';
-import { HostClipboardMonitor, type HostClipboardProvider } from './hostClipboard.js';
+import { HostClipboardMonitor, type HostClipboardProvider, type HostClipboardTelemetry } from './hostClipboard.js';
 import { isLoopbackAddress } from './tls.js';
 import { isReversePeer } from './reverseConnect.js';
 import { isRelayedPeer } from './relay.js';
@@ -51,6 +53,8 @@ interface ConnectedClient {
   device: DeviceProfile;
   connectedAt: number;
   isAlive: boolean;
+  missedPings: number;
+  lastBytesWritten: number;
   joinPairAttempts: number[];
   /** Normalized IPv4 of the peer socket (dialled-in phones included). */
   remoteAddress: string;
@@ -59,6 +63,8 @@ interface ConnectedClient {
   vouchKey?: Uint8Array;
   /** Recent handoff-offer times (rate limit). */
   handoffAttempts?: number[];
+  viaReverse: boolean;
+  viaRelayed: boolean;
 }
 
 interface PendingPake {
@@ -115,22 +121,42 @@ function sanitizePakeHello(raw: unknown): PakeHello | null {
 }
 
 function normalizeRemote(address: string | undefined): string {
-  return (address ?? '').replace(/^::ffff:/, '');
+  return (address ?? '').trim().replace(/^\[|\]$/g, '').split('%')[0]!.replace(/^::ffff:/, '');
 }
 
-function deriveNetworkKey(req: IncomingMessage): string {
+export function ipv6Prefix64(rawIp: string): string | null {
+  const clean = rawIp.trim().replace(/^\[|\]$/g, '').split('%')[0]!.toLowerCase();
+  if (!net.isIPv6(clean)) return null;
+  // Handle embedded IPv4 tail if any (e.g. ::ffff:192.168.1.1)
+  if (clean.includes('.')) return null;
+  const parts = clean.split('::');
+  if (parts.length > 2) return null;
+  const head = parts[0] ? parts[0].split(':') : [];
+  const tail = parts.length === 2 ? (parts[1] ? parts[1].split(':') : []) : [];
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0) return null;
+  const full = [...head, ...new Array<string>(missing).fill('0'), ...tail].map((g) =>
+    Number.parseInt(g || '0', 16).toString(16).padStart(4, '0'),
+  );
+  if (full.length !== 8) return null;
+  return full.slice(0, 4).join(':');
+}
+
+export function deriveNetworkKey(req: IncomingMessage, relayedPeerId?: string): string {
   // SECURITY: never trust X-Forwarded-For here. AirBridge is not deployed
   // behind a proxy that strips it, so any LAN client could otherwise spoof
   // a victim's subnet (or loopback) and gain "nearby" discovery/relay access
   // to devices it is not on the same network as. The socket address is the
   // only address the kernel actually observed.
+  if (isRelayedPeer(req.socket) || relayedPeerId) {
+    return `net:relayed:${relayedPeerId ?? crypto.randomBytes(8).toString('hex')}`;
+  }
   const rawIp = req.socket.remoteAddress || 'unknown';
-
-  const ip = rawIp.replace(/^::ffff:/, '');
-
-  if (ip === '127.0.0.1' || ip === '::1' || ip === 'localhost') {
+  if (isLoopbackAddress(rawIp)) {
     return 'net:loopback';
   }
+
+  const ip = normalizeRemote(rawIp);
 
   // Group private IPv4 /24 LAN subnets together so devices on the same Wi-Fi router discover each other
   const ipv4Match = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
@@ -149,6 +175,12 @@ function deriveNetworkKey(req: IncomingMessage): string {
     }
   }
 
+  // Group non-loopback IPv6 LAN addresses by /64 prefix
+  const v6Prefix = ipv6Prefix64(ip);
+  if (v6Prefix) {
+    return `net:lan6-${v6Prefix}`;
+  }
+
   // Public IP (e.g., devices behind same home Wi-Fi NAT hitting cloud signaling)
   return 'net:' + crypto.createHash('sha256').update(ip).digest('hex').slice(0, 16);
 }
@@ -158,12 +190,28 @@ const FORM_FACTORS = new Set(['laptop', 'phone', 'tablet', 'desktop']);
 export const MAX_CLIENTS = 128;
 export const MAX_CLIENTS_PER_NETWORK = 32;
 export const MAX_RELAY_BUFFERED_BYTES = 64 * 1024 * 1024;
+export const RELAY_BACKPRESSURE_HIGH_WATER = 16 * 1024 * 1024;
+export const RELAY_BACKPRESSURE_LOW_WATER = 4 * 1024 * 1024;
 const JOIN_PAIR_WINDOW_MS = 60_000;
 const MAX_JOIN_PAIR_PER_WINDOW = 6; // pair codes are only 30 bits; slow guessing to a crawl
 
+function getWsRawSocket(ws: WebSocket): net.Socket | undefined {
+  return (ws as unknown as { _socket?: net.Socket })._socket;
+}
+
+function stripControlCharacters(value: string): string {
+  let out = '';
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) continue;
+    out += value[i];
+  }
+  return out;
+}
+
 function boundText(value: unknown, max: number, fallback: string): string {
   if (typeof value !== 'string') return fallback;
-  const clean = value.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, max);
+  const clean = stripControlCharacters(value).trim().slice(0, max);
   return clean || fallback;
 }
 
@@ -219,18 +267,30 @@ function generatePeerId(): string {
   return crypto.randomBytes(8).toString('hex'); // 16 hex chars
 }
 
+let cachedLocalAddresses: { at: number; set: Set<string> } | null = null;
+const LOCAL_ADDRESS_CACHE_TTL_MS = 2_000;
+
+export function clearLocalMachineAddressCache(): void {
+  cachedLocalAddresses = null;
+}
+
 export function isLocalMachineAddress(remoteAddress: string | undefined): boolean {
   if (!remoteAddress) return false;
   if (isLoopbackAddress(remoteAddress)) return true;
-  const normalized = remoteAddress.replace(/^::ffff:/, '');
-  const interfaces = os.networkInterfaces();
-  for (const list of Object.values(interfaces)) {
-    if (!list) continue;
-    for (const info of list) {
-      if (info.address === normalized) return true;
+  const normalized = normalizeRemote(remoteAddress).toLowerCase();
+  const now = Date.now();
+  if (!cachedLocalAddresses || now - cachedLocalAddresses.at > LOCAL_ADDRESS_CACHE_TTL_MS) {
+    const set = new Set<string>();
+    const interfaces = os.networkInterfaces();
+    for (const list of Object.values(interfaces)) {
+      if (!list) continue;
+      for (const info of list) {
+        set.add(normalizeRemote(info.address).toLowerCase());
+      }
     }
+    cachedLocalAddresses = { at: now, set };
   }
-  return false;
+  return cachedLocalAddresses.set.has(normalized);
 }
 
 function sanitizePeerId(candidate?: string): string {
@@ -253,6 +313,14 @@ export class SignalingHub {
   /** Last pair code per peerId so reconnects rejoin their existing group. */
   private readonly pairCodeByPeer = new Map<string, { pairCode: string; remote: string }>();
   private readonly pakeLimiter = new PakeFailureLimiter();
+  private rateLimitedCount = 0;
+  private legacyBlockedCount = 0;
+  private relayDrops = 0;
+  private relayDroppedFrames = 0;
+  private relayBackpressurePauses = 0;
+  private relayBackpressureResumes = 0;
+  private relayMaxBufferedBytes = 0;
+  private heartbeatTimeouts = 0;
   private onPakeFailure?: (recentFailures: number) => void;
   private getRelayOffer: () => RelayOffer | null;
   private getHandoffInfo: (vouchKey: Uint8Array, peerId: string) => HandoffInfo | null;
@@ -263,10 +331,12 @@ export class SignalingHub {
   public readonly wss: WebSocketServer;
   private readonly clients = new Map<string, ConnectedClient>();
   private readonly connectionsPerNetwork = new Map<string, number>();
+  private readonly pausedRelaySenders = new Map<string, { targetPeerId: string; cleanup: () => void }>();
   private readonly pingTimer: NodeJS.Timeout;
   private readonly clipboardMonitor: HostClipboardMonitor | null;
   private backgroundClipboardActive = false;
   private backgroundClipboardSink: ((text: string) => void) | null = null;
+  private backgroundClipboardImageSink: ((imageDataUrl: string, imageName?: string) => void) | null = null;
   private getLanUrls: () => string[];
   private getLanEndpoints: () => LanEndpoint[];
   private getHostFirewall: () => HostFirewallStatus | null;
@@ -326,6 +396,7 @@ export class SignalingHub {
             provider: opts.clipboardProvider,
             pollIntervalMs: opts.clipboardPollMs,
             onClipboardChange: (text) => this.deliverHostClipboard(text),
+            onClipboardImageChange: (imageDataUrl, imageName) => this.deliverHostClipboardImage(imageDataUrl, imageName),
           })
         : null;
 
@@ -341,12 +412,26 @@ export class SignalingHub {
 
     this.pingTimer = setInterval(() => {
       for (const [peerId, client] of this.clients.entries()) {
+        const rawSock = getWsRawSocket(client.ws);
+        const bytesWritten = rawSock?.bytesWritten ?? 0;
         if (!client.isAlive) {
-          client.ws.terminate();
-          this.clients.delete(peerId);
-          this.broadcastPeerUpdatesFor(client);
-          this.syncClipboardWatchState();
-          continue;
+          const drainingRelay = (client.ws.bufferedAmount ?? 0) > 0 && bytesWritten > client.lastBytesWritten;
+          if (!drainingRelay) {
+            client.missedPings += 1;
+          }
+          client.lastBytesWritten = bytesWritten;
+          if (client.missedPings >= 3) {
+            this.heartbeatTimeouts += 1;
+            this.releaseRelayBackpressureForPeer(peerId);
+            client.ws.terminate();
+            this.clients.delete(peerId);
+            this.broadcastPeerUpdatesFor(client);
+            this.syncClipboardWatchState();
+            continue;
+          }
+        } else {
+          client.missedPings = 0;
+          client.lastBytesWritten = bytesWritten;
         }
         client.isAlive = false;
         try {
@@ -372,6 +457,21 @@ export class SignalingHub {
     const codes = new Set<string>([this.hostPairCode]);
     for (const entry of this.pairCodeByPeer.values()) codes.add(entry.pairCode);
     return [...codes];
+  }
+
+  /**
+   * Whether `code` matches an active room (host room, any currently connected
+   * peer's room, or any room authenticated via host/PAKE). Unverified legacy
+   * guesses are not treated as active rooms.
+   */
+  private isKnownActiveRoom(code: string): boolean {
+    if (code === this.hostPairCode) return true;
+    for (const client of this.clients.values()) {
+      if (client.pairCode === code && (client.admission === 'host' || client.admission === 'pake')) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Send a control message to one connected peer; false if it is not connected. */
@@ -434,8 +534,49 @@ export class SignalingHub {
     return { connectedPeers: this.clients.size };
   }
 
+  public getTelemetry(): {
+    pakeFailures: number;
+    rateLimitedCount: number;
+    legacyBlockedCount: number;
+    relayDrops: number;
+    relayDroppedFrames: number;
+    relayBackpressurePauses: number;
+    relayBackpressureResumes: number;
+    relayMaxBufferedBytes: number;
+    heartbeatTimeouts: number;
+  } {
+    return {
+      pakeFailures: this.pakeLimiter.recentFailures(),
+      rateLimitedCount: this.rateLimitedCount,
+      legacyBlockedCount: this.legacyBlockedCount,
+      relayDrops: this.relayDrops,
+      relayDroppedFrames: this.relayDroppedFrames,
+      relayBackpressurePauses: this.relayBackpressurePauses,
+      relayBackpressureResumes: this.relayBackpressureResumes,
+      relayMaxBufferedBytes: this.relayMaxBufferedBytes,
+      heartbeatTimeouts: this.heartbeatTimeouts,
+    };
+  }
+
+  public getClipboardTelemetry(): HostClipboardTelemetry | null {
+    return this.clipboardMonitor?.getTelemetry() ?? null;
+  }
+
   /** Diagnostics: connected devices without secrets (no pair codes or keys). */
-  public describeClients(): { name: string; formFactor: string; platform: string; model: string; remoteAddress: string; loopback: boolean; connectedSeconds: number }[] {
+  public describeClients(): {
+    name: string;
+    formFactor: string;
+    platform: string;
+    model: string;
+    remoteAddress: string;
+    loopback: boolean;
+    connectedSeconds: number;
+    admission: Admission;
+    visibility: VisibilityMode;
+    viaReverse: boolean;
+    viaRelayed: boolean;
+    bufferedAmount: number;
+  }[] {
     const now = Date.now();
     return [...this.clients.values()].map((c) => ({
       name: c.device.name,
@@ -445,11 +586,20 @@ export class SignalingHub {
       remoteAddress: c.remoteAddress,
       loopback: c.isLoopback,
       connectedSeconds: Math.round((now - c.connectedAt) / 1000),
+      admission: c.admission,
+      visibility: c.visibility,
+      viaReverse: c.viaReverse,
+      viaRelayed: c.viaRelayed,
+      bufferedAmount: c.ws.bufferedAmount ?? 0,
     }));
   }
 
   public close(): void {
     clearInterval(this.pingTimer);
+    for (const entry of [...this.pausedRelaySenders.values()]) {
+      entry.cleanup();
+    }
+    this.pausedRelaySenders.clear();
     this.clipboardMonitor?.close();
     for (const ws of this.wss.clients) {
       try {
@@ -497,15 +647,24 @@ export class SignalingHub {
   }
 
   /** Keeps the OS clipboard watcher alive for the daemon's headless peer. */
-  public setBackgroundClipboardActive(active: boolean, sink?: (text: string) => void): void {
+  public setBackgroundClipboardActive(
+    active: boolean,
+    sink?: (text: string) => void,
+    imageSink?: (imageDataUrl: string, imageName?: string) => void,
+  ): void {
     this.backgroundClipboardActive = active;
     this.backgroundClipboardSink = active ? sink ?? this.backgroundClipboardSink : null;
+    this.backgroundClipboardImageSink = active ? imageSink ?? this.backgroundClipboardImageSink : null;
     this.syncClipboardWatchState();
   }
 
   /** Writes an incoming beam to the host OS clipboard without echoing it back. */
   public async writeHostClipboard(text: string): Promise<boolean> {
     return (await this.clipboardMonitor?.writeClipboard(text)) ?? false;
+  }
+
+  public async writeHostClipboardImage(imageDataUrl: string): Promise<boolean> {
+    return (await this.clipboardMonitor?.writeImage(imageDataUrl)) ?? false;
   }
 
   private syncClipboardWatchState(): void {
@@ -537,21 +696,57 @@ export class SignalingHub {
       this.sendJson(target.ws, {
         type: 'host-clipboard',
         text,
+        contentType: 'text',
         timestamp: Date.now(),
       });
     }
   }
 
+  public deliverHostClipboardImage(imageDataUrl: string, imageName?: string): number {
+    if (!isValidClipboardImageDataUrl(imageDataUrl)) return 0;
+    if (this.backgroundClipboardActive && this.backgroundClipboardImageSink) {
+      this.backgroundClipboardImageSink(imageDataUrl, imageName);
+      return 1;
+    }
+    let target: ConnectedClient | null = null;
+    for (const client of this.clients.values()) {
+      if (this.isHostDesktopClient(client) && client.ws.readyState === WebSocket.OPEN) {
+        if (!target || client.connectedAt >= target.connectedAt) {
+          target = client;
+        }
+      }
+    }
+    if (target) {
+      this.sendJson(target.ws, {
+        type: 'host-clipboard',
+        imageDataUrl,
+        imageName,
+        contentType: 'image',
+        timestamp: Date.now(),
+      });
+      return 1;
+    }
+    return 0;
+  }
+
   private handleConnection(ws: WebSocket, req: IncomingMessage): void {
-    const networkKey = deriveNetworkKey(req);
-    // A phone this server dialled (reverse connection) is never "this machine".
     const relayed = isRelayedPeer(req.socket);
-    const isLoopback = !isReversePeer(req.socket) && !relayed && this.isLocalMachine(req.socket.remoteAddress);
+    const reversed = isReversePeer(req.socket);
+    const connectionTag = relayed ? generatePeerId() : undefined;
+    const networkKey = deriveNetworkKey(req, connectionTag);
+    // A phone this server dialled (reverse connection) is never "this machine".
+    const isLoopback = !reversed && !relayed && this.isLocalMachine(req.socket.remoteAddress);
     let registeredClient: ConnectedClient | null = null;
     // Count even sockets which have not sent hello; otherwise an idle client
     // can bypass both limits and retain unbounded upgraded connections.
     const perNetwork = this.connectionsPerNetwork.get(networkKey) ?? 0;
-    if (this.wss.clients.size > MAX_CLIENTS || perNetwork >= MAX_CLIENTS_PER_NETWORK) {
+    let activeWsCount = 0;
+    for (const c of this.wss.clients) {
+      if (c !== ws && (c.readyState === WebSocket.OPEN || c.readyState === WebSocket.CONNECTING)) {
+        activeWsCount++;
+      }
+    }
+    if (activeWsCount >= MAX_CLIENTS || perNetwork >= MAX_CLIENTS_PER_NETWORK) {
       ws.close(1013, 'Server busy'); return;
     }
     this.connectionsPerNetwork.set(networkKey, perNetwork + 1);
@@ -567,6 +762,7 @@ export class SignalingHub {
     ws.on('pong', () => {
       if (registeredClient) {
         registeredClient.isAlive = true;
+        registeredClient.missedPings = 0;
       }
     });
 
@@ -598,17 +794,21 @@ export class SignalingHub {
       registeredClient = {
         peerId,
         ws,
-        networkKey,
+        networkKey: relayed ? `net:relayed:${peerId}` : networkKey,
         isLoopback,
         pairCode,
         visibility: hello.visibility === 'paired-only' || hello.visibility === 'hidden' ? hello.visibility : 'nearby',
         device,
         connectedAt: Date.now(),
         isAlive: true,
+        missedPings: 0,
+        lastBytesWritten: getWsRawSocket(ws)?.bytesWritten ?? 0,
         joinPairAttempts: [],
         remoteAddress,
         admission,
         vouchKey,
+        viaReverse: reversed,
+        viaRelayed: relayed,
       };
       // Only phone apps run the reverse listener; remember where they were.
       if (!isLoopback && !relayed && registeredClient.remoteAddress && device.platform === 'android') {
@@ -647,6 +847,7 @@ export class SignalingHub {
     ws.on('message', (data, isBinary) => {
       if (registeredClient) {
         registeredClient.isAlive = true;
+        registeredClient.missedPings = 0;
       }
 
       if (isBinary) {
@@ -677,11 +878,14 @@ export class SignalingHub {
           // Code-authenticated join: the code itself never crosses the wire.
           const pake = sanitizePakeHello(msg.pake);
           if (!pake) {
+            this.pakeLimiter.fail(remoteAddress);
+            this.onPakeFailure?.(this.pakeLimiter.recentFailures());
             this.sendJson(ws, { type: 'error', code: 'BAD_PAKE', message: 'Unsupported pairing handshake.' });
             ws.close(1008, 'Bad PAKE');
             return;
           }
           if (!this.pakeLimiter.allows(remoteAddress)) {
+            this.rateLimitedCount++;
             this.sendJson(ws, { type: 'error', code: 'RATE_LIMITED', message: 'Too many wrong pairing codes. Wait a few minutes and try again.' });
             ws.close(1008, 'Rate limited');
             return;
@@ -699,6 +903,8 @@ export class SignalingHub {
           try {
             result = party.finish(Buffer.from(pake.share, 'base64url'));
           } catch {
+            this.pakeLimiter.fail(remoteAddress);
+            this.onPakeFailure?.(this.pakeLimiter.recentFailures());
             this.sendJson(ws, { type: 'error', code: 'BAD_PAKE', message: 'Invalid pairing handshake.' });
             ws.close(1008, 'Bad PAKE');
             return;
@@ -720,6 +926,20 @@ export class SignalingHub {
 
         const requestedPair = msg.pairCode ? normalizePairCode(msg.pairCode) : '';
         const hasRequestedPair = isValidPairCode(requestedPair);
+        if (hasRequestedPair && !isLoopback) {
+          if (!this.pakeLimiter.allows(remoteAddress)) {
+            this.rateLimitedCount++;
+            this.legacyBlockedCount++;
+            this.sendJson(ws, { type: 'error', code: 'RATE_LIMITED', message: 'Too many pairing attempts. Wait a few minutes and try again.' });
+            ws.close(1008, 'Rate limited');
+            return;
+          }
+          if (!this.isKnownActiveRoom(requestedPair)) {
+            this.pakeLimiter.fail(remoteAddress);
+            this.legacyBlockedCount++;
+            this.onPakeFailure?.(this.pakeLimiter.recentFailures());
+          }
+        }
         let room: string | undefined;
         if (hasRequestedPair) {
           room = requestedPair;
@@ -778,19 +998,34 @@ export class SignalingHub {
         case 'join-pair': {
           const nowMs = Date.now();
           registeredClient.joinPairAttempts = registeredClient.joinPairAttempts.filter((t) => nowMs - t < JOIN_PAIR_WINDOW_MS);
-          if (registeredClient.joinPairAttempts.length >= MAX_JOIN_PAIR_PER_WINDOW) {
+          if (
+            registeredClient.joinPairAttempts.length >= MAX_JOIN_PAIR_PER_WINDOW ||
+            (!registeredClient.isLoopback && !this.pakeLimiter.allows(registeredClient.remoteAddress))
+          ) {
+            this.rateLimitedCount++;
+            this.legacyBlockedCount++;
             this.sendJson(ws, { type: 'error', code: 'RATE_LIMITED', message: 'Too many pair attempts. Wait a minute and try again.' });
             return;
           }
           registeredClient.joinPairAttempts.push(nowMs);
           const normalized = normalizePairCode(msg.pairCode);
           if (!isValidPairCode(normalized)) {
+            if (!registeredClient.isLoopback) {
+              this.pakeLimiter.fail(registeredClient.remoteAddress);
+            }
             this.sendJson(ws, {
               type: 'error',
               code: 'INVALID_PAIR_CODE',
               message: 'Pair code must be 6 valid characters.',
             });
             return;
+          }
+          if (!registeredClient.isLoopback) {
+            if (!this.isKnownActiveRoom(normalized)) {
+              this.pakeLimiter.fail(registeredClient.remoteAddress);
+              this.legacyBlockedCount++;
+              this.onPakeFailure?.(this.pakeLimiter.recentFailures());
+            }
           }
           const prevPairCode = registeredClient.pairCode;
           registeredClient.pairCode = normalized;
@@ -913,8 +1148,10 @@ export class SignalingHub {
         }
 
         case 'set-host-clipboard': {
-          if (
-            this.isHostDesktopClient(registeredClient) &&
+          if (!this.isHostDesktopClient(registeredClient)) break;
+          if (typeof msg.imageDataUrl === 'string' && isValidClipboardImageDataUrl(msg.imageDataUrl)) {
+            this.writeHostClipboardImage(msg.imageDataUrl).catch(() => {});
+          } else if (
             typeof msg.text === 'string' &&
             msg.text.length > 0 &&
             msg.text.length <= 512_000
@@ -928,6 +1165,7 @@ export class SignalingHub {
 
     ws.on('close', () => {
       if (registeredClient && this.clients.get(registeredClient.peerId)?.ws === ws) {
+        this.releaseRelayBackpressureForPeer(registeredClient.peerId);
         this.clients.delete(registeredClient.peerId);
         this.syncClipboardWatchState();
         this.broadcastPeerUpdatesFor(registeredClient);
@@ -939,14 +1177,81 @@ export class SignalingHub {
     });
   }
 
+  private releaseRelayBackpressureForPeer(peerId: string): void {
+    const senderEntry = this.pausedRelaySenders.get(peerId);
+    if (senderEntry) senderEntry.cleanup();
+    for (const entry of [...this.pausedRelaySenders.values()]) {
+      if (entry.targetPeerId === peerId) entry.cleanup();
+    }
+  }
+
+  private applyRelayBackpressure(sender: ConnectedClient, target: ConnectedClient): void {
+    if (this.pausedRelaySenders.has(sender.peerId)) return;
+    const senderSock = getWsRawSocket(sender.ws);
+    if (!senderSock || typeof senderSock.pause !== 'function') return;
+    if (
+      target.ws.readyState !== WebSocket.OPEN ||
+      sender.ws.readyState !== WebSocket.OPEN ||
+      senderSock.destroyed
+    ) {
+      return;
+    }
+    const targetSock = getWsRawSocket(target.ws);
+
+    if (typeof sender.ws.pause === 'function') {
+      sender.ws.pause();
+    } else {
+      senderSock.pause();
+    }
+    this.relayBackpressurePauses += 1;
+
+    let cleaned = false;
+    let pollTimer: NodeJS.Timeout | null = null;
+    const checkOrResume = () => {
+      if (cleaned) return;
+      const buffered = target.ws.bufferedAmount ?? 0;
+      if (
+        target.ws.readyState !== WebSocket.OPEN ||
+        sender.ws.readyState !== WebSocket.OPEN ||
+        senderSock.destroyed ||
+        buffered <= RELAY_BACKPRESSURE_LOW_WATER
+      ) {
+        cleanup();
+      }
+    };
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      targetSock?.removeListener?.('drain', checkOrResume);
+      target.ws.removeListener('close', cleanup);
+      sender.ws.removeListener('close', cleanup);
+      this.pausedRelaySenders.delete(sender.peerId);
+      if (!senderSock.destroyed) {
+        if (typeof sender.ws.resume === 'function') {
+          sender.ws.resume();
+        } else if (typeof senderSock.resume === 'function') {
+          senderSock.resume();
+        }
+      }
+      this.relayBackpressureResumes += 1;
+    };
+
+    this.pausedRelaySenders.set(sender.peerId, { targetPeerId: target.peerId, cleanup });
+    targetSock?.on?.('drain', checkOrResume);
+    target.ws.once('close', cleanup);
+    sender.ws.once('close', cleanup);
+    pollTimer = setInterval(checkOrResume, 50);
+    pollTimer.unref();
+  }
+
   private routeBinaryFrame(
     sender: ConnectedClient,
     data: Buffer | ArrayBuffer | Buffer[]
   ): void {
-    // `ws` hands us a freshly-allocated Buffer per message, so we can stamp
-    // the authenticated sender id into it and forward the very same buffer —
-    // the old path allocated + memcpy'd every relayed frame (256 KiB chunks
-    // at full link speed), burning relay CPU on pure copying.
     const bytes: Uint8Array = Buffer.isBuffer(data)
       ? data
       : data instanceof ArrayBuffer
@@ -964,14 +1269,16 @@ export class SignalingHub {
       return;
     }
 
-    // Do not let a fast sender grow the relay queue without bound. Current
-    // senders cap unacknowledged receiver work at 16 MiB and their own socket
-    // queue at 4 MiB, so this 64 MiB last-resort valve stays well above the
-    // honest pipeline while still stopping a runaway client.
+    const currentBuffered = target.ws.bufferedAmount ?? 0;
+    if (currentBuffered > this.relayMaxBufferedBytes) {
+      this.relayMaxBufferedBytes = currentBuffered;
+    }
+
+    // Hard safety cap preserved to bound memory under runaway slow readers.
     if (target.ws.bufferedAmount > MAX_RELAY_BUFFERED_BYTES) {
-      // Never silently drop a frame: ACKs would stall with a seemingly live
-      // socket. Release the runaway queue and make interruption explicit so
-      // clients can report it or reconnect/resume from durable chunks.
+      this.relayDrops++;
+      this.relayDroppedFrames++;
+      this.releaseRelayBackpressureForPeer(target.peerId);
       target.ws.terminate();
       return;
     }
@@ -979,6 +1286,14 @@ export class SignalingHub {
     overwriteRoutedSourcePeerId(bytes, sender.peerId);
 
     target.ws.send(bytes, { binary: true });
+
+    const afterSendBuffered = target.ws.bufferedAmount ?? 0;
+    if (afterSendBuffered > this.relayMaxBufferedBytes) {
+      this.relayMaxBufferedBytes = afterSendBuffered;
+    }
+    if (afterSendBuffered >= RELAY_BACKPRESSURE_HIGH_WATER) {
+      this.applyRelayBackpressure(sender, target);
+    }
   }
 
   private canCommunicate(a: ConnectedClient, b: ConnectedClient): boolean {
@@ -1093,7 +1408,11 @@ export class SignalingHub {
 
   private sendJson(ws: WebSocket, msg: ServerToClientMessage): void {
     if (ws.readyState === WebSocket.OPEN) {
-      if (ws.bufferedAmount > MAX_RELAY_BUFFERED_BYTES) { ws.terminate(); return; }
+      if (ws.bufferedAmount > MAX_RELAY_BUFFERED_BYTES) {
+        this.relayDrops++;
+        ws.terminate();
+        return;
+      }
       ws.send(JSON.stringify(msg));
     }
   }

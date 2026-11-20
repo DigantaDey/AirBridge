@@ -214,7 +214,7 @@ describe("native shell detection", () => {
   });
 
   it("accepts a speed-only bridge without clipboard/save methods", () => {
-    const updateTransferSpeed = vi.fn((_payload: string) => true);
+    const updateTransferSpeed = vi.fn<(payload: string) => boolean>(() => true);
     (window as { AirBridgeAndroid?: unknown }).AirBridgeAndroid = {
       updateTransferSpeed,
     };

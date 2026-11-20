@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -15,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentPaste
@@ -49,7 +49,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.tooling.preview.Devices
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -72,6 +75,12 @@ import com.airbridge.engine.ConnectionState
 import com.airbridge.engine.DeviceProfile
 import com.airbridge.engine.TransferDirection
 import com.airbridge.engine.TransferStatus
+
+@Preview(name = "Phone", device = Devices.PHONE, showBackground = true)
+@Preview(name = "Foldable", device = Devices.FOLDABLE, showBackground = true)
+@Preview(name = "Tablet", device = Devices.TABLET, showBackground = true)
+@Preview(name = "Desktop", device = Devices.DESKTOP, showBackground = true)
+annotation class FormFactorPreviews
 
 enum class AirBridgeDestination(val label: String, val icon: ImageVector) {
     TRANSFERS("Transfers", Icons.Outlined.SwapHoriz),
@@ -101,6 +110,8 @@ fun AirBridgeApp(
     onRequestBatteryExemption: () -> Unit,
     onOpenAppSettings: () -> Unit,
     onOpenPrivacyPolicy: () -> Unit,
+    onOpenWebsite: () -> Unit = {},
+    onOpenGitHub: () -> Unit = {},
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -164,6 +175,8 @@ fun AirBridgeApp(
             onRequestBatteryExemption = onRequestBatteryExemption,
             onOpenAppSettings = onOpenAppSettings,
             onOpenPrivacyPolicy = onOpenPrivacyPolicy,
+            onOpenWebsite = onOpenWebsite,
+            onOpenGitHub = onOpenGitHub,
             onBeamText = { text, onSent -> viewModel.beamText(text, onSent) },
             onPickClipboardImage = onPickClipboardImage,
             onBeamSystemClipboard = { viewModel.beamSystemClipboardNow() },
@@ -175,6 +188,13 @@ fun AirBridgeApp(
             onSetAutoClipboard = { viewModel.setAutoClipboard(it) },
             onSetReceiveClipboard = { viewModel.setReceiveClipboard(it) },
             onSetConnectionContinuity = { viewModel.setConnectionContinuity(it) },
+            onSetContactsOnComputer = { viewModel.setContactsOnComputer(it) },
+            onSetCallsFromComputer = { viewModel.setCallsFromComputer(it) },
+            onSetScreenSharing = { viewModel.setScreenSharing(it) },
+            onCopyDiagnostics = { viewModel.copyDiagnosticsReport() },
+            onShareDiagnostics = { viewModel.shareDiagnosticsReport() },
+            onConfirmDeepLink = { viewModel.confirmPendingDeepLink() },
+            onDismissDeepLink = { viewModel.dismissPendingDeepLink() },
             onForgetComputer = { viewModel.forgetComputer() },
         )
 
@@ -297,6 +317,8 @@ fun AirBridgeContent(
     onRequestBatteryExemption: () -> Unit,
     onOpenAppSettings: () -> Unit,
     onOpenPrivacyPolicy: () -> Unit,
+    onOpenWebsite: () -> Unit = {},
+    onOpenGitHub: () -> Unit = {},
     onBeamText: (String, () -> Unit) -> Unit,
     onPickClipboardImage: () -> Unit,
     onBeamSystemClipboard: () -> Unit,
@@ -308,6 +330,13 @@ fun AirBridgeContent(
     onSetAutoClipboard: (Boolean) -> Unit,
     onSetReceiveClipboard: (Boolean) -> Unit,
     onSetConnectionContinuity: (Boolean) -> Unit,
+    onSetContactsOnComputer: (Boolean) -> Unit = {},
+    onSetCallsFromComputer: (Boolean) -> Unit = {},
+    onSetScreenSharing: (Boolean) -> Unit = {},
+    onCopyDiagnostics: () -> Unit = {},
+    onShareDiagnostics: () -> Unit = {},
+    onConfirmDeepLink: () -> Unit = {},
+    onDismissDeepLink: () -> Unit = {},
     onForgetComputer: () -> Unit,
 ) {
     if (uiState.scannerOpen) {
@@ -335,14 +364,20 @@ fun AirBridgeContent(
         onSelectDestination(AirBridgeDestination.TRANSFERS)
     }
 
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
+
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val useRail = uiState.isPaired && maxWidth >= 600.dp
+        // Use NavigationRail on medium/expanded widths (>= 600.dp) AND on compact-height
+        // landscape phones (maxHeight < 480.dp) so vertical space is preserved for content.
+        val useRail = uiState.isPaired && (maxWidth >= 600.dp || maxHeight < 480.dp)
 
         Scaffold(
+            modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
             contentWindowInsets = WindowInsets.safeDrawing,
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             topBar = {
                 TopAppBar(
+                    scrollBehavior = scrollBehavior,
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.background,
                     ),
@@ -410,7 +445,7 @@ fun AirBridgeContent(
                         .consumeWindowInsets(innerPadding),
                 )
             } else {
-                val activeBody: @Composable (Modifier) -> Unit = { bodyMod ->
+                val activeBody: @Composable (Modifier, PaddingValues) -> Unit = { bodyMod, bodyPadding ->
                     when (destination) {
                         AirBridgeDestination.TRANSFERS -> TransfersScreen(
                             uiState = uiState,
@@ -429,7 +464,11 @@ fun AirBridgeContent(
                             onStopHotspotHandoff = onStopHotspotHandoff,
                             onOpenDownloads = onOpenDownloads,
                             onRequestBatteryExemption = onRequestBatteryExemption,
+                            onCopyDiagnostics = onCopyDiagnostics,
+                            onShareDiagnostics = onShareDiagnostics,
+                            onOpenAppSettings = onOpenAppSettings,
                             modifier = bodyMod,
+                            contentPadding = bodyPadding,
                         )
 
                         AirBridgeDestination.CLIPBOARD -> ClipboardScreen(
@@ -441,6 +480,7 @@ fun AirBridgeContent(
                             onCopyClipboardItem = onCopyClipboardItem,
                             onClearHistory = onClearClipboardHistory,
                             modifier = bodyMod,
+                            contentPadding = bodyPadding,
                         )
 
                         AirBridgeDestination.SETTINGS -> SettingsScreen(
@@ -454,21 +494,30 @@ fun AirBridgeContent(
                             onRequestBatteryExemption = onRequestBatteryExemption,
                             onOpenAppSettings = onOpenAppSettings,
                             onOpenPrivacyPolicy = onOpenPrivacyPolicy,
+                            onOpenWebsite = onOpenWebsite,
+                            onOpenGitHub = onOpenGitHub,
                             onOpenPairingSheet = onOpenPairingSheet,
                             onForgetComputer = onForgetComputer,
+                            onSetContactsOnComputer = onSetContactsOnComputer,
+                            onSetCallsFromComputer = onSetCallsFromComputer,
+                            onSetScreenSharing = onSetScreenSharing,
+                            onCopyDiagnostics = onCopyDiagnostics,
+                            onShareDiagnostics = onShareDiagnostics,
                             modifier = bodyMod,
+                            contentPadding = bodyPadding,
                         )
                     }
                 }
 
                 if (useRail) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(innerPadding)
-                            .consumeWindowInsets(innerPadding),
+                        modifier = Modifier.fillMaxSize(),
                     ) {
-                        NavigationRail(modifier = Modifier.fillMaxHeight()) {
+                        NavigationRail(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .padding(top = innerPadding.calculateTopPadding()),
+                        ) {
                             Spacer(modifier = Modifier.weight(0.05f))
                             AirBridgeDestination.entries.forEach { dest ->
                                 NavigationRailItem(
@@ -480,19 +529,59 @@ fun AirBridgeContent(
                             }
                             Spacer(modifier = Modifier.weight(1f))
                         }
-                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                            activeBody(Modifier.fillMaxSize())
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .consumeWindowInsets(innerPadding),
+                        ) {
+                            activeBody(Modifier.fillMaxSize(), innerPadding)
                         }
                     }
                 } else {
                     activeBody(
                         Modifier
-                            .padding(innerPadding)
-                            .consumeWindowInsets(innerPadding)
+                            .fillMaxSize()
+                            .consumeWindowInsets(innerPadding),
+                        innerPadding,
                     )
                 }
             }
         }
+    }
+
+    val pendingLink = uiState.pendingDeepLink
+    if (pendingLink != null) {
+        AlertDialog(
+            onDismissRequest = onDismissDeepLink,
+            title = { Text("Switch paired computer?") },
+            text = {
+                Text(
+                    buildString {
+                        append("An external link asked AirBridge to connect to ")
+                        append("${pendingLink.host}:${pendingLink.port}")
+                        if (uiState.configuredTarget.isNotBlank()) {
+                            append(", replacing your current paired computer (${uiState.configuredTarget})")
+                        }
+                        append(". Only continue if you initiated this pairing link.")
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = onConfirmDeepLink) {
+                    Text(
+                        text = "Switch to ${pendingLink.host}:${pendingLink.port}",
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismissDeepLink) {
+                    Text("Keep current computer")
+                }
+            },
+        )
     }
 
     if (pendingOffer != null) {
@@ -525,7 +614,7 @@ fun AirBridgeContent(
     }
 }
 
-@Preview(name = "Phone Connect", widthDp = 412, heightDp = 892)
+@FormFactorPreviews
 @Composable
 private fun AirBridgeConnectPreview() {
     AirBridgeTheme(themeMode = "dark") {
@@ -582,7 +671,7 @@ private fun AirBridgeConnectPreview() {
     }
 }
 
-@Preview(name = "Tablet Paired", widthDp = 960, heightDp = 640)
+@FormFactorPreviews
 @Composable
 private fun AirBridgeTabletPairedPreview() {
     AirBridgeTheme(themeMode = "dark") {

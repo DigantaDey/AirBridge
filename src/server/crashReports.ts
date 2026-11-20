@@ -59,7 +59,18 @@ const LONG_HEX = /\b[0-9a-fA-F]{24,}\b/g;
 const LONG_B64 = /\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}={0,2}/g;
 const PAIR = /\b(pair(?:Code|_code)?["']?\s*[:=]\s*["']?)[A-Za-z0-9-]{4,12}/gi;
 const QUERY_SECRET = /([?&](?:pair|token|ca|key)=)[^&\s"']+/gi;
+const BEAM_TOKEN = /(\/api\/beam\/)[A-Za-z0-9_-]+/gi;
+const AUTH_HEADER = /(\b(?:Authorization|X-Sentry-Auth)\s*[:=]\s*)(?:Bearer\s+|Basic\s+|Sentry\s+)?[^\r\n"']+/gi;
+const JSON_SECRET = /(["']?(?:pairCode|psk|password|token|secret|ssid)["']?\s*[:=]\s*["'])[^"'\r\n]+(["'])/gi;
+const WIFI_INLINE = /\b((?:ssid|psk|password)\s*=\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi;
+const HOME_PATH_POSIX = /\/(?:Users|home)\/[A-Za-z0-9._-]+/g;
+const HOME_PATH_WIN = /[A-Za-z]:\\Users\\[^\\\s"']+/g;
 const LOCAL_HOST = /\b[\w-]+\.local\b/g;
+
+function stripAnsiCodes(input: string): string {
+  const esc = String.fromCharCode(0x1b);
+  return input.replace(new RegExp(`${esc}\\[[0-9;]*m`, 'g'), '');
+}
 
 export interface ScrubContext {
   home?: string;
@@ -69,10 +80,16 @@ export interface ScrubContext {
 
 /** Removes paths to the home folder, user/host names, addresses, codes, keys and tokens. */
 export function scrub(text: string, ctx: ScrubContext = defaultScrubContext()): string {
-  let out = text;
+  let out = stripAnsiCodes(text);
   if (ctx.home && ctx.home.length > 1) out = out.split(ctx.home).join('~');
   out = out
+    .replace(HOME_PATH_POSIX, '~')
+    .replace(HOME_PATH_WIN, '~')
     .replace(QUERY_SECRET, '$1<redacted>')
+    .replace(BEAM_TOKEN, '$1<redacted>')
+    .replace(AUTH_HEADER, '$1<redacted>')
+    .replace(JSON_SECRET, '$1<redacted>$2')
+    .replace(WIFI_INLINE, '$1<redacted>')
     .replace(PAIR, '$1<redacted>')
     .replace(EMAIL, '<email>')
     .replace(MAC, '<mac>')
@@ -168,8 +185,9 @@ export class CrashStore {
     try {
       fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
       const file = path.join(this.dir, `${report.id}.json`);
-      fs.writeFileSync(`${file}.tmp`, JSON.stringify(report, null, 2), { mode: 0o600 });
-      fs.renameSync(`${file}.tmp`, file);
+      const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(report, null, 2), { mode: 0o600 });
+      fs.renameSync(tmp, file);
       this.prune();
       return true;
     } catch {
@@ -221,7 +239,14 @@ export class CrashStore {
     const r = this.get(id);
     if (!r) return;
     r.sent = sent;
-    try { fs.writeFileSync(path.join(this.dir, `${id}.json`), JSON.stringify(r, null, 2), { mode: 0o600 }); } catch { /* best effort */ }
+    const file = path.join(this.dir, `${id}.json`);
+    const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(r, null, 2), { mode: 0o600 });
+      fs.renameSync(tmp, file);
+    } catch {
+      try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
+    }
   }
 
   delete(id: string): boolean {

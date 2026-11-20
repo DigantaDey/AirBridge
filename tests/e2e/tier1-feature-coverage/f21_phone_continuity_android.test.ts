@@ -41,10 +41,13 @@ describe('F21: Phone continuity (Android)', () => {
     // there is no package/DRM classification or alternate capture path.
     expect(hasPermission(manifest, 'RECORD_AUDIO')).toBe(true);
     const screen = await readRepoFile(`${APP}/ScreenShareService.kt`);
+    const strings = await readRepoFile('android/app/src/main/res/values/strings.xml');
     expect(screen).toContain('AudioPlaybackCaptureConfiguration.Builder(mp)');
-    expect(screen).toContain('Also share permitted app audio (videos, music, games)');
-    expect(screen).toContain('isChecked = false');
-    expect(screen).toContain('not microphone recording');
+    expect(screen).toContain('R.string.screen_share_audio_checkbox');
+    expect(strings).toContain('Also share permitted app audio (videos, music, games)');
+    expect(screen).toContain('var shareAudioChecked by rememberSaveable(sessionId) { mutableStateOf(false) }');
+    expect(screen).toContain('R.string.screen_share_consent_body');
+    expect(strings).toContain('not microphone recording');
     expect(screen).toContain('setScreenAudioAvailable');
     expect(screen).not.toMatch(/netflix|hotstar|disney\+|drm app list/i);
     // Call history is not needed for remote controls and is intentionally absent.
@@ -133,6 +136,8 @@ describe('F21: Phone continuity (Android)', () => {
     expect(host).toContain('override fun onScreenShareEnded(');
     expect(host).toContain('phoneContinuity.detach()');
     const main = await readRepoFile(`${APP}/MainActivity.kt`);
-    expect(main).toContain('refreshContinuity()');
+    expect(main).toContain('viewModel.refreshSystemStatus()');
+    const vm = await readRepoFile(`${APP}/ui/viewmodels/AirBridgeViewModel.kt`);
+    expect(vm).toContain('NativeEngineHost.instance?.refreshContinuity()');
   });
 });

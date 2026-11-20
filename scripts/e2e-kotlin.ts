@@ -17,7 +17,7 @@ import crypto from 'node:crypto';
 import {
   WarpClient,
   type ClipboardBeamItem,
-  type TransferSessionView,
+  type SendableFileInput,
 } from '../src/client/engine/warpClient.js';
 
 const wsUrl = process.argv[2] || 'ws://127.0.0.1:3411/ws';
@@ -39,7 +39,7 @@ function waitFor(predicate: () => boolean, label: string, timeoutMs = 90_000): P
   });
 }
 
-function makeFile(name: string, size: number): { raw: Uint8Array; input: any } {
+function makeFile(name: string, size: number): { raw: Uint8Array; input: SendableFileInput } {
   const raw = new Uint8Array(size);
   for (let i = 0; i < size; i++) raw[i] = (i * 31 + 17) & 0xff;
   return {
@@ -58,7 +58,6 @@ function makeFile(name: string, size: number): { raw: Uint8Array; input: any } {
 async function main(): Promise<void> {
   console.log(`▸ e2e-kotlin: connecting to ${wsUrl}`);
   let tsClip: ClipboardBeamItem | null = null;
-  let tsIncoming: TransferSessionView | null = null;
 
   const ts = new WarpClient({
     wsUrl,
@@ -68,9 +67,6 @@ async function main(): Promise<void> {
     onIncomingClipboard: (item) => {
       tsClip = item;
       fs.writeFileSync(path.join(baseDir, 'ts-clipboard-received'), 'ok');
-    },
-    onIncomingTransfer: (t) => {
-      tsIncoming = t;
     },
   });
   let lastTransfers = '';

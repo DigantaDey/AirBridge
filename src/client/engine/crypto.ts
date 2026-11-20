@@ -181,9 +181,11 @@ export async function decryptControlPayload(
 export async function encryptBinaryChunk(
   aesKey: CryptoKey,
   plaintext: Uint8Array,
-  _fileIndex: number,
-  _chunkIndex: number
+  _fileIndex?: number,
+  _chunkIndex?: number
 ): Promise<{ iv: Uint8Array; ciphertext: Uint8Array }> {
+  void _fileIndex;
+  void _chunkIndex;
   // File/chunk indexes repeat across transfers and reconnects. Encoding them
   // in 8 nonce bytes left just 32 random bits for the same position under a
   // long-lived peer key. All 96 bits must be fresh randomness instead.

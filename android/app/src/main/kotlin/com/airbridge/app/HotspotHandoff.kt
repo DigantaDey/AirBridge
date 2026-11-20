@@ -9,6 +9,7 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
@@ -247,15 +248,18 @@ class HotspotHandoff(
     private fun startBle(keys: Handoff.Info, env: ByteArray) {
         sessionFallback = null
         if (missingBluetoothPermissions().isNotEmpty()) {
+            AndroidDiagnostics.bleGattState = "permission_missing"
             update(state.copy(phase = HandoffUiState.Phase.WAITING, message = HotspotHandoffGuidance.bluetoothPermissionMissing()))
             return
         }
         val adapter = bluetooth?.adapter
         if (adapter == null || !adapter.isEnabled) {
+            AndroidDiagnostics.bleGattState = "bluetooth_off"
             update(state.copy(phase = HandoffUiState.Phase.WAITING, message = HotspotHandoffGuidance.phoneBluetoothOff()))
             return
         }
         if (adapter.bluetoothLeScanner == null) {
+            AndroidDiagnostics.bleGattState = "scanner_unavailable"
             update(state.copy(phase = HandoffUiState.Phase.WAITING, message = HotspotHandoffGuidance.bluetoothUnavailable()))
             return
         }
@@ -285,6 +289,7 @@ class HotspotHandoff(
 
     private fun fail(message: String) {
         Log.w(TAG, message)
+        AndroidDiagnostics.recordEvent("handoff", message, "WARN")
         update(HandoffUiState(available = info() != null, phase = HandoffUiState.Phase.FAILED, message = message))
     }
 
@@ -350,8 +355,10 @@ class HotspotHandoff(
     }
 
     /**
-     * Scan → connect → read the tag (must prove the paired beacon secret) →
-     * write the sealed offer → follow the status characteristic.
+     * Scan → connect → requestMtu (with timeout fallback) → discoverServices →
+     * read the tag (must prove the paired beacon secret) → write the sealed offer →
+     * write CCCD descriptor → wait for onDescriptorWrite (with timeout fallback) →
+     * follow the status characteristic.
      */
     @SuppressLint("MissingPermission")
     private inner class BleOffer(private val keys: Handoff.Info, private val env: ByteArray) {
@@ -360,6 +367,8 @@ class HotspotHandoff(
         private var scanning = false
         private var closed = false
         private var lastStatus: Handoff.State? = null
+        private var servicesDiscoveryStarted = false
+        private var pollingStarted = false
 
         private val poll = object : Runnable {
             override fun run() {
@@ -370,10 +379,24 @@ class HotspotHandoff(
             }
         }
 
+        private val mtuFallback = Runnable {
+            val g = gatt ?: return@Runnable
+            if (!closed && !servicesDiscoveryStarted) {
+                servicesDiscoveryStarted = true
+                AndroidDiagnostics.bleGattState = "discovering_services_mtu_fallback"
+                g.discoverServices()
+            }
+        }
+
+        private val descriptorWriteFallback = Runnable {
+            startStatusPolling()
+        }
+
         private val findTimeout = Runnable {
             if (!closed && lastStatus == null) {
                 close()
                 if (ble === this) ble = null
+                AndroidDiagnostics.bleGattState = "find_timeout"
                 update(
                     state.copy(
                         phase = HandoffUiState.Phase.WAITING,
@@ -381,6 +404,14 @@ class HotspotHandoff(
                     ),
                 )
             }
+        }
+
+        private fun startStatusPolling() {
+            if (closed || pollingStarted) return
+            pollingStarted = true
+            main.removeCallbacks(descriptorWriteFallback)
+            main.removeCallbacks(poll)
+            main.postDelayed(poll, STATUS_POLL_MS)
         }
 
         private val scanCallback = object : ScanCallback() {
@@ -396,6 +427,8 @@ class HotspotHandoff(
                 main.post {
                     if (closed) return@post
                     scanning = false
+                    AndroidDiagnostics.bleGattState = "scan_failed_$errorCode"
+                    AndroidDiagnostics.bleLastStatus = errorCode
                     update(state.copy(phase = HandoffUiState.Phase.WAITING, message = HotspotHandoffGuidance.scanFailed(errorCode)))
                 }
             }
@@ -405,22 +438,51 @@ class HotspotHandoff(
             override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
                 main.post {
                     if (closed || g !== gatt) return@post
+                    AndroidDiagnostics.bleLastStatus = status
                     when (newState) {
-                        BluetoothProfile.STATE_CONNECTED -> if (!g.requestMtu(MTU)) g.discoverServices()
-                        BluetoothProfile.STATE_DISCONNECTED -> next()
+                        BluetoothProfile.STATE_CONNECTED -> {
+                            AndroidDiagnostics.bleGattState = "connected"
+                            servicesDiscoveryStarted = false
+                            if (g.requestMtu(MTU)) {
+                                main.removeCallbacks(mtuFallback)
+                                main.postDelayed(mtuFallback, MTU_TIMEOUT_MS)
+                            } else {
+                                servicesDiscoveryStarted = true
+                                g.discoverServices()
+                            }
+                        }
+                        BluetoothProfile.STATE_DISCONNECTED -> {
+                            AndroidDiagnostics.bleGattState = "disconnected"
+                            next()
+                        }
                     }
                 }
             }
 
             override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
-                main.post { if (!closed && g === gatt) g.discoverServices() }
+                main.post {
+                    if (closed || g !== gatt) return@post
+                    main.removeCallbacks(mtuFallback)
+                    AndroidDiagnostics.bleMtu = mtu
+                    AndroidDiagnostics.bleLastStatus = status
+                    if (!servicesDiscoveryStarted) {
+                        servicesDiscoveryStarted = true
+                        AndroidDiagnostics.bleGattState = "discovering_services"
+                        g.discoverServices()
+                    }
+                }
             }
 
             override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
                 main.post {
                     if (closed || g !== gatt) return@post
+                    AndroidDiagnostics.bleLastStatus = status
                     val tag = g.getService(SERVICE)?.getCharacteristic(TAG_CHAR)
-                    if (status != BluetoothGatt.GATT_SUCCESS || tag == null || !g.readCharacteristic(tag)) next()
+                    if (status != BluetoothGatt.GATT_SUCCESS || tag == null || !g.readCharacteristic(tag)) {
+                        next()
+                    } else {
+                        AndroidDiagnostics.bleGattState = "reading_tag"
+                    }
                 }
             }
 
@@ -448,9 +510,19 @@ class HotspotHandoff(
             override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
                 main.post { onWritten(g, c.uuid, status) }
             }
+
+            override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+                main.post {
+                    if (closed || g !== gatt) return@post
+                    AndroidDiagnostics.bleLastStatus = status
+                    AndroidDiagnostics.bleGattState = "subscribed"
+                    startStatusPolling()
+                }
+            }
         }
 
         fun start() {
+            AndroidDiagnostics.bleGattState = "scanning"
             main.postDelayed(findTimeout, BLE_FIND_MS)
             scan()
         }
@@ -459,6 +531,8 @@ class HotspotHandoff(
             if (closed) return
             closed = true
             main.removeCallbacks(poll)
+            main.removeCallbacks(mtuFallback)
+            main.removeCallbacks(descriptorWriteFallback)
             main.removeCallbacks(findTimeout)
             stopScan()
             gatt?.let { runCatching { it.disconnect(); it.close() } }
@@ -489,12 +563,19 @@ class HotspotHandoff(
 
         private fun connect(device: BluetoothDevice) {
             stopScan()
+            servicesDiscoveryStarted = false
+            pollingStarted = false
+            AndroidDiagnostics.bleGattState = "connecting"
             gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
         }
 
         /** Not our computer (or it went away): drop it and keep scanning. */
         private fun next() {
             main.removeCallbacks(poll)
+            main.removeCallbacks(mtuFallback)
+            main.removeCallbacks(descriptorWriteFallback)
+            servicesDiscoveryStarted = false
+            pollingStarted = false
             gatt?.let { runCatching { it.disconnect(); it.close() } }
             gatt = null
             scan()
@@ -510,6 +591,7 @@ class HotspotHandoff(
 
         private fun handleValue(g: BluetoothGatt, uuid: UUID, value: ByteArray, status: Int) {
             if (closed || g !== gatt) return
+            AndroidDiagnostics.bleLastStatus = status
             when (uuid) {
                 TAG_CHAR -> {
                     if (status != BluetoothGatt.GATT_SUCCESS || !Handoff.matchesTag(keys.beacon, value, System.currentTimeMillis())) {
@@ -527,6 +609,7 @@ class HotspotHandoff(
                     applyStatus(s, reason)
                     if (s == Handoff.State.JOINED || s.terminal) {
                         // Done with Bluetooth: the session takes over on the hotspot.
+                        AndroidDiagnostics.bleGattState = "completed_${s.name.lowercase()}"
                         close()
                         if (ble === this) ble = null
                     }
@@ -536,36 +619,48 @@ class HotspotHandoff(
 
         private fun onWritten(g: BluetoothGatt, uuid: UUID, status: Int) {
             if (closed || g !== gatt || uuid != OFFER) return
+            AndroidDiagnostics.bleLastStatus = status
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.w(TAG, "Offer write failed (GATT status $status)")
+                AndroidDiagnostics.bleGattState = "write_failed_$status"
                 next()
                 return
             }
+            AndroidDiagnostics.bleGattState = "offer_written"
             update(state.copy(phase = HandoffUiState.Phase.WAITING, message = "Sent over Bluetooth. Waiting for approval on the computer…"))
-            subscribe(g)
-            main.postDelayed(poll, STATUS_POLL_MS)
+            if (subscribe(g)) {
+                // Wait for onDescriptorWrite before issuing readCharacteristic polling,
+                // with a fallback timer in case the remote GATT stack never acks CCCD.
+                main.removeCallbacks(descriptorWriteFallback)
+                main.postDelayed(descriptorWriteFallback, DESCRIPTOR_WRITE_TIMEOUT_MS)
+            } else {
+                startStatusPolling()
+            }
         }
 
         @Suppress("DEPRECATION")
         private fun write(g: BluetoothGatt) {
             val c = g.getService(SERVICE)?.getCharacteristic(OFFER) ?: return next()
             val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                g.writeCharacteristic(c, env, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothGatt.GATT_SUCCESS
+                val code = g.writeCharacteristic(c, env, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+                AndroidDiagnostics.bleLastStatus = code
+                isApi33GattWriteSuccess(code)
             } else {
                 c.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                 c.value = env
                 g.writeCharacteristic(c)
             }
-            if (!ok) next()
+            if (!ok) next() else AndroidDiagnostics.bleGattState = "writing_offer"
         }
 
         @Suppress("DEPRECATION")
-        private fun subscribe(g: BluetoothGatt) {
-            val c = statusChar(g) ?: return
-            if (!g.setCharacteristicNotification(c, true)) return
-            val cccd = c.getDescriptor(CCCD) ?: return
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                g.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+        private fun subscribe(g: BluetoothGatt): Boolean {
+            val c = statusChar(g) ?: return false
+            if (!g.setCharacteristicNotification(c, true)) return false
+            val cccd = c.getDescriptor(CCCD) ?: return false
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                g.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ==
+                    BluetoothStatusCodes.SUCCESS
             } else {
                 cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                 g.writeDescriptor(cccd)
@@ -580,6 +675,8 @@ class HotspotHandoff(
         private const val SESSION_REPLY_MS = 6_000L
         private const val BLE_FIND_MS = 30_000L
         private const val STATUS_POLL_MS = 2_000L
+        internal const val MTU_TIMEOUT_MS = 1_500L
+        internal const val DESCRIPTOR_WRITE_TIMEOUT_MS = 1_500L
         private const val MTU = 517
         private val SERVICE: UUID = UUID.fromString(Handoff.SERVICE_UUID)
         private val TAG_CHAR: UUID = UUID.fromString(Handoff.TAG_UUID)
@@ -587,7 +684,12 @@ class HotspotHandoff(
         private val STATUS: UUID = UUID.fromString(Handoff.STATUS_UUID)
         private val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
+        /** API 33+ BluetoothGatt.writeCharacteristic returns [BluetoothStatusCodes.SUCCESS] (0). */
+        internal fun isApi33GattWriteSuccess(statusCode: Int): Boolean =
+            statusCode == BluetoothStatusCodes.SUCCESS
+
         /** Permissions required to create a local-only hotspot, independent of Bluetooth. */
+        @SuppressLint("InlinedApi")
         fun requiredHotspotPermissionsFor(sdk: Int): Array<String> = buildList {
             if (sdk >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.NEARBY_WIFI_DEVICES)
             else {
@@ -598,6 +700,7 @@ class HotspotHandoff(
         }.toTypedArray()
 
         /** BLE is an optional fast handoff path; manual Wi-Fi setup remains available without it. */
+        @SuppressLint("InlinedApi")
         fun requiredBluetoothPermissionsFor(sdk: Int): Array<String> = if (sdk >= Build.VERSION_CODES.S) {
             arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
         } else {

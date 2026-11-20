@@ -366,6 +366,31 @@ export async function resolveTlsMaterial(
 /** Loopback requests keep plain HTTP: `http://localhost` is already a secure context. */
 export function isLoopbackAddress(remoteAddress: string | undefined): boolean {
   if (!remoteAddress) return false;
-  const normalized = remoteAddress.replace(/^::ffff:/, '');
-  return normalized === '::1' || (net.isIPv4(normalized) && normalized.startsWith('127.'));
+  const clean = remoteAddress.trim().replace(/^\[|\]$/g, '').split('%')[0]!.toLowerCase();
+  if (clean === 'localhost') return true;
+  const v4Mapped = clean.replace(/^::ffff:/, '');
+  if (net.isIPv4(v4Mapped)) {
+    return v4Mapped.startsWith('127.');
+  }
+  // Hex IPv4-mapped IPv6, e.g. ::ffff:7f00:0001 or 0:0:0:0:0:ffff:7f00:1
+  const hexMapped = /^(?:0*:){5}ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$|^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(clean);
+  if (hexMapped) {
+    const hi = Number.parseInt(hexMapped[1] ?? hexMapped[3] ?? '0', 16);
+    return (hi >>> 8) === 127;
+  }
+  // Expanded or compressed IPv6 ::1 (0:0:0:0:0:0:0:1)
+  if (clean === '::1') return true;
+  if (net.isIPv6(clean)) {
+    const parts = clean.split('::');
+    if (parts.length <= 2) {
+      const head = parts[0] ? parts[0].split(':') : [];
+      const tail = parts.length === 2 ? (parts[1] ? parts[1].split(':') : []) : [];
+      const missing = 8 - head.length - tail.length;
+      if (missing >= 0) {
+        const full = [...head, ...new Array<string>(missing).fill('0'), ...tail].map((g) => Number.parseInt(g || '0', 16));
+        return full.length === 8 && full.slice(0, 7).every((n) => n === 0) && full[7] === 1;
+      }
+    }
+  }
+  return false;
 }

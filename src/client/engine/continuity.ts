@@ -14,6 +14,9 @@
  *    never from "nearby" strangers on the same network.
  */
 import {
+  CALL_AUDIO_MAX_FRAME_BYTES,
+  CALL_AUDIO_MAX_FRAMES,
+  CALL_AUDIO_SAMPLE_RATE,
   CONTINUITY_PROTOCOL_VERSION,
   DEFAULT_CONTACTS_LIMIT,
   MAX_CONTACTS_PER_RESPONSE,
@@ -26,10 +29,13 @@ import {
   SCREEN_MAX_INFLIGHT,
   buildVCards,
   clampScreenParams,
+  decodeCallAudioFrame,
   decodeScreenAudioFrame,
   decodeScreenFrame,
   decodeScreenH264Packet,
   dialableNumber,
+  encodeCallAudioAad,
+  encodeCallAudioFrame,
   encodeScreenFrame,
   encodeScreenFrameAad,
   isCallAction,
@@ -43,6 +49,7 @@ import {
   type CallInfo,
   type ContactCard,
   type ContinuityFeature,
+  type SavedContactRecord,
   type ScreenShareState,
 } from '../../shared/continuity.js';
 import type { ControlPayload, PeerSummary } from '../../shared/protocol.js';
@@ -110,6 +117,53 @@ export interface ScreenShareRequestView {
   requestedAt: number;
 }
 
+export interface CallAudioStateView {
+  peerId: string;
+  callId: string;
+  active: boolean;
+  muted: boolean;
+  route: 'computer' | 'phone';
+  reason?: string;
+}
+
+export interface CallAudioFrame {
+  callId: string;
+  peerId: string;
+  seq: number;
+  sampleRate: number;
+  channels: 1 | 2;
+  frames: number;
+  ptsMs: number;
+  data: Uint8Array;
+}
+
+export interface ContinuityDiagnosticsSnapshot {
+  screenShare: {
+    activeSessions: number;
+    decoderMode: string | null;
+    codec: string | null;
+    framesDecoded: number;
+    decodeErrors: number;
+    keyframesReceived: number;
+    pliSent: number;
+    pliReceived: number;
+  };
+  contacts: {
+    savedCount: number;
+    removedByUser: number;
+    clearedOnDisconnect: number;
+  };
+  callAudio: {
+    active: boolean;
+    muted: boolean;
+    route: 'computer' | 'phone';
+    framesSent: number;
+    framesReceived: number;
+    packetsDropped: number;
+    lastError: string | null;
+  };
+}
+
 export interface ContinuitySnapshot {
   /** What each peer announced it can do (empty = older app / not announced yet). */
   peerFeatures: Record<string, ContinuityFeature[]>;
@@ -117,6 +171,8 @@ export interface ContinuitySnapshot {
   screenShares: ScreenShareView[];
   screenRequests: ScreenShareRequestView[];
   sharedContacts: ContactShareItem[];
+  savedContacts?: SavedContactRecord[];
+  callAudio?: CallAudioStateView | null;
   batteryStatus: Record<string, PhoneBatteryStatusView>;
 }
 
@@ -126,6 +182,8 @@ export const EMPTY_CONTINUITY: ContinuitySnapshot = {
   screenShares: [],
   screenRequests: [],
   sharedContacts: [],
+  savedContacts: [],
+  callAudio: null,
   batteryStatus: {},
 };
 
@@ -197,8 +255,17 @@ export interface ContinuityOptions {
   contactProvider?: (query: string, limit: number) => Promise<ContactCard[]> | ContactCard[];
   /** This device can execute call commands (phones / simulators). */
   callController?: (command: CallCommand) => Promise<CallCommandResult> | CallCommandResult;
+  /** This device can bridge two-way encrypted call audio (MacBook browser / desktop). */
+  callAudioAvailable?: boolean;
+  /** Phone/controller side handler for call-audio start/stop/mute commands. */
+  callAudioController?: (command: { peerId: string; callId: string; action: 'start' | 'stop' | 'mute' | 'unmute'; sampleRate?: number }) => Promise<{ active: boolean; muted: boolean; route?: 'computer' | 'phone'; reason?: string }> | { active: boolean; muted: boolean; route?: 'computer' | 'phone'; reason?: string };
   /** This device can share its screen (getDisplayMedia, or a test source). */
   screenSourceAvailable?: boolean | (() => boolean);
+  /** Optional callback invoked when a viewer asks this source for a fresh H.264 IDR keyframe. */
+  onScreenKeyframeRequest?: (sessionId: string, reason?: string) => void;
+  /** Persistence store for permanent saved contacts. */
+  storage?: Storage | null;
+  storagePrefix?: string;
   onCallStateChanged?: (call: CallView) => void;
   onIncomingContact?: (item: ContactShareItem) => void;
   onScreenShareRequest?: (request: ScreenShareRequestView) => void;
@@ -226,9 +293,11 @@ const ENDED_CALL_LINGER_MS = 5_000;
 const STOPPED_SHARE_LINGER_MS = 8_000;
 const MAX_CALLS = 8;
 const MAX_SHARED_CONTACTS = 30;
+const MAX_SAVED_CONTACTS = 2000;
 const MAX_CHARGE_TIME_REMAINING_MS = 7 * 24 * 60 * 60 * 1000;
 const ACK_STALL_MS = 3_000;
 const STATS_EMIT_MS = 500;
+const SAVED_CONTACTS_STORAGE_SUFFIX = ':continuity:savedContacts:v1';
 
 interface Pending<T> {
   peerId: string;
@@ -275,6 +344,7 @@ export class ContinuityManager {
   private readonly viewers = new Map<string, ViewerSession>();
   private readonly requests = new Map<string, { view: ScreenShareRequestView; timer: ReturnType<typeof setTimeout> }>();
   private readonly sharedContacts: ContactShareItem[] = [];
+  private savedContacts: SavedContactRecord[] = [];
   private readonly batteryStatus = new Map<string, PhoneBatteryStatusView>();
   private readonly lowBatteryNotified = new Set<string>();
   private readonly contactRequests = new Map<string, Pending<ContactsQueryResult>>();
@@ -284,12 +354,79 @@ export class ContinuityManager {
   private readonly screenFrameQueues = new Map<string, Promise<void>>();
   private readonly videoListeners = new Map<string, Set<(frame: ScreenVideoFrame) => void>>();
   private readonly audioListeners = new Map<string, Set<(frame: ScreenAudioFrame) => void>>();
+  private readonly callAudioListeners = new Map<string, Set<(frame: CallAudioFrame) => void>>();
   private readonly lingerTimers = new Set<ReturnType<typeof setTimeout>>();
-  private knownPeers = new Map<string, string>();
+  private knownPeers = new Map<string, { peerId: string; publicKey: string; deviceId?: string; peerKey: string; name?: string }>();
+  private callAudioState: CallAudioStateView | null = null;
+  private callAudioSeq = 1;
+  private readonly lastCallAudioCursor = new Map<string, { seq: number; ptsMs?: number }>();
   private statsTimer: ReturnType<typeof setTimeout> | null = null;
+  private startupContactsReconciled = false;
   private destroyed = false;
 
-  constructor(private readonly host: ContinuityHost, private options: ContinuityOptions = {}) {}
+  // Continuity diagnostics telemetry
+  private screenDecoderMode: string | null = null;
+  private screenCodec: string | null = null;
+  private screenFramesDecoded = 0;
+  private screenDecodeErrors = 0;
+  private screenKeyframesReceived = 0;
+  private screenPliSent = 0;
+  private screenPliReceived = 0;
+  private contactsRemovedByUser = 0;
+  private contactsClearedOnDisconnect = 0;
+  private callAudioFramesSent = 0;
+  private callAudioFramesReceived = 0;
+  private callAudioPacketsDropped = 0;
+  private callAudioLastError: string | null = null;
+
+  constructor(private readonly host: ContinuityHost, private options: ContinuityOptions = {}) {
+    this.loadSavedContacts();
+  }
+
+  private savedContactsStorageKey(): string {
+    return `${this.options.storagePrefix ?? 'airbridge'}${SAVED_CONTACTS_STORAGE_SUFFIX}`;
+  }
+
+  private loadSavedContacts(): void {
+    const store = this.options.storage;
+    if (!store) return;
+    try {
+      const raw = store.getItem(this.savedContactsStorageKey());
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return;
+      const restored: SavedContactRecord[] = [];
+      for (const entry of parsed.slice(0, MAX_SAVED_CONTACTS)) {
+        if (!entry || typeof entry !== 'object') continue;
+        const item = entry as Partial<SavedContactRecord>;
+        const contact = sanitizeContact(item.contact);
+        if (!contact || typeof item.id !== 'string' || typeof item.peerId !== 'string' || typeof item.peerKey !== 'string') continue;
+        restored.push({
+          id: item.id.slice(0, 256),
+          peerId: item.peerId,
+          peerDeviceId: typeof item.peerDeviceId === 'string' ? item.peerDeviceId : undefined,
+          peerKey: item.peerKey,
+          peerName: typeof item.peerName === 'string' && item.peerName.trim() ? item.peerName : 'Paired device',
+          contact,
+          source: item.source === 'shared' ? 'shared' : 'synced',
+          savedAt: typeof item.savedAt === 'number' && Number.isFinite(item.savedAt) ? item.savedAt : Date.now(),
+        });
+      }
+      this.savedContacts = restored;
+    } catch {
+      this.savedContacts = [];
+    }
+  }
+
+  private persistSavedContacts(): void {
+    const store = this.options.storage;
+    if (!store) return;
+    try {
+      store.setItem(this.savedContactsStorageKey(), JSON.stringify(this.savedContacts.slice(0, MAX_SAVED_CONTACTS)));
+    } catch {
+      // ignore quota/private-mode storage failure
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Capabilities
@@ -302,6 +439,7 @@ export class ContinuityManager {
     const out: ContinuityFeature[] = ['contacts.receive', 'screen.view', 'screen.audio.play'];
     if (this.options.contactProvider) out.push('contacts.provide');
     if (this.options.callController) out.push('calls.control');
+    if (this.options.callAudioAvailable || this.options.callAudioController) out.push('calls.audio');
     const screen = this.options.screenSourceAvailable;
     if (typeof screen === 'function' ? screen() : screen) out.push('screen.source');
     return out;
@@ -327,27 +465,98 @@ export class ContinuityManager {
    * session key is re-announced to (its app may have restarted) but keeps its
    * calls and screen sessions; a peer that left is cleaned up.
    */
-  onPeersChanged(peers: Array<{ peerId: string; publicKey: string }>): void {
-    const next = new Map(peers.map((p) => [p.peerId, p.publicKey]));
-    for (const [id, key] of next) {
-      if (this.knownPeers.get(id) === key) continue;
+  onPeersChanged(
+    peers: Array<{ peerId: string; publicKey: string; deviceId?: string; identityKey?: string; name?: string }>,
+  ): void {
+    const next = new Map<string, { peerId: string; publicKey: string; deviceId?: string; peerKey: string; name?: string }>();
+    for (const p of peers) {
+      const peerKey = p.identityKey || p.deviceId || p.publicKey;
+      next.set(p.peerId, { peerId: p.peerId, publicKey: p.publicKey, deviceId: p.deviceId, peerKey, name: p.name });
+      // Keep saved contact peer metadata up to date when the peer reloads/reconnects
+      let updated = false;
+      for (let i = 0; i < this.savedContacts.length; i += 1) {
+        const record = this.savedContacts[i]!;
+        const matches =
+          (record.peerDeviceId && p.deviceId && record.peerDeviceId === p.deviceId) ||
+          record.peerKey === peerKey ||
+          record.peerId === p.peerId;
+        if (matches && (record.peerId !== p.peerId || record.peerKey !== peerKey || (p.name && record.peerName !== p.name))) {
+          this.savedContacts[i] = {
+            ...record,
+            peerId: p.peerId,
+            peerDeviceId: p.deviceId ?? record.peerDeviceId,
+            peerKey,
+            peerName: p.name ?? record.peerName,
+          };
+          updated = true;
+        }
+      }
+      if (updated) this.persistSavedContacts();
+    }
+    for (const [id, info] of next) {
+      if (this.knownPeers.get(id)?.publicKey === info.publicKey) continue;
       this.announce(id);
       // The first hello can race the peer's own roster update and be dropped
       // there; one retry covers it (peers also answer a first hello in kind).
       this.linger(() => {
-        if (this.knownPeers.get(id) === key && !this.peerFeatures.has(id)) this.announce(id);
+        if (this.knownPeers.get(id)?.publicKey === info.publicKey && !this.peerFeatures.has(id)) this.announce(id);
       }, 2_000);
     }
-    for (const id of this.knownPeers.keys()) {
-      if (!next.has(id)) this.dropPeer(id);
+    for (const [id, prev] of this.knownPeers.entries()) {
+      if (!next.has(id)) this.dropPeer(id, prev, [...next.values()]);
     }
     this.knownPeers = next;
+    if (!this.startupContactsReconciled) {
+      this.startupContactsReconciled = true;
+      if (this.savedContacts.length > 0) {
+        this.linger(() => {
+          const active = [...this.knownPeers.values()];
+          const before = this.savedContacts.length;
+          if (before === 0) return;
+          this.savedContacts = this.savedContacts.filter((record) =>
+            active.some(
+              (p) =>
+                (record.peerDeviceId && p.deviceId && record.peerDeviceId === p.deviceId) ||
+                record.peerKey === p.peerKey ||
+                record.peerId === p.peerId,
+            ),
+          );
+          const removed = before - this.savedContacts.length;
+          if (removed > 0) {
+            this.contactsClearedOnDisconnect += removed;
+            this.persistSavedContacts();
+            this.host.emit();
+          }
+        }, 3_000);
+      }
+    }
   }
 
-  private dropPeer(peerId: string): void {
+  private dropPeer(
+    peerId: string,
+    prevInfo?: { peerId: string; publicKey: string; deviceId?: string; peerKey: string },
+    remainingPeers: Array<{ peerId: string; publicKey: string; deviceId?: string; peerKey: string }> = [],
+  ): void {
     this.peerFeatures.delete(peerId);
     this.batteryStatus.delete(peerId);
     this.lowBatteryNotified.delete(peerId);
+    const stillConnectedElsewhere = prevInfo
+      ? remainingPeers.some(
+          (p) =>
+            (prevInfo.deviceId && p.deviceId === prevInfo.deviceId) ||
+            p.peerKey === prevInfo.peerKey,
+        )
+      : false;
+    if (!stillConnectedElsewhere) {
+      this.purgeSavedContactsForPeer(peerId, prevInfo?.peerKey, prevInfo?.deviceId);
+    }
+    if (this.callAudioState?.peerId === peerId) {
+      this.callAudioState = null;
+      this.callAudioListeners.clear();
+    }
+    for (const k of [...this.lastCallAudioCursor.keys()]) {
+      if (k.startsWith(`${peerId}:`)) this.lastCallAudioCursor.delete(k);
+    }
     for (const [key, entry] of this.calls) {
       if (entry.view.peerId === peerId) {
         if (entry.timer) clearTimeout(entry.timer);
@@ -377,6 +586,23 @@ export class ContinuityManager {
     this.host.emit();
   }
 
+  private purgeSavedContactsForPeer(peerId: string, peerKey?: string, peerDeviceId?: string): void {
+    const before = this.savedContacts.length;
+    if (before === 0) return;
+    this.savedContacts = this.savedContacts.filter((record) => {
+      if (peerDeviceId && record.peerDeviceId === peerDeviceId) return false;
+      if (peerKey && record.peerKey === peerKey) return false;
+      if (record.peerId === peerId && !peerDeviceId && !peerKey) return false;
+      if (record.peerId === peerId && (!record.peerDeviceId || record.peerDeviceId === peerDeviceId)) return false;
+      return true;
+    });
+    const removed = before - this.savedContacts.length;
+    if (removed > 0) {
+      this.contactsClearedOnDisconnect += removed;
+      this.persistSavedContacts();
+    }
+  }
+
   snapshot(): ContinuitySnapshot {
     return {
       peerFeatures: Object.fromEntries(this.peerFeatures),
@@ -384,7 +610,41 @@ export class ContinuityManager {
       screenShares: [...this.viewers.values(), ...this.sources.values()].map((s) => ({ ...s.view })),
       screenRequests: [...this.requests.values()].map((r) => ({ ...r.view })),
       sharedContacts: this.sharedContacts.slice(),
+      savedContacts: this.savedContacts.map((r) => ({ ...r })),
+      callAudio: this.callAudioState ? { ...this.callAudioState } : null,
       batteryStatus: Object.fromEntries(this.batteryStatus),
+    };
+  }
+
+  getDiagnostics(): ContinuityDiagnosticsSnapshot {
+    const activeSessions = [...this.viewers.values(), ...this.sources.values()].filter((s) =>
+      ['requesting', 'pending', 'active'].includes(s.view.state),
+    ).length;
+    return {
+      screenShare: {
+        activeSessions,
+        decoderMode: this.screenDecoderMode,
+        codec: this.screenCodec,
+        framesDecoded: this.screenFramesDecoded,
+        decodeErrors: this.screenDecodeErrors,
+        keyframesReceived: this.screenKeyframesReceived,
+        pliSent: this.screenPliSent,
+        pliReceived: this.screenPliReceived,
+      },
+      contacts: {
+        savedCount: this.savedContacts.length,
+        removedByUser: this.contactsRemovedByUser,
+        clearedOnDisconnect: this.contactsClearedOnDisconnect,
+      },
+      callAudio: {
+        active: this.callAudioState?.active ?? false,
+        muted: this.callAudioState?.muted ?? false,
+        route: this.callAudioState?.route ?? 'phone',
+        framesSent: this.callAudioFramesSent,
+        framesReceived: this.callAudioFramesReceived,
+        packetsDropped: this.callAudioPacketsDropped,
+        lastError: this.callAudioLastError,
+      },
     };
   }
 
@@ -414,6 +674,10 @@ export class ContinuityManager {
     this.viewers.clear();
     this.requests.clear();
     this.frameListeners.clear();
+    this.videoListeners.clear();
+    this.audioListeners.clear();
+    this.callAudioListeners.clear();
+    this.callAudioState = null;
   }
 
   private peerName(peerId: string): string {
@@ -488,6 +752,14 @@ export class ContinuityManager {
       case 'screen-share-ack':
         this.receiveScreenAck(fromPeerId, payload.sessionId, payload.seq);
         return true;
+      case 'screen-share-keyframe': {
+        const session = this.sources.get(payload.sessionId);
+        if (session && session.view.peerId === fromPeerId) {
+          this.screenPliReceived++;
+          this.options.onScreenKeyframeRequest?.(payload.sessionId, payload.reason);
+        }
+        return true;
+      }
       case 'screen-share-stop': {
         const session = this.sources.get(payload.sessionId);
         if (session && session.view.peerId === fromPeerId) {
@@ -502,6 +774,12 @@ export class ContinuityManager {
         }
         return true;
       }
+      case 'call-audio-control':
+        await this.executeCallAudioControl(fromPeerId, payload);
+        return true;
+      case 'call-audio-state':
+        this.receiveCallAudioState(fromPeerId, payload);
+        return true;
       default:
         return false;
     }
@@ -542,6 +820,7 @@ export class ContinuityManager {
     const contacts = Array.isArray(payload.contacts)
       ? payload.contacts.slice(0, MAX_CONTACTS_PER_RESPONSE).map(sanitizeContact).filter((c): c is ContactCard => c !== null)
       : [];
+    this.upsertSavedContacts(fromPeerId, contacts, 'synced');
     pending.resolve({
       contacts,
       total: typeof payload.total === 'number' && payload.total >= contacts.length ? payload.total : contacts.length,
@@ -591,8 +870,76 @@ export class ContinuityManager {
       shareId: payload.shareId, peerId: fromPeerId, peerName: this.peerName(fromPeerId), direction: 'incoming',
       contacts, vcard: buildVCards(contacts), timestamp: Date.now(),
     };
+    this.upsertSavedContacts(fromPeerId, contacts, 'shared');
     this.remember(item);
     this.options.onIncomingContact?.(item);
+  }
+
+  private upsertSavedContacts(peerId: string, cards: ContactCard[], source: 'synced' | 'shared'): void {
+    if (cards.length === 0) return;
+    const peer = this.host.peer(peerId);
+    const peerDeviceId = peer?.device.deviceId;
+    const peerKey = peer?.device.identityKey || peerDeviceId || peer?.device.publicKey || peerId;
+    const peerName = peer?.device.name || 'Paired device';
+    const now = Date.now();
+    const byId = new Map<string, SavedContactRecord>();
+    for (const existing of this.savedContacts) byId.set(existing.id, existing);
+
+    for (const contact of cards) {
+      const baseKey =
+        contact.id ||
+        contact.phones[0]?.number.replace(/\D/g, '') ||
+        contact.emails[0]?.address.toLowerCase() ||
+        contact.name.toLowerCase();
+      const id = `${peerDeviceId || peerKey}:${baseKey}`.slice(0, 256);
+      byId.set(id, {
+        id,
+        peerId,
+        peerDeviceId,
+        peerKey,
+        peerName,
+        contact,
+        source,
+        savedAt: now,
+      });
+    }
+
+    this.savedContacts = [...byId.values()].slice(0, MAX_SAVED_CONTACTS);
+    this.persistSavedContacts();
+    this.host.emit();
+  }
+
+  removeSavedContact(contactId: string): boolean {
+    const before = this.savedContacts.length;
+    this.savedContacts = this.savedContacts.filter((record) => record.id !== contactId);
+    if (this.savedContacts.length === before) return false;
+    this.contactsRemovedByUser++;
+    this.persistSavedContacts();
+    this.host.emit();
+    return true;
+  }
+
+  clearSavedContacts(peerId?: string): number {
+    const before = this.savedContacts.length;
+    if (!peerId) {
+      this.savedContacts = [];
+    } else {
+      const peer = this.host.peer(peerId);
+      const peerDeviceId = peer?.device.deviceId;
+      const peerKey = peer?.device.identityKey || peerDeviceId || peer?.device.publicKey;
+      this.savedContacts = this.savedContacts.filter((record) => {
+        if (peerDeviceId && record.peerDeviceId === peerDeviceId) return false;
+        if (peerKey && record.peerKey === peerKey) return false;
+        return record.peerId !== peerId;
+      });
+    }
+    const removed = before - this.savedContacts.length;
+    if (removed > 0) {
+      this.contactsRemovedByUser += removed;
+      this.persistSavedContacts();
+      this.host.emit();
+    }
+    return removed;
   }
 
   private remember(item: ContactShareItem): void {
@@ -621,6 +968,11 @@ export class ContinuityManager {
     const view: CallView = { ...call, peerId: fromPeerId, peerName: this.peerName(fromPeerId) };
     const entry: { view: CallView; timer?: ReturnType<typeof setTimeout> } = { view };
     if (call.state === 'ended') {
+      if (this.callAudioState?.peerId === fromPeerId && this.callAudioState.callId === call.callId) {
+        this.callAudioState = null;
+        this.callAudioListeners.delete(call.callId);
+      }
+      this.lastCallAudioCursor.delete(`${fromPeerId}:${call.callId}`);
       entry.timer = setTimeout(() => {
         if (this.calls.get(key) === entry) {
           this.calls.delete(key);
@@ -728,8 +1080,242 @@ export class ContinuityManager {
   }
 
   // -------------------------------------------------------------------------
+  // Two-way encrypted call audio bridge (calls.audio)
+  // -------------------------------------------------------------------------
+
+  async startCallAudio(peerId: string, callId: string): Promise<void> {
+    if (!this.host.peer(peerId)) throw new Error('That device is not connected.');
+    if (!isContinuityId(callId)) throw new Error('Unknown call.');
+    this.lastCallAudioCursor.delete(`${peerId}:${callId}`);
+    this.callAudioLastError = null;
+    this.callAudioState = { peerId, callId, active: true, muted: false, route: 'computer' };
+    this.host.emit();
+    await this.host.sendControl(peerId, {
+      kind: 'call-audio-control',
+      callId,
+      action: 'start',
+      sampleRate: CALL_AUDIO_SAMPLE_RATE,
+    });
+  }
+
+  async stopCallAudio(peerId: string, callId: string): Promise<void> {
+    if (this.callAudioState?.callId === callId) {
+      this.callAudioState = { peerId, callId, active: false, muted: false, route: 'phone' };
+      this.host.emit();
+    }
+    this.lastCallAudioCursor.delete(`${peerId}:${callId}`);
+    this.callAudioListeners.delete(callId);
+    if (!this.host.peer(peerId)) return;
+    await this.host.sendControl(peerId, {
+      kind: 'call-audio-control',
+      callId,
+      action: 'stop',
+    }).catch(() => {});
+  }
+
+  async setCallAudioMuted(peerId: string, callId: string, muted: boolean): Promise<void> {
+    if (!isContinuityId(callId)) return;
+    if (this.callAudioState?.callId === callId) {
+      this.callAudioState = { ...this.callAudioState, muted };
+      this.host.emit();
+    }
+    if (!this.host.peer(peerId)) return;
+    await this.host.sendControl(peerId, {
+      kind: 'call-audio-control',
+      callId,
+      action: muted ? 'mute' : 'unmute',
+    }).catch(() => {});
+  }
+
+  subscribeCallAudio(callId: string, listener: (frame: CallAudioFrame) => void): () => void {
+    let set = this.callAudioListeners.get(callId);
+    if (!set) {
+      set = new Set();
+      this.callAudioListeners.set(callId, set);
+    }
+    set.add(listener);
+    return () => {
+      set!.delete(listener);
+      if (set!.size === 0) this.callAudioListeners.delete(callId);
+    };
+  }
+
+  async sendCallAudio(
+    peerId: string,
+    callId: string,
+    pcmS16le: Uint8Array,
+    sampleRate: number,
+    channels: number,
+    frames: number,
+    ptsMs: number,
+  ): Promise<boolean> {
+    if (this.destroyed || !isContinuityId(callId)) return false;
+    if (!this.host.isAuthorized(peerId)) return false;
+    if (
+      sampleRate < 8_000 ||
+      sampleRate > 48_000 ||
+      (channels !== 1 && channels !== 2) ||
+      frames < 1 ||
+      frames > CALL_AUDIO_MAX_FRAMES ||
+      pcmS16le.byteLength !== frames * channels * 2 ||
+      pcmS16le.byteLength > CALL_AUDIO_MAX_FRAME_BYTES ||
+      ptsMs < 0 ||
+      ptsMs > 0xffffffff
+    ) {
+      return false;
+    }
+    const key = await this.host.sessionKey(peerId);
+    if (!key || this.destroyed) return false;
+    const seq = this.callAudioSeq++;
+    const aad = encodeCallAudioAad({ callId, seq, sampleRate, channels, frames, ptsMs });
+    const { iv, ciphertext } = await encryptMediaFrame(key, aad, pcmS16le);
+    if (!this.host.sendFrame(peerId, encodeCallAudioFrame(aad, iv, ciphertext))) {
+      this.callAudioPacketsDropped++;
+      return false;
+    }
+    this.callAudioFramesSent++;
+    return true;
+  }
+
+  async handleCallAudioFrame(fromPeerId: string, bytes: Uint8Array): Promise<void> {
+    if (this.destroyed) return;
+    let frame;
+    try {
+      frame = decodeCallAudioFrame(bytes);
+    } catch {
+      return;
+    }
+    if (!this.host.isAuthorized(fromPeerId)) return;
+    const cursorKey = `${fromPeerId}:${frame.callId}`;
+    const prevCursor = this.lastCallAudioCursor.get(cursorKey);
+    if (prevCursor && frame.seq <= prevCursor.seq) {
+      this.callAudioPacketsDropped++;
+      return;
+    }
+    if (prevCursor?.ptsMs !== undefined) {
+      const delta = (frame.ptsMs - prevCursor.ptsMs + 0x100000000) % 0x100000000;
+      if (delta > 0x80000000) {
+        this.callAudioPacketsDropped++;
+        return;
+      }
+    }
+    const key = await this.host.sessionKey(fromPeerId);
+    if (!key || this.destroyed) return;
+    let data: Uint8Array;
+    try {
+      data = await decryptMediaFrame(key, frame.aad, frame.iv, frame.ciphertext);
+    } catch {
+      return;
+    }
+    const latestCursor = this.lastCallAudioCursor.get(cursorKey);
+    if (data.byteLength !== frame.frames * frame.channels * 2 || (latestCursor && frame.seq <= latestCursor.seq)) return;
+    this.lastCallAudioCursor.set(cursorKey, { seq: frame.seq, ptsMs: frame.ptsMs });
+    this.callAudioFramesReceived++;
+    const out: CallAudioFrame = {
+      callId: frame.callId,
+      peerId: fromPeerId,
+      seq: frame.seq,
+      sampleRate: frame.sampleRate,
+      channels: frame.channels as 1 | 2,
+      frames: frame.frames,
+      ptsMs: frame.ptsMs,
+      data,
+    };
+    for (const listener of this.callAudioListeners.get(frame.callId) ?? []) {
+      try {
+        listener(out);
+      } catch {
+        // isolate broken audio subscriber
+      }
+    }
+  }
+
+  private async executeCallAudioControl(
+    fromPeerId: string,
+    payload: Extract<ControlPayload, { kind: 'call-audio-control' }>,
+  ): Promise<void> {
+    if (!isContinuityId(payload.callId)) return;
+    const reply = (state: { active: boolean; muted: boolean; route?: 'computer' | 'phone'; reason?: string }) =>
+      this.send(fromPeerId, { kind: 'call-audio-state', callId: payload.callId, ...state });
+    if (!this.host.isAuthorized(fromPeerId)) {
+      reply({ active: false, muted: false, route: 'phone', reason: 'This computer is not verified for call audio. Pair again.' });
+      return;
+    }
+    const controller = this.options.callAudioController;
+    if (!controller) {
+      reply({ active: false, muted: false, route: 'phone', reason: 'Call audio is not enabled on this device.' });
+      return;
+    }
+    try {
+      const next = await controller({
+        peerId: fromPeerId,
+        callId: payload.callId,
+        action: payload.action,
+        sampleRate: payload.sampleRate,
+      });
+      this.callAudioState = {
+        peerId: fromPeerId,
+        callId: payload.callId,
+        active: next.active,
+        muted: next.muted,
+        route: next.route ?? (next.active ? 'computer' : 'phone'),
+        reason: next.reason,
+      };
+      reply(next);
+      this.host.emit();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message.slice(0, 200) : 'Call audio command failed.';
+      this.callAudioLastError = reason;
+      reply({ active: false, muted: false, route: 'phone', reason });
+    }
+  }
+
+  private receiveCallAudioState(
+    fromPeerId: string,
+    payload: Extract<ControlPayload, { kind: 'call-audio-state' }>,
+  ): void {
+    if (!this.host.isPaired(fromPeerId) || !isContinuityId(payload.callId)) return;
+    const reason = typeof payload.reason === 'string' ? payload.reason.slice(0, 200) : undefined;
+    if (reason && !payload.active) this.callAudioLastError = reason;
+    this.callAudioState = {
+      peerId: fromPeerId,
+      callId: payload.callId,
+      active: Boolean(payload.active),
+      muted: Boolean(payload.muted),
+      route: payload.route === 'computer' ? 'computer' : 'phone',
+      reason,
+    };
+    this.host.emit();
+  }
+
+  // -------------------------------------------------------------------------
   // Screen sharing — viewer side
   // -------------------------------------------------------------------------
+
+  requestScreenKeyframe(sessionId: string, reason?: string): void {
+    const viewer = this.viewers.get(sessionId);
+    if (!viewer || !['pending', 'active'].includes(viewer.view.state)) return;
+    this.screenPliSent++;
+    this.send(viewer.view.peerId, {
+      kind: 'screen-share-keyframe',
+      sessionId,
+      ...(reason ? { reason: reason.slice(0, 120) } : {}),
+    });
+  }
+
+  recordScreenViewerStats(stats: {
+    decoderMode?: string | null;
+    codec?: string | null;
+    framesDecodedDelta?: number;
+    decodeErrorsDelta?: number;
+    keyframesReceivedDelta?: number;
+  }): void {
+    if (stats.decoderMode !== undefined) this.screenDecoderMode = stats.decoderMode;
+    if (stats.codec !== undefined) this.screenCodec = stats.codec;
+    if (stats.framesDecodedDelta) this.screenFramesDecoded += stats.framesDecodedDelta;
+    if (stats.decodeErrorsDelta) this.screenDecodeErrors += stats.decodeErrorsDelta;
+    if (stats.keyframesReceivedDelta) this.screenKeyframesReceived += stats.keyframesReceivedDelta;
+  }
 
   requestScreenShare(peerId: string, options: { maxWidth?: number; maxFps?: number } = {}): string {
     if (!this.host.peer(peerId)) throw new Error('That device is not connected.');
@@ -976,6 +1562,7 @@ export class ContinuityManager {
         this.frameListeners.delete(session.view.sessionId);
         this.videoListeners.delete(session.view.sessionId);
         this.audioListeners.delete(session.view.sessionId);
+        this.screenFrameQueues.delete(session.view.sessionId);
         this.host.emit();
       }
     }, STOPPED_SHARE_LINGER_MS);
@@ -1054,7 +1641,11 @@ export class ContinuityManager {
     source.onEnded?.(() => this.finishSource(session, 'stopped', 'Sharing ended', true));
     this.send(session.view.peerId, { kind: 'screen-share-state', sessionId, state: 'active' });
     this.host.emit();
-    void this.pump(session);
+    void this.pump(session).catch(() => {
+      if (!this.destroyed && session.running) {
+        this.finishSource(session, 'error', 'Screen capture stopped unexpectedly.', true);
+      }
+    });
   }
 
   private receiveScreenAck(fromPeerId: string, sessionId: string, seq: number): void {
@@ -1111,7 +1702,7 @@ export class ContinuityManager {
         await sleep(Math.min(wait, 250));
         continue;
       }
-      let captured: CapturedScreenFrame | null = null;
+      let captured: CapturedScreenFrame | null;
       try {
         captured = await session.source.capture({ maxWidth: session.view.maxWidth, quality: session.quality });
       } catch {

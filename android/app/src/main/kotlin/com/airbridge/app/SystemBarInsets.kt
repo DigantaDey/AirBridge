@@ -6,13 +6,10 @@ import android.view.WindowInsets
 /**
  * System-bar and display-cutout insets in pixels.
  *
- * Android 15 (API 35) enforces edge-to-edge display for apps targeting SDK 35,
- * and WebView children can receive all-zero insets even though the window decor
- * view has the real values. The shell therefore reads insets from the decor view
- * and pads a plain parent FrameLayout around the WebView. On modern APIs the IME
- * is left to the manifest's adjustResize, otherwise the keyboard would be
- * reserved twice; legacy values are only used to position scanner chrome. CSS
- * safe-area variables are zeroed inside the native shell.
+ * Android 15 (API 35) enforces edge-to-edge display for apps targeting SDK 35.
+ * In addition to Compose's `WindowInsets.safeDrawing`, custom Android Views such
+ * as `QrScannerView` read system bar and display cutout insets via this helper
+ * to keep camera chrome clear of status/navigation bars and display cutouts.
  */
 data class SystemBarInsets(val left: Int, val top: Int, val right: Int, val bottom: Int)
 

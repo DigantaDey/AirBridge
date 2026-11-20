@@ -6,10 +6,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createAirBridgeServer, type AirBridgeServerInstance } from '../src/server/index.js';
-import { WarpClient, type WarpClientSnapshot } from '../src/client/engine/warpClient.js';
+import { WarpClient } from '../src/client/engine/warpClient.js';
 import type { IdentityStore, StoredIdentityKeys } from '../src/client/engine/identity.js';
 import { PakeFailureLimiter, verifiedIdentity } from '../src/server/signalingHub.js';
 import { generateIdentityKeyPair } from '../src/client/engine/crypto.js';
+import { getLanIpv4Addresses } from '../src/server/mdnsService.js';
 
 function memoryIdentityStore(): IdentityStore {
   let saved: StoredIdentityKeys | null = null;
@@ -173,7 +174,7 @@ describe('code-authenticated join (SPAKE2)', () => {
     const code = m.getSnapshot().pairCode;
 
     // A man in the middle that forwards everything but rewrites keys/pins.
-    const startProxy = (mutate: (msg: Record<string, any>) => void) => {
+    const startProxy = (mutate: (msg: Record<string, unknown>) => void) => {
       const proxy = new WebSocketServer({ port: 0, host: '127.0.0.1' });
       proxy.on('connection', (client) => {
         const upstream = new WebSocket(remoteUrl);
@@ -182,7 +183,7 @@ describe('code-authenticated join (SPAKE2)', () => {
         client.on('message', (d) => { const t = d.toString(); if (upstream.readyState === WebSocket.OPEN) upstream.send(t); else queue.push(t); });
         upstream.on('message', (d, isBinary) => {
           if (isBinary) { client.send(d); return; }
-          const msg = JSON.parse(d.toString());
+          const msg = JSON.parse(d.toString()) as Record<string, unknown>;
           mutate(msg);
           client.send(JSON.stringify(msg));
         });
@@ -199,7 +200,8 @@ describe('code-authenticated join (SPAKE2)', () => {
 
     const evilKey = (await generateIdentityKeyPair()).publicKeyB64; // a valid key the attacker controls
     const swap = await startProxy((msg) => {
-      for (const peer of msg.peers ?? []) peer.device.publicKey = evilKey;
+      const peers = Array.isArray(msg.peers) ? (msg.peers as Array<{ device: { publicKey: string } }>) : [];
+      for (const peer of peers) peer.device.publicKey = evilKey;
     });
     const p = phone(swap.url, code);
     await p.start();
@@ -231,16 +233,28 @@ describe('code-authenticated join (SPAKE2)', () => {
     await waitFor(() => m.getSnapshot().peers.length === 1);
     const original = m.getSnapshot().peers[0];
 
-    // Raw socket: legacy hello without a code but with the phone's peer id.
+    // Raw socket: legacy hello without a code but with the phone's peer id from a distinct non-host address.
     p.stop();
     await waitFor(() => m.getSnapshot().peers.length === 0);
-    const raw = new WebSocket(`ws://127.0.0.1:${server.port}/ws`, { localAddress: '127.0.0.3' });
-    const welcome = await new Promise<any>((resolve) => {
-      raw.on('open', () => raw.send(JSON.stringify({
+    const lanIp = getLanIpv4Addresses()[0];
+    const openAnotherRemoteSocket = (): Promise<WebSocket> =>
+      new Promise((resolve, reject) => {
+        const tryUrl = lanIp ? `ws://${lanIp}:${server.port}/ws` : `ws://127.0.0.1:${server.port}/ws`;
+        const tryOpts = lanIp ? undefined : { localAddress: '127.0.0.3' };
+        const candidate = new WebSocket(tryUrl, tryOpts);
+        candidate.once('open', () => resolve(candidate));
+        candidate.once('error', (err) => reject(err));
+      });
+    const raw = await openAnotherRemoteSocket();
+    const welcome = await new Promise<{ pairCode: string; admission: string }>((resolve) => {
+      raw.send(JSON.stringify({
         type: 'hello', peerId: original.peerId, visibility: 'hidden',
         device: { ...original.device, identityKey: undefined, identitySig: undefined },
-      })));
-      raw.on('message', (d) => { const msg = JSON.parse(d.toString()); if (msg.type === 'welcome') resolve(msg); });
+      }));
+      raw.on('message', (d) => {
+        const msg = JSON.parse(d.toString()) as { type: string; pairCode: string; admission: string };
+        if (msg.type === 'welcome') resolve(msg);
+      });
     });
     expect(welcome.pairCode).not.toBe(code);
     expect(welcome.admission).toBe('legacy');

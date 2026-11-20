@@ -95,7 +95,7 @@ fun main() {
     )
     expect("https://two words:3411", null, "host with a space")
 
-    // Derived URLs the shell hands to the WebView.
+    // Derived URLs the native client uses for HTTPS pairing and WSS transport.
     val link = PairingLink.parse("https://192.168.1.5:3411/?pair=ABC-DEF")!!
     // The AirBridge port must survive parsing; it is not the default HTTP(S) port.
     check("baseUrl", link.baseUrl == "https://192.168.1.5:3411", link.baseUrl)

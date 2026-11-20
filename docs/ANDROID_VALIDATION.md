@@ -1,10 +1,10 @@
 # Android validation and remaining device checks
 
-## Architecture being validated (2.4.8)
+## Architecture being validated (2.5.0)
 
 `ConnectionService` owns a single `NativeEngineHost` / Kotlin `AirBridgeEngine`.
-The bundled WebView UI attaches a metadata subscriber; suspending, destroying
-or recreating it does not stop that engine. Native picker capabilities refer
+The native Jetpack Compose UI attaches a state subscriber; suspending, destroying
+or recreating the Activity does not stop that engine. Native picker capabilities refer
 to ContentResolver streams, not base64/Blob payloads. Incoming files are staged
 privately, SHA-256 checked, then published through MediaStore Downloads on
 Android 10+ (app-specific Downloads fallback on Android 8/9).
@@ -69,12 +69,12 @@ runtime testing.
 
 These results are loopback/JVM/desktop regression evidence, **not Android
 throughput measurements**. They cannot reproduce the reported 80–150 kbps
-without the original phone/network, nor prove MediaStore, WebView, notification,
+without the original phone/network, nor prove MediaStore, Compose Activity lifecycle, notification,
 URI-provider, screen-off or OEM battery behavior on a physical phone.
 
 ## Physical-device acceptance checklist (not yet executed here)
 
-Record Android version, OEM/model, WebView version, desktop OS, Wi-Fi band/link
+Record Android version, OEM/model, app versionCode, desktop OS, Wi-Fi band/link
 rate, wired/wireless desktop connection, file size, elapsed time and whether
 speed is measured in bytes/s or bits/s. Compare the same file to the previous
 APK, not to the JVM loopback test.
@@ -84,7 +84,7 @@ APK, not to the JVM loopback test.
 - [ ] Send and receive a ≥1 GiB file (and small/empty multi-file batches).
       Verify SHA-256 of the saved bytes on each device, and inspect peak memory.
 - [ ] Repeat with Home, app switching, Back, screen locked for several minutes,
-      and a WebView renderer restart. The native notification should continue
+      and an Activity configuration change / recreation. The native notification should continue
       reporting progress; returning to the UI should reattach to that transfer.
 - [ ] Toggle Android battery optimization, open AirBridge’s battery guidance,
       return from OS Settings, and check the displayed exemption state. Test

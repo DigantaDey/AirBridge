@@ -93,7 +93,24 @@ fun main() {
         check(runCatching { orphan.store(0, raw.copyOfRange(0, chunkSize)) }.isFailure)
         check(!File(dir, "edededededededed.0.part").exists()) { "Late write recreated a discarded partial" }
 
-        println("FILES: ALL PASS (journal + crash resume + handle cleanup + orphan recovery + integrity-before-publish)")
+        // DirectoryFileSink.withLocationFinisher records custom URI/path in FileFinalize.savedPath.
+        val uriSink = DirectoryFileSink.withLocationFinisher(dir, meta, "5656565656565656") { partFile, name ->
+            check(partFile.exists() && partFile.length() == meta.size) { "partFile missing before finisher" }
+            "content://media/external/downloads/42/$name"
+        }
+        for (i in 0 until totalChunks) uriSink.store(i, raw.copyOfRange(i * chunkSize, (i + 1) * chunkSize))
+        uriSink.markComplete()
+        val uriFinal = uriSink.finalizeIfReady(sha, force = false)
+        check(uriFinal != null && uriFinal.verified) { "withLocationFinisher did not finalize" }
+        check(uriFinal!!.savedPath == "content://media/external/downloads/42/${meta.name}") {
+            "expected MediaStore URI savedPath, got ${uriFinal.savedPath}"
+        }
+        check(!File(dir, "5656565656565656.0.meta").exists()) { "sidecar survived location finisher" }
+        check(!File(dir, "5656565656565656.0.journal").exists()) { "journal survived location finisher" }
+
+        runModelChecks()
+
+        println("FILES: ALL PASS (journal + crash resume + handle cleanup + orphan recovery + integrity-before-publish + location finisher + model sanitization)")
     } catch (t: Throwable) {
         System.err.println("FILES FAILED: ${t.message}")
         t.printStackTrace()

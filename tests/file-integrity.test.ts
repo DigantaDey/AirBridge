@@ -144,10 +144,11 @@ describe('file transfer binary integrity', () => {
         sender.getSnapshot().peers.length === 1 &&
         receiver.getSnapshot().peers.length === 1,
     );
+    const senderTarget = sender.getSnapshot().peers.find((p) => p.device.name === 'Integrity receiver')?.peerId ?? sender.getSnapshot().peers[0].peerId;
     return {
       sender,
       receiver,
-      targetPeerId: sender.getSnapshot().peers[0].peerId,
+      targetPeerId: senderTarget,
       getCompleted: () => completed,
       stop: () => {
         sender.stop();
@@ -174,6 +175,7 @@ describe('file transfer binary integrity', () => {
       expect(Buffer.compare(joined, Buffer.from(file.raw))).toBe(0);
     } finally {
       pair.stop();
+      await waitForCondition(() => server.hub.getStats().connectedPeers === 0);
     }
   }, 15000);
 
@@ -231,6 +233,7 @@ describe('file transfer binary integrity', () => {
       }
       frames.restore();
       pair.stop();
+      await waitForCondition(() => server.hub.getStats().connectedPeers === 0);
     }
   }, 15000);
 
@@ -274,6 +277,7 @@ describe('file transfer binary integrity', () => {
       await sendPromise;
     } finally {
       pair.stop();
+      await waitForCondition(() => server.hub.getStats().connectedPeers === 0);
     }
   }, 15000);
   it('continues processing clipboard controls from the same peer while file publication is blocked', async () => {
@@ -294,7 +298,12 @@ describe('file transfer binary integrity', () => {
       await sending;
       await waitForCondition(() => pair.getCompleted() !== null);
       expect(pair.getCompleted()!.receivedFiles[0].verified).toBe(true);
-    } finally { release(); pair.stop(); await sending; }
+    } finally {
+      release();
+      pair.stop();
+      await sending;
+      await waitForCondition(() => server.hub.getStats().connectedPeers === 0);
+    }
   }, 15_000);
 
   it('never publishes a complete-looking file without the sender’s SHA-256 digest', async () => {
@@ -303,7 +312,8 @@ describe('file transfer binary integrity', () => {
     const original = sender.sendControlMessage.bind(pair.sender);
     sender.sendControlMessage = async (id, payload, encrypted) => {
       if (payload && typeof payload === 'object' && (payload as { kind?: string }).kind === 'file-complete') {
-        const { sha256: _sha, ...rest } = payload as Record<string, unknown>;
+        const rest = { ...(payload as Record<string, unknown>) };
+        delete rest.sha256;
         payload = rest;
       }
       return original(id, payload, encrypted);
@@ -316,7 +326,11 @@ describe('file transfer binary integrity', () => {
       expect(failed.errorMessage).toMatch(/Missing SHA-256/);
       expect(pair.getCompleted()).toBeNull();
       await sending;
-    } finally { pair.stop(); await sending; }
+    } finally {
+      pair.stop();
+      await sending;
+      await waitForCondition(() => server.hub.getStats().connectedPeers === 0);
+    }
   }, 15_000);
 
 });

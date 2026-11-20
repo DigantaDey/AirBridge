@@ -71,12 +71,15 @@ export function isVirtualInterfaceName(name: string): boolean {
   return EXCLUDED_INTERFACE.test(name.trim()) || /\b(virtual|virtualbox|vmware|host-only|hyper-v|vpn|pseudo|loopback|tap-windows|wintun)\b/i.test(name);
 }
 
-export function classifyInterface(name: string): LanInterfaceKind {
+export function classifyInterface(name: string, wifiDevice?: string | null): LanInterfaceKind {
   const n = name.trim().toLowerCase();
   if (/^(wlan|wlp|wlx|wl\d|wifi|wi-fi|airport)/.test(n) || n.includes('wi-fi') || n.includes('wireless')) return 'wifi';
-  // macOS laptops: en0 is the built-in Wi-Fi; other enN are docks, USB/Thunderbolt
-  // Ethernet or a phone's USB (NCM) tether — indistinguishable by name.
-  if (n === 'en0') return 'wifi';
+  if (wifiDevice !== undefined) {
+    if (wifiDevice && n === wifiDevice.trim().toLowerCase()) return 'wifi';
+  } else if (n === 'en0') {
+    // Fallback when OS hardware port map isn't provided: on macOS laptops en0 is usually built-in Wi-Fi.
+    return 'wifi';
+  }
   if (/^(usb|rndis|bnep|ncm)/.test(n)) return 'tether';
   if (/^(eth|enp|eno|ens|enx|en\d|ethernet)/.test(n) || n.includes('ethernet')) return 'ethernet';
   return 'other';
@@ -134,7 +137,7 @@ function naturalCompare(a: string, b: string): number {
 }
 
 /** Pure selection over an `os.networkInterfaces()`-shaped map. */
-export function selectLanCandidates(interfaces: InterfaceMap): LanCandidate[] {
+export function selectLanCandidates(interfaces: InterfaceMap, opts?: { wifiDevice?: string | null }): LanCandidate[] {
   const byAddress = new Map<string, LanCandidate>();
   for (const [name, addrs] of Object.entries(interfaces)) {
     if (!addrs || isVirtualInterfaceName(name)) continue;
@@ -151,7 +154,7 @@ export function selectLanCandidates(interfaces: InterfaceMap): LanCandidate[] {
       const candidate: LanCandidate = {
         address: addr.address,
         interface: name,
-        kind: classifyInterface(name),
+        kind: classifyInterface(name, opts?.wifiDevice),
         scope,
         netmask: addr.netmask,
         prefixLength,

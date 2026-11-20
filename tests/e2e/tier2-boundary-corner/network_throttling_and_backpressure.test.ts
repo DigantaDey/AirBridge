@@ -149,7 +149,9 @@ describe('Tier 2 Boundary: Network Throttling & Relay Backpressure', () => {
   it('verifies hub drops relay frames cleanly when target bufferedAmount exceeds 64 MiB valve', async () => {
     const hub = await readRepoFile('src/server/signalingHub.ts');
     expect(hub).toContain('target.ws.bufferedAmount > MAX_RELAY_BUFFERED_BYTES');
-    expect(hub).toContain('if (ws.bufferedAmount > MAX_RELAY_BUFFERED_BYTES) { ws.terminate(); return; }');
+    expect(hub).toContain('if (ws.bufferedAmount > MAX_RELAY_BUFFERED_BYTES) {');
+    expect(hub).toContain('this.relayDrops++;');
+    expect(hub).toContain('ws.terminate();');
   });
 
   it('verifies Kotlin Engine bounds outbound queue (8 MiB), inbound queue (6 MiB), and decrypt budget (8 MiB)', async () => {

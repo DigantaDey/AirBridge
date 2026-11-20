@@ -51,7 +51,7 @@ export async function createTestServer(
       activeServers.delete(instance);
       try {
         await server.close();
-      } catch (_err) {
+      } catch {
         // Suppress errors during shutdown if already partially destroyed
       }
     },
@@ -77,7 +77,7 @@ export async function closeAllTestServers(): Promise<void> {
     serversToClose.map(async (srv) => {
       try {
         await srv.close();
-      } catch (_err) {
+      } catch {
         // Ignore errors during batch shutdown
       }
     })

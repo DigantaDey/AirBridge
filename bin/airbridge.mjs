@@ -38,17 +38,32 @@ function printHelp() {
 async function loadServerModules() {
   const compiledServer = path.join(rootDir, 'dist/server/server/index.js');
   const compiledCli = path.join(rootDir, 'dist/server/server/cliSendSession.js');
+  const compiledCrash = path.join(rootDir, 'dist/server/server/crashReports.js');
+  const compiledDiag = path.join(rootDir, 'dist/server/server/diagnostics.js');
   if (fs.existsSync(compiledServer) && fs.existsSync(compiledCli)) {
     const srv = await import(compiledServer);
     const cli = await import(compiledCli);
-    return { ...srv, ...cli };
+    const crash = fs.existsSync(compiledCrash) ? await import(compiledCrash) : {};
+    const diag = fs.existsSync(compiledDiag) ? await import(compiledDiag) : {};
+    return { ...srv, ...cli, ...crash, ...diag };
   }
   // Fallback to tsx register when run directly from git checkout without prebuild
   const tsxApi = await import('tsx/esm/api');
   tsxApi.register();
   const srv = await import(path.join(rootDir, 'src/server/index.ts'));
   const cli = await import(path.join(rootDir, 'src/server/cliSendSession.ts'));
-  return { ...srv, ...cli };
+  const crash = await import(path.join(rootDir, 'src/server/crashReports.ts'));
+  const diag = await import(path.join(rootDir, 'src/server/diagnostics.ts'));
+  return { ...srv, ...cli, ...crash, ...diag };
+}
+
+function validatePort(raw, source = '--port') {
+  const n = Number.parseInt(raw, 10);
+  if (!/^\d+$/.test(String(raw).trim()) || !Number.isInteger(n) || n < 1 || n > 65535) {
+    console.error(`Error: ${source} must be an integer between 1 and 65535 (got "${raw}")`);
+    process.exit(1);
+  }
+  return n;
 }
 
 async function main() {
@@ -58,7 +73,7 @@ async function main() {
     process.exit(0);
   }
 
-  let port = Number.parseInt(process.env.PORT || '3000', 10);
+  let port = process.env.PORT ? validatePort(process.env.PORT, 'PORT') : 3000;
   let downloadDir = path.join(os.homedir(), 'Downloads', 'AirBridge');
   let revealInFinder = false;
   // Left undefined unless flagged so the server default (HTTPS on) applies.
@@ -67,8 +82,12 @@ async function main() {
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if ((arg === '-p' || arg === '--port') && args[i + 1]) {
-      port = Number.parseInt(args[++i], 10);
+    if (arg === '-p' || arg === '--port') {
+      if (!args[i + 1]) {
+        console.error('Error: --port requires a port number (1..65535)');
+        process.exit(1);
+      }
+      port = validatePort(args[++i], '--port');
     } else if ((arg === '-d' || arg === '--dir') && args[i + 1]) {
       downloadDir = path.resolve(args[++i]);
     } else if (arg === '--reveal') {
@@ -89,9 +108,27 @@ async function main() {
   }
 
   const subcommand = positional[0] || 'daemon';
-  const { createAirBridgeServer, createCliBeamSession, describeTlsSetup } = await loadServerModules();
+  const {
+    buildTerminalPairingUrl,
+    createAirBridgeServer,
+    createCliBeamSession,
+    describeTlsSetup,
+    CrashStore,
+    beginRun,
+    buildCrashReport,
+    endRunCleanly,
+    loadCrashDsn,
+    installLogCapture,
+    recentLogs,
+    startEventLoopMonitor,
+  } = await loadServerModules();
   const hasBuiltClient = fs.existsSync(path.join(rootDir, 'dist/client/index.html'));
   const mode = hasBuiltClient ? 'production' : 'development';
+  const pkgJson = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
+  const version = pkgJson.version || 'dev';
+
+  if (typeof installLogCapture === 'function') installLogCapture();
+  if (typeof startEventLoopMonitor === 'function') startEventLoopMonitor(2_000);
 
   if (subcommand === 'send') {
     const fileArgs = positional.slice(1);
@@ -136,26 +173,63 @@ async function main() {
   }
 
   // Default: daemon mode
-  const server = await createAirBridgeServer({
-    port,
-    mode,
-    ...tlsOptions,
-    daemonConfig: {
-      enabled: true,
-      downloadDir,
-      autoSaveToDownloads: true,
-      notifyOnReceive: true,
-      revealInFinder,
-    },
-  });
+  const stateDir = path.join(os.homedir(), '.airbridge');
+  fs.mkdirSync(stateDir, { recursive: true });
+  const crashStore = typeof CrashStore === 'function' ? new CrashStore(path.join(stateDir, 'crashes')) : null;
+  if (crashStore && typeof beginRun === 'function') {
+    beginRun(stateDir, crashStore, version);
+    const startedAt = Date.now();
+    const recordFatal = (kind) => (err) => {
+      try {
+        crashStore.recordSync(
+          buildCrashReport(err, kind, {
+            version,
+            startedAt,
+            logTail: typeof recentLogs === 'function' ? recentLogs(80).map((l) => `${l.t} ${l.level} ${l.msg}`) : [],
+          }),
+        );
+      } catch {
+        // ignore
+      }
+    };
+    process.on('uncaughtException', recordFatal('uncaught-exception'));
+    process.on('unhandledRejection', recordFatal('unhandled-rejection'));
+    process.on('exit', (code) => {
+      if (code === 0 && typeof endRunCleanly === 'function') endRunCleanly(stateDir);
+    });
+  }
+
+  let server;
+  try {
+    server = await createAirBridgeServer({
+      port,
+      mode,
+      version,
+      crashStore,
+      crashDsn: typeof loadCrashDsn === 'function' ? loadCrashDsn(stateDir) : null,
+      ...tlsOptions,
+      daemonConfig: {
+        enabled: true,
+        downloadDir,
+        autoSaveToDownloads: true,
+        notifyOnReceive: true,
+        revealInFinder,
+      },
+    });
+  } catch (err) {
+    if (typeof endRunCleanly === 'function') endRunCleanly(stateDir);
+    throw err;
+  }
 
   const targetUrl = server.lanUrls[0] || `http://localhost:${server.port}`;
-  // The QR embeds this session's default pair code: the phone opens the page
-  // already inside the host's pairing group (?pair= is handled by the client).
-  const pairCode = server.hub?.getDefaultPairCode?.() || '';
-  const connectUrl = pairCode
-    ? `${targetUrl}${targetUrl.includes('?') ? '&' : '?'}pair=${pairCode}`
-    : targetUrl;
+  // The QR embeds this session's default pair code, TLS anchor pin, and alternate LAN IPs:
+  // the phone opens the page already inside the host's pairing group.
+  const connectUrl = typeof buildTerminalPairingUrl === 'function'
+    ? buildTerminalPairingUrl(server)
+    : (() => {
+        const pairCode = server.hub?.getDefaultPairCode?.() || '';
+        return pairCode ? `${targetUrl}${targetUrl.includes('?') ? '&' : '?'}pair=${pairCode}` : targetUrl;
+      })();
   const qrAscii = await QRCode.toString(connectUrl, { type: 'terminal', small: true });
 
   console.log(`\n  ⚡ AirBridge Daemon Active on Port ${server.port}`);
@@ -170,6 +244,13 @@ async function main() {
   console.log(`  🔗 Open: ${connectUrl}`);
   console.log(`  🔐 Phone browser warning? Install the CA once: ${httpBase}/airbridge-ca.crt`);
   console.log('     (verify the fingerprint above before installing), then rescan.\n');
+  const shutdown = () => {
+    if (typeof endRunCleanly === 'function') endRunCleanly(stateDir);
+    void server.close().catch(() => {}).finally(() => process.exit(0));
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+  process.once('SIGHUP', shutdown);
 }
 
 main().catch((err) => {

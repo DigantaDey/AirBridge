@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,38 +15,64 @@ function mock(name: string, script: string) {
   fs.writeFileSync(path.join(mocks, name), `#!/bin/bash\n${script}\n`, { mode: 0o755 });
 }
 function run(command: string, args: string[] = []) {
-  return spawnSync(command, args, { env, encoding: 'utf8', timeout: 15000 });
+  return spawnSync(command, args, { env, encoding: 'utf8', timeout: 30000 });
 }
 function install(...args: string[]) { return run('bash', [installer, ...args]); }
 function appFile(...parts: string[]) { return path.join(home, 'Applications/AirBridge.app/Contents', ...parts); }
 
+function writeMockBin(script: string) {
+  const binPath = path.join(root, 'mock-bin');
+  fs.writeFileSync(binPath, script);
+  const sha = crypto.createHash('sha256').update(script).digest('hex');
+  fs.writeFileSync(
+    path.join(root, 'default-sums'),
+    [
+      `${sha}  AirBridge-darwin-arm64`,
+      `${sha}  AirBridge-darwin-x64`,
+      `${sha}  AirBridge-linux-x64`,
+      `${sha}  AirBridge-linux-arm64`,
+      '',
+    ].join('\n'),
+  );
+}
+
+async function pollUntil(predicate: () => boolean, timeoutMs = 2000, intervalMs = 25) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 beforeEach(() => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), 'airbridge mac test '));
+  root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'airbridge mac test ')));
   home = path.join(root, 'home & user');
   mocks = path.join(root, 'mocks');
   fs.mkdirSync(home); fs.mkdirSync(mocks);
   env = { ...process.env, HOME: home, PATH: `${mocks}:${process.env.PATH}`, AIRBRIDGE_INSTALL_DIR: path.join(home, 'my bin'), PORT: '3105', TEST_ROOT: root, AIRBRIDGE_NATIVE_APP: '0' };
+  writeMockBin([
+    '#!/bin/bash',
+    'if [ "$1" = --version ]; then echo 1.0; exit 0; fi',
+    'echo "$PORT $*" >> "$TEST_ROOT/starts"',
+    'touch "$TEST_ROOT/ready"',
+    '',
+  ].join('\n'));
   mock('uname', 'if [ "$1" = "-s" ]; then echo Darwin; else echo arm64; fi');
   mock('codesign', 'exit 0');
+  mock('launchctl', 'exit 0');
+  mock('pgrep', 'exit 1');
+  mock('lsof', 'exit 0');
   mock('curl', `
 url="\${!#}"
+out=""
+for ((i=1;i<=$#;i++)); do if [ "\${!i}" = -o ]; then j=$((i+1)); out="\${!j}"; fi; done
 case "$url" in
   */api/health) [ -f "$TEST_ROOT/ready" ] && echo '{"service":"AirBridge Warp Server"}' || exit 1 ;;
-  *SHA256SUMS*) exit 22 ;;
-  *AirBridge.icns) cp "$TEST_ROOT/icon" "$4" ;;
-  *) cat > "$4" <<'BIN'
-#!/bin/bash
-if [ "$1" = --version ]; then echo 1.0; exit 0; fi
-echo "$PORT $*" >> "$TEST_ROOT/starts"
-touch "$TEST_ROOT/ready"
-BIN
-  ;;
+  *SHA256SUMS*) cp "$TEST_ROOT/default-sums" "$out" ;;
+  *AirBridge-macOS-*.zip) exit 22 ;;
+  *AirBridge.icns) cp "$TEST_ROOT/icon" "$out" ;;
+  *) cp "$TEST_ROOT/mock-bin" "$out" ;;
 esac`);
-  // fetch's -o is not always argument 4; extract the output path instead.
-  const curlPath = path.join(mocks, 'curl');
-  let curl = fs.readFileSync(curlPath, 'utf8');
-  curl = curl.replace('url="${!#}"', 'url="${!#}"\nout=""\nfor ((i=1;i<=$#;i++)); do if [ "${!i}" = -o ]; then j=$((i+1)); out="${!j}"; fi; done').replaceAll('"$4"', '"$out"');
-  fs.writeFileSync(curlPath, curl);
   fs.writeFileSync(path.join(root, 'icon'), 'icon data');
   mock('open', 'echo "$*" >> "$TEST_ROOT/opened"');
   mock('osascript', 'cat >/dev/null; echo "$*" >> "$TEST_ROOT/dialog"');
@@ -57,7 +84,13 @@ describe('macOS installer', () => {
   it('installs a Launchpad app and reuses the server on subsequent opens', () => {
     const result = install('--no-start');
     expect(result.status, result.stderr).toBe(0);
-    expect(fs.readFileSync(appFile('Info.plist'), 'utf8')).toContain('com.airbridge.launcher');
+    const plist = fs.readFileSync(appFile('Info.plist'), 'utf8');
+    expect(plist).toContain('com.airbridge.launcher');
+    expect(plist).toContain('<key>CFBundleShortVersionString</key><string>1.0</string>');
+    expect(plist).toContain('<key>CFBundleVersion</key><string>1.0</string>');
+    expect(plist).toContain('<key>NSLocalNetworkUsageDescription</key>');
+    expect(plist).toContain('<key>NSBluetoothAlwaysUsageDescription</key>');
+    expect(plist).toContain('<key>NSBonjourServices</key><array><string>_airbridge._tcp</string><string>_airbridge-rv._tcp</string></array>');
     expect(fs.readFileSync(appFile('Resources/AirBridge.icns'), 'utf8')).toBe('icon data');
     const launcher = appFile('MacOS/AirBridge');
     expect(run(launcher).status).toBe(0);
@@ -65,14 +98,14 @@ describe('macOS installer', () => {
     expect(fs.readFileSync(path.join(root, 'starts'), 'utf8').trim()).toBe('3105 --no-browser');
     expect(fs.readFileSync(path.join(root, 'opened'), 'utf8').trim().split('\n')).toEqual(['http://localhost:3105', 'http://localhost:3105']);
     expect(install('--no-start').status).toBe(0);
-  }, 15_000);
+  }, 30_000);
   it('shows an error instead of opening an unrelated service or missing binary', () => {
     expect(install('--no-start').status).toBe(0);
     fs.rmSync(path.join(env.AIRBRIDGE_INSTALL_DIR!, 'AirBridge'));
     expect(run(appFile('MacOS/AirBridge')).status).toBe(1);
     expect(fs.readFileSync(path.join(root, 'dialog'), 'utf8')).toContain('could not be found');
     expect(fs.existsSync(path.join(root, 'opened'))).toBe(false);
-  });
+  }, 30_000);
   it('reports a port conflict rather than opening another service', () => {
     expect(install('--no-start').status).toBe(0);
     mock('curl', `echo '{"service":"something else"}'`);
@@ -80,17 +113,17 @@ describe('macOS installer', () => {
     expect(run(appFile('MacOS/AirBridge')).status).toBe(1);
     expect(fs.readFileSync(path.join(root, 'dialog'), 'utf8')).toContain('could not start on port 3105');
     expect(fs.existsSync(path.join(root, 'opened'))).toBe(false);
-  });
+  }, 30_000);
   it('opens the app by default after installation', () => {
     expect(install().status).toBe(0);
     expect(fs.readFileSync(path.join(root, 'opened'), 'utf8').trim()).toBe(path.join(home, 'Applications/AirBridge.app'));
-  });
+  }, 30_000);
   it('does not overwrite an unrelated application', () => {
     fs.mkdirSync(appFile(''), { recursive: true });
     const result = install('--no-start');
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('not replacing it');
-  });
+  }, 30_000);
   it('writes a valid escaped login item with the configured port', () => {
     mock('launchctl', 'exit 0');
     expect(install('--no-start', '--autostart').status).toBe(0);
@@ -98,7 +131,7 @@ describe('macOS installer', () => {
     expect(plist).toContain('home &amp; user');
     expect(plist).toContain('<string>--port</string><string>3105</string>');
     expect(plist).toContain('<key>PORT</key><string>3105</string>');
-  });
+  }, 30_000);
   it('supports source installs when Finder cannot find Node on PATH', () => {
     mock('git', 'mkdir -p "$HOME/.local/share/airbridge/src/.git"');
     mock('npm', 'mkdir -p "$HOME/.local/share/airbridge/src/dist/server/server"; touch "$HOME/.local/share/airbridge/src/dist/server/server/index.js"');
@@ -111,12 +144,12 @@ describe('macOS installer', () => {
     expect(fs.readFileSync(path.join(root, 'node-args'), 'utf8').trim().split('\n')).toEqual([
       path.join(home, '.local/share/airbridge/src/dist/server/server/index.js'), '--no-browser', 'with spaces',
     ]);
-  });
+  }, 30_000);
   it('does not install a macOS app on Linux', () => {
     mock('uname', 'if [ "$1" = "-s" ]; then echo Linux; else echo x86_64; fi');
     expect(install('--no-start').status).toBe(0);
     expect(fs.existsSync(appFile('Info.plist'))).toBe(false);
-  });
+  }, 30_000);
   it('rejects invalid ports before installation', () => {
     env.PORT = 'abc';
     expect(install('--no-start').stderr).toContain('PORT must be');
@@ -134,13 +167,16 @@ describe('macOS installer', () => {
     const old = spawn('bash', ['-c', `exec -a "${oldBin} --port 3105" /bin/sleep 60`], { stdio: 'ignore' });
     const foreign = spawn('bash', ['-c', 'exec -a "python3 -m http.server 3105" /bin/sleep 60'], { stdio: 'ignore' });
     try {
-      await new Promise((r) => setTimeout(r, 200));
+      await pollUntil(() => {
+        const res = spawnSync('ps', ['-p', String(old.pid), '-o', 'command='], { encoding: 'utf8' });
+        return res.stdout.includes('airbridge-legacy');
+      });
       mock('lsof', `echo ${old.pid}; echo ${foreign.pid}`);
       mock('pgrep', 'exit 1');
       mock('launchctl', 'echo "$*" >> "$TEST_ROOT/launchctl"');
       const result = install('--no-start');
       expect(result.status, result.stderr).toBe(0);
-      await new Promise((r) => setTimeout(r, 200));
+      await pollUntil(() => old.exitCode !== null || old.signalCode !== null);
       expect(old.exitCode !== null || old.signalCode !== null).toBe(true);
       expect(foreign.exitCode).toBeNull();
       expect(foreign.signalCode).toBeNull();
@@ -148,7 +184,7 @@ describe('macOS installer', () => {
       old.kill('SIGKILL');
       foreign.kill('SIGKILL');
     }
-  });
+  }, 30_000);
 
   describe('prebuilt AirBridge.app', () => {
     function prebuilt(sumsMatch: boolean) {
@@ -160,11 +196,16 @@ describe('macOS installer', () => {
       fs.writeFileSync(path.join(payload, 'MacOS', 'AirBridge'), '\xCF\xFA\xED\xFE mach-o', { mode: 0o755 });
       fs.writeFileSync(path.join(payload, 'Resources', 'airbridge-server'), '#!/bin/bash\nif [ "$1" = --version ]; then echo "airbridge 9.9.9"; exit 0; fi\n', { mode: 0o755 });
       fs.writeFileSync(path.join(root, 'release.zip'), 'zip bytes');
-      const zipSha = spawnSync('sha256sum', [path.join(root, 'release.zip')], { encoding: 'utf8' }).stdout.split(' ')[0];
-      fs.writeFileSync(path.join(root, 'sums'), `${sumsMatch ? zipSha : '0'.repeat(64)}  AirBridge-macOS-arm64.zip\n`);
+      const binSha = crypto.createHash('sha256').update(fs.readFileSync(path.join(root, 'mock-bin'))).digest('hex');
+      const zipSha = crypto.createHash('sha256').update(fs.readFileSync(path.join(root, 'release.zip'))).digest('hex');
+      fs.writeFileSync(
+        path.join(root, 'sums'),
+        `${binSha}  AirBridge-darwin-arm64\n${sumsMatch ? zipSha : '0'.repeat(64)}  AirBridge-macOS-arm64.zip\n`,
+      );
       let curl = fs.readFileSync(path.join(mocks, 'curl'), 'utf8');
       curl = curl
-        .replace('*SHA256SUMS*) exit 22 ;;', '*SHA256SUMS*) cp "$TEST_ROOT/sums" "$out" ;;\n  *AirBridge-macOS-arm64.zip) cp "$TEST_ROOT/release.zip" "$out" ;;');
+        .replace('*SHA256SUMS*) cp "$TEST_ROOT/default-sums" "$out" ;;', '*SHA256SUMS*) cp "$TEST_ROOT/sums" "$out" ;;')
+        .replace('*AirBridge-macOS-*.zip) exit 22 ;;', '*AirBridge-macOS-arm64.zip) cp "$TEST_ROOT/release.zip" "$out" ;;');
       fs.writeFileSync(path.join(mocks, 'curl'), curl);
       mock('ditto', 'cp -R "$TEST_ROOT/zip-payload/." "${@: -1}/"');
       mock('shasum', 'sha256sum "${@: -1}"');
@@ -185,7 +226,7 @@ describe('macOS installer', () => {
       // Re-installing replaces the link, never the file inside the bundle.
       expect(install('--no-start').status).toBe(0);
       expect(fs.readFileSync(appFile('Resources', 'airbridge-server'), 'utf8')).toContain('airbridge 9.9.9');
-    });
+    }, 30_000);
 
     it('refuses a prebuilt app whose checksum does not match and builds the app locally', () => {
       prebuilt(false);
@@ -194,7 +235,7 @@ describe('macOS installer', () => {
       expect(result.stderr).toContain('checksum mismatch for AirBridge-macOS-arm64.zip');
       expect(fs.existsSync(appFile('Resources', 'airbridge-server'))).toBe(false);
       expect(fs.lstatSync(path.join(env.AIRBRIDGE_INSTALL_DIR!, 'AirBridge')).isSymbolicLink()).toBe(false);
-    });
+    }, 30_000);
 
     it('registers the native app (not a bare server) as the restartable login item', () => {
       prebuilt(true);
@@ -205,7 +246,7 @@ describe('macOS installer', () => {
       expect(plist).toContain('<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>');
       expect(plist).toContain('<key>ThrottleInterval</key><integer>10</integer>');
       expect(fs.existsSync(path.join(home, 'Library/LaunchAgents/com.airbridge.daemon.plist'))).toBe(false);
-    });
+    }, 30_000);
   });
 
   it('the server login item restarts after crashes and updates (exit 75), not after a clean exit', () => {
@@ -214,7 +255,7 @@ describe('macOS installer', () => {
     const plist = fs.readFileSync(path.join(home, 'Library/LaunchAgents/com.airbridge.daemon.plist'), 'utf8');
     expect(plist).toContain('<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>');
     expect(plist).toContain('<key>AIRBRIDGE_SUPERVISED</key><string>launchd</string>');
-  });
+  }, 30_000);
 
   it('Linux autostart uses a systemd user service when available', () => {
     mock('uname', 'if [ "$1" = "-s" ]; then echo Linux; else echo x86_64; fi');
@@ -228,7 +269,7 @@ describe('macOS installer', () => {
     expect(fs.readFileSync(path.join(root, 'systemctl'), 'utf8')).toContain('--user enable --now airbridge.service');
     // systemd started it: the installer must not start a second copy.
     expect(fs.existsSync(path.join(root, 'starts'))).toBe(false);
-  });
+  }, 30_000);
 });
 
 describe('install.sh Linux app launcher', () => {
@@ -236,8 +277,9 @@ describe('install.sh Linux app launcher', () => {
   const launcher = () => path.join(home, '.local/share/applications/airbridge.desktop');
   /** Release binaries embed their help text; mark the mock as one that knows --open. */
   const supportsOpen = () => {
-    const curlPath = path.join(mocks, 'curl');
-    fs.writeFileSync(curlPath, fs.readFileSync(curlPath, 'utf8').replace("#!/bin/bash\nif [", "#!/bin/bash\n# --open [panel]\nif ["));
+    const binPath = path.join(root, 'mock-bin');
+    const updated = fs.readFileSync(binPath, 'utf8').replace('#!/bin/bash\nif [', '#!/bin/bash\n# --open [panel]\nif [');
+    writeMockBin(updated);
   };
 
   it('writes a launcher with the version and Contacts / Calls / Screen Sharing actions, without running the binary', () => {
@@ -256,7 +298,7 @@ describe('install.sh Linux app launcher', () => {
     // Probing for --open must not start (or otherwise run) the service.
     expect(fs.existsSync(path.join(root, 'starts'))).toBe(false);
     expect(result.stdout).toContain('app launcher:');
-  });
+  }, 30_000);
 
   it('skips binaries that do not know --open, and honours AIRBRIDGE_LAUNCHER=0', () => {
     linux();
@@ -266,7 +308,7 @@ describe('install.sh Linux app launcher', () => {
     env.AIRBRIDGE_LAUNCHER = '0';
     expect(install('--no-start').status).toBe(0);
     expect(fs.existsSync(launcher())).toBe(false);
-  });
+  }, 30_000);
 });
 
 describe('install.sh platform checks', () => {

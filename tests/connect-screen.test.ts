@@ -41,10 +41,12 @@ describe("native Compose unpaired connect screen", () => {
 
     const activity = read("android/app/src/main/kotlin/com/airbridge/app/MainActivity.kt");
     expect(activity).toContain("isResolvedDarkTheme(state.themeMode)");
-    expect(activity).toContain("applyEdgeToEdge(darkTheme)");
+    expect(activity).toContain("val useDarkBarStyle = isResolvedDarkTheme(state.themeMode) || state.scannerOpen");
+    expect(activity).toContain("applyEdgeToEdge(useDarkBarStyle)");
     expect(activity).toContain("openScannerWithPermission");
     expect(activity).toContain("showCameraRationale = true");
-    expect(activity).toContain("PairingLink.parse(data.toString())");
+    expect(activity).toContain("viewModel.handleIncomingDeepLink(data.scheme, data.toString())");
+    expect(vm).toContain("PairingLink.parse(rawUri)");
     expect(activity).toContain("No camera detected on this device");
   });
 

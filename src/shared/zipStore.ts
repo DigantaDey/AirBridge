@@ -45,7 +45,13 @@ function toDosDateTime(date: Date): { dosTime: number; dosDate: number } {
   return { dosTime, dosDate };
 }
 
+export const MAX_ZIP_ENTRIES = 0xffff;
+export const MAX_ZIP_BYTES = 0xffffffff;
+
 export function buildZipArchiveParts(entries: ZipInputEntry[]): Uint8Array[] {
+  if (entries.length > MAX_ZIP_ENTRIES) {
+    throw new RangeError(`ZIP archive exceeds maximum entry count (${entries.length} > ${MAX_ZIP_ENTRIES})`);
+  }
   const encoder = new TextEncoder();
   const outputParts: Uint8Array[] = [];
   const centralDirParts: Uint8Array[] = [];
@@ -57,7 +63,16 @@ export function buildZipArchiveParts(entries: ZipInputEntry[]): Uint8Array[] {
     // the archive is extracted on the receiving device.
     const cleanPath = entry.path.replace(/\\/g, '/').replace(/^[a-zA-Z]:/, '').split('/').filter((seg) => seg && seg !== '.' && seg !== '..').join('/') || 'file';
     const nameBytes = encoder.encode(cleanPath);
+    if (nameBytes.byteLength > 0xffff) {
+      throw new RangeError(`ZIP entry path too long (${nameBytes.byteLength} > 65535)`);
+    }
     const totalSize = entry.chunks.reduce((acc, c) => acc + c.byteLength, 0);
+    if (totalSize > MAX_ZIP_BYTES) {
+      throw new RangeError(`ZIP entry size exceeds 4 GiB limit (${totalSize} > ${MAX_ZIP_BYTES})`);
+    }
+    if (offset + 30 + nameBytes.byteLength + totalSize > MAX_ZIP_BYTES) {
+      throw new RangeError(`ZIP archive offset exceeds 4 GiB limit (${offset + 30 + nameBytes.byteLength + totalSize} > ${MAX_ZIP_BYTES})`);
+    }
     const checksum = crc32(entry.chunks);
     const { dosTime, dosDate } = toDosDateTime(entry.lastModified ?? new Date());
 
@@ -116,6 +131,9 @@ export function buildZipArchiveParts(entries: ZipInputEntry[]): Uint8Array[] {
   for (const cd of centralDirParts) {
     outputParts.push(cd);
     centralDirSize += cd.byteLength;
+  }
+  if (centralDirOffset > MAX_ZIP_BYTES || centralDirSize > MAX_ZIP_BYTES || centralDirOffset + centralDirSize > MAX_ZIP_BYTES) {
+    throw new RangeError(`ZIP archive central directory exceeds 4 GiB limit`);
   }
 
   // End of central directory record (22 bytes)

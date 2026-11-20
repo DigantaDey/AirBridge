@@ -9,7 +9,6 @@ import {
   callStatusLabel,
   featureGuidance,
   screenEndedLabel,
-  type ContinuityClient,
 } from "../src/client/components/ContinuityCenter.js";
 import type { CallView, ContinuitySnapshot, ScreenFrame, ScreenFrameSource, ScreenShareView } from "../src/client/engine/continuity.js";
 import { createStreamScreenSource, fitWithin } from "../src/client/engine/screenCapture.js";

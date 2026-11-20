@@ -37,13 +37,18 @@ export function HandoffPrompt({ pollMs }: { pollMs?: { idle: number; active: num
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const statusRef = useRef<HandoffStatusView | null>(null);
-  statusRef.current = status;
 
   const load = useCallback(async () => {
     try {
       const res = await fetch('/api/handoff', { cache: 'no-store' });
-      if (!res.ok) { setStatus(null); return; }
-      setStatus((await res.json()) as HandoffStatusView);
+      if (!res.ok) {
+        statusRef.current = null;
+        setStatus(null);
+        return;
+      }
+      const next = (await res.json()) as HandoffStatusView;
+      statusRef.current = next;
+      setStatus(next);
     } catch { /* service restarting */ }
     setNow(Date.now());
   }, []);

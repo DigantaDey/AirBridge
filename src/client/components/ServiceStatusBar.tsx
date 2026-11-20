@@ -5,8 +5,47 @@
  * and "Copy diagnostics" for support requests. Hidden on phones and remote pages.
  */
 import { useCallback, useEffect, useState } from 'react';
-import { copyTextToDesktopShell } from '../engine/desktopShell.js';
+import { UI_VERSION } from '../engine/buildInfo.js';
+import { canRestartLocalService, copyTextToDesktopShell, openExternalInDesktopShell } from '../engine/desktopShell.js';
 import { HandoffPrompt } from './HandoffPrompt.js';
+
+export interface ClientErrorRingEntry {
+  source: string;
+  message: string;
+  at: number;
+}
+
+const MAX_CLIENT_ERROR_RING = 30;
+const globalClientErrorRing: ClientErrorRingEntry[] = [];
+let globalListenersAttached = false;
+
+export function recordClientDiagnosticError(source: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error ?? 'unknown error');
+  globalClientErrorRing.push({
+    source,
+    message: message.slice(0, 300),
+    at: Date.now(),
+  });
+  if (globalClientErrorRing.length > MAX_CLIENT_ERROR_RING) {
+    globalClientErrorRing.splice(0, globalClientErrorRing.length - MAX_CLIENT_ERROR_RING);
+  }
+}
+
+export function getClientErrorRing(): ClientErrorRingEntry[] {
+  return [...globalClientErrorRing];
+}
+
+function ensureGlobalErrorListeners(): void {
+  if (globalListenersAttached || typeof window === 'undefined') return;
+  globalListenersAttached = true;
+  window.addEventListener('error', (event) => {
+    recordClientDiagnosticError('window.onerror', event.error ?? event.message);
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    recordClientDiagnosticError('unhandledrejection', event.reason);
+  });
+}
+ensureGlobalErrorListeners();
 
 export interface UpdateStatusView {
   supported: boolean;
@@ -61,6 +100,7 @@ export async function copyText(text: string): Promise<boolean> {
 
 /** Service report from /api/diagnostics, plus what this page knows (works even when the service is down). */
 export async function collectDiagnostics(page: Record<string, unknown> = {}): Promise<string> {
+  ensureGlobalErrorListeners();
   let service: unknown;
   try {
     const res = await fetch('/api/diagnostics', { cache: 'no-store' });
@@ -68,13 +108,34 @@ export async function collectDiagnostics(page: Record<string, unknown> = {}): Pr
   } catch (err) {
     service = { error: `service unreachable: ${err instanceof Error ? err.message : String(err)}` };
   }
+  const pageErrorRing = Array.isArray(page.clientErrorRing) ? page.clientErrorRing : [];
+  const mergedErrorRing = [...globalClientErrorRing, ...pageErrorRing].slice(-MAX_CLIENT_ERROR_RING);
   const report = {
     page: {
       url: `${window.location.protocol}//${window.location.host}${window.location.pathname}`,
       userAgent: navigator.userAgent,
       secureContext: window.isSecureContext,
       online: navigator.onLine,
+      uiVersion: UI_VERSION ?? 'dev',
+      viewport: {
+        width: typeof window !== 'undefined' ? window.innerWidth : 0,
+        height: typeof window !== 'undefined' ? window.innerHeight : 0,
+      },
+      wsCloseCode: null,
+      wsCloseReason: '',
+      reconnectAttempts: 0,
+      rtcState: {},
+      transferErrors: [],
+      fallbackTimerFires: 0,
+      transferResumes: 0,
+      transferChunkRetries: 0,
+      lastFinalizeDurationMs: null,
+      screenShare: null,
+      contacts: null,
+      callAudio: null,
+      clipboardBridge: null,
       ...page,
+      clientErrorRing: mergedErrorRing,
     },
     service,
   };
@@ -198,7 +259,9 @@ export function CrashReports() {
       if (res.ok) setList((await res.json()) as CrashListView);
     } catch { /* service restarting */ }
   }, []);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    queueMicrotask(() => { void load(); });
+  }, [load]);
 
   const pending = (Array.isArray(list?.reports) ? list.reports : []).filter((r) => !r.sent);
   if (!list?.supported || pending.length === 0) return null;
@@ -213,14 +276,20 @@ export function CrashReports() {
   };
   const send = async () => {
     setBusy('send');
-    // Open the window synchronously (popup blockers), then point it at the issue form.
-    const win = list.sendVia === 'github' ? window.open('about:blank', '_blank') : null;
+    const inMacShell = canRestartLocalService();
+    // In regular browsers, open the tab synchronously (popup blockers), then point it at the issue form.
+    // Inside macOS WKWebView, about:blank has no external URL to hand to NSWorkspace, so open after fetch.
+    const win = !inMacShell && list.sendVia === 'github' ? window.open('about:blank', '_blank') : null;
     try {
       const res = await fetch(`/api/crashes/${encodeURIComponent(latest.id)}/send`, { method: 'POST' });
       const result = (await res.json()) as { via?: string; url?: string; error?: string };
       if (!res.ok) throw new Error(result.error ?? `HTTP ${res.status}`);
       if (result.via === 'github' && result.url) {
-        if (win) win.location.href = result.url; else window.open(result.url, '_blank', 'noopener');
+        if (win) {
+          win.location.href = result.url;
+        } else if (!openExternalInDesktopShell(result.url)) {
+          window.open(result.url, '_blank', 'noopener');
+        }
         setMessage('Opened a prefilled GitHub issue. Review it there and press Submit.');
       } else {
         win?.close();

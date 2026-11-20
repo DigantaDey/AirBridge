@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import type { LocalDaemonStatus } from '../shared/protocol.js';
+import { postMacOsNotification } from './macNotification.js';
 
 export interface MacDaemonConfig {
   enabled: boolean;
@@ -43,10 +44,18 @@ export function createMacDaemonConfig(overrides?: Partial<MacDaemonConfig>): Mac
  * whole point of the setting. Callers must still gate *who* may change it
  * (loopback-only HTTP route / host desktop client).
  */
+function hasControlChar(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
 export function validateDownloadDir(raw: unknown): string {
   if (typeof raw !== 'string') throw new Error('Download folder must be a path string.');
   const trimmed = raw.trim();
-  if (!trimmed || trimmed.length > 1024 || /[\x00-\x1f\x7f]/.test(trimmed)) {
+  if (!trimmed || trimmed.length > 1024 || hasControlChar(trimmed)) {
     throw new Error('Download folder path is empty or invalid.');
   }
   const expanded = trimmed === '~' ? os.homedir() : trimmed.startsWith('~/') ? path.join(os.homedir(), trimmed.slice(2)) : trimmed;
@@ -101,11 +110,26 @@ export function getDaemonStatus(config: MacDaemonConfig): LocalDaemonStatus {
   };
 }
 
+const WINDOWS_RESERVED_NAME = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i;
+
 export function sanitizeFilename(rawName: string): string {
   const base = path.basename(rawName.replace(/\\/g, '/')).trim();
-  const cleaned = base.replace(/[\x00-\x1f<>:"|?*]/g, '_');
+  let cleaned = '';
+  for (let i = 0; i < base.length; i++) {
+    const ch = base[i]!;
+    const code = ch.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f || '<>:"|?*'.includes(ch)) {
+      cleaned += '_';
+    } else {
+      cleaned += ch;
+    }
+  }
+  cleaned = cleaned.replace(/[. ]+$/g, '');
   if (!cleaned || cleaned === '.' || cleaned === '..') {
     return `airbridge-file-${Date.now()}`;
+  }
+  if (WINDOWS_RESERVED_NAME.test(cleaned)) {
+    cleaned = `_${cleaned}`;
   }
   return cleaned;
 }
@@ -177,9 +201,5 @@ export async function saveBufferToLocalDownloads(
 }
 
 export function triggerMacNotification(title: string, subtitle: string): void {
-  if (process.platform !== 'darwin') return;
-  const safeTitle = title.replace(/["\\]/g, '');
-  const safeSub = subtitle.replace(/["\\]/g, '');
-  const script = `display notification "${safeSub}" with title "${safeTitle}" sound name "Glass"`;
-  execFile('osascript', ['-e', script], () => {});
+  postMacOsNotification(title, subtitle, 'AirBridge');
 }

@@ -184,7 +184,9 @@ export class OpaquePeer {
         reject(new Error(`OpaquePeer connection to ${wsUrl} timed out after 5000ms`));
         try {
           ws.close();
-        } catch (_err) {}
+        } catch {
+          // ignore close errors on timed-out socket
+        }
       }, 5000);
 
       ws.on('open', () => {
@@ -260,7 +262,7 @@ export class OpaquePeer {
             peer.device.publicKey
           );
           this.sessions.set(peer.peerId, session);
-        } catch (_err) {
+        } catch {
           // If public key is invalid or peer has not yet provided ECDH key
         }
       }
@@ -702,7 +704,9 @@ export class OpaquePeer {
     if (this.ws) {
       try {
         this.ws.close();
-      } catch (_err) {}
+      } catch {
+        // ignore close errors during disconnect
+      }
       this.ws = null;
     }
     this.isConnected = false;

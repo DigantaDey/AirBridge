@@ -16,7 +16,6 @@ export const CHUNK_HEADER_LENGTH = 1 + ID_ASCII_LENGTH + 4 + 4 + GCM_IV_LENGTH; 
 export const ROUTING_HEADER_LENGTH = 1 + ID_ASCII_LENGTH + ID_ASCII_LENGTH; // 33 bytes
 export const BINARY_SACK_LENGTH = 16; // 16 bytes compact
 
-const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 export interface EncryptedChunkFrame {

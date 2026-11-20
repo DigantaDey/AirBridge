@@ -1,5 +1,11 @@
 package com.airbridge.app.ui.components
 
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -12,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.WifiTethering
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -20,16 +27,20 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.airbridge.app.HandoffUiState
 import com.airbridge.app.HotspotHandoff
 import com.airbridge.app.HotspotHandoffGuidance
@@ -48,11 +59,58 @@ fun HotspotHandoffCard(
     modifier: Modifier = Modifier,
 ) {
     if (!state.available && state.phase == HandoffUiState.Phase.IDLE) return
-    var showNetworkDetails by remember(state.manualHotspot?.ssid) { mutableStateOf(false) }
-    val permissions = HotspotHandoff.requiredPermissionsFor(android.os.Build.VERSION.SDK_INT)
-    // Start regardless of the result: the controller separately checks Wi-Fi
-    // permissions and treats Bluetooth permission as an optional convenience.
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { onStart() }
+    val context = LocalContext.current
+    val activity = context as? Activity
+    var showNetworkDetails by rememberSaveable(state.manualHotspot?.ssid) { mutableStateOf(false) }
+    var showRationaleDialog by rememberSaveable { mutableStateOf(false) }
+    var showSettingsDialog by rememberSaveable { mutableStateOf(false) }
+
+    val sdkInt = Build.VERSION.SDK_INT
+    val requiredHotspotPerms = HotspotHandoff.requiredHotspotPermissionsFor(sdkInt)
+    val allPermissions = HotspotHandoff.requiredPermissionsFor(sdkInt)
+
+    // Start if required Wi-Fi hotspot permissions are granted; Bluetooth permission is optional.
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { results ->
+        val hotspotGranted = requiredHotspotPerms.all { perm ->
+            results[perm] == true ||
+                ContextCompat.checkSelfPermission(context, perm) == PackageManager.PERMISSION_GRANTED
+        }
+        if (hotspotGranted) {
+            onStart()
+        } else {
+            val permanentlyDenied = activity != null && requiredHotspotPerms.any { perm ->
+                ContextCompat.checkSelfPermission(context, perm) != PackageManager.PERMISSION_GRANTED &&
+                    !ActivityCompat.shouldShowRequestPermissionRationale(activity, perm)
+            }
+            if (permanentlyDenied) {
+                showSettingsDialog = true
+            } else {
+                onStart()
+            }
+        }
+    }
+
+    fun requestHotspotWithThreeStateFlow() {
+        val missingHotspot = requiredHotspotPerms.filter { perm ->
+            ContextCompat.checkSelfPermission(context, perm) != PackageManager.PERMISSION_GRANTED
+        }
+        val missingAll = allPermissions.filter { perm ->
+            ContextCompat.checkSelfPermission(context, perm) != PackageManager.PERMISSION_GRANTED
+        }
+        when {
+            missingHotspot.isEmpty() && missingAll.isEmpty() -> {
+                onStart()
+            }
+            activity != null && missingHotspot.any { ActivityCompat.shouldShowRequestPermissionRationale(activity, it) } -> {
+                showRationaleDialog = true
+            }
+            else -> {
+                launcher.launch(allPermissions)
+            }
+        }
+    }
 
     ElevatedCard(
         modifier = modifier.fillMaxWidth(),
@@ -110,11 +168,68 @@ fun HotspotHandoffCard(
             if (state.active) {
                 OutlinedButton(onClick = onStop) { Text("Stop hotspot") }
             } else {
-                Button(onClick = { launcher.launch(permissions) }) {
+                Button(onClick = ::requestHotspotWithThreeStateFlow) {
                     Text(if (state.phase == HandoffUiState.Phase.FAILED) "Try again" else "Start hotspot")
                 }
             }
         }
+    }
+
+    if (showRationaleDialog) {
+        AlertDialog(
+            onDismissRequest = { showRationaleDialog = false },
+            title = { Text("Nearby Wi-Fi permission for hotspot") },
+            text = {
+                Text(
+                    "AirBridge needs Nearby Wi-Fi permission to start a temporary local-only hotspot for your paired computer. Optional Bluetooth access lets a compatible Mac join automatically without typing the Wi-Fi password.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showRationaleDialog = false
+                        launcher.launch(allPermissions)
+                    },
+                ) {
+                    Text("Continue")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRationaleDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    if (showSettingsDialog) {
+        AlertDialog(
+            onDismissRequest = { showSettingsDialog = false },
+            title = { Text("Nearby Wi-Fi permission required") },
+            text = {
+                Text(
+                    "Nearby Wi-Fi permission is currently disabled for AirBridge. Open Android Settings to allow Nearby devices so AirBridge can create a temporary hotspot.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showSettingsDialog = false
+                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = Uri.fromParts("package", context.packageName, null)
+                        }
+                        runCatching { context.startActivity(intent) }
+                    },
+                ) {
+                    Text("Open Settings")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSettingsDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }
 

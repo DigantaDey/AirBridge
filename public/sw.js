@@ -1,4 +1,3 @@
-const CACHE_NAME = 'airbridge-shell-v1';
 const DB_NAME = 'airbridge-share-db';
 const STORE_NAME = 'shared-items';
 
@@ -47,7 +46,7 @@ self.addEventListener('fetch', (event) => {
           const sharedUrl = formData.get('url') ? String(formData.get('url')) : '';
           await saveSharedPayload({ files, title, text, url: sharedUrl });
           return Response.redirect('/?shared=1', 303);
-        } catch (err) {
+        } catch {
           return Response.redirect('/?share_error=1', 303);
         }
       })()

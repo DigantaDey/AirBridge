@@ -23,9 +23,10 @@ import {
   normalizePairCode,
 } from "../../shared/protocol.js";
 import type { HostFirewallStatus, LanEndpoint } from "../../shared/protocol.js";
-import type {
-  ClipboardBeamItem,
-  TransferSessionView,
+import {
+  isSafeHttpUrl,
+  type ClipboardBeamItem,
+  type TransferSessionView,
 } from "../engine/warpClient.js";
 import {
   buildPairingUrl,
@@ -126,10 +127,7 @@ export function PairingDock({
   }, [pairCode, lanUrls, preferredUrl, tlsPin]);
 
   useEffect(() => {
-    if (!pairUrl || !connected) {
-      setQrSvg("");
-      return;
-    }
+    if (!pairUrl || !connected) return;
     let cancelled = false;
     QRCode.toString(pairUrl, {
       type: "svg",
@@ -148,6 +146,7 @@ export function PairingDock({
       cancelled = true;
     };
   }, [pairUrl, connected]);
+  const activeQrSvg = pairUrl && connected ? qrSvg : "";
 
   const copyPairCode = () => {
     if (!pairCode) return;
@@ -207,10 +206,10 @@ export function PairingDock({
               >
                 Waiting for the AirBridge service…
               </p>
-            ) : qrSvg ? (
+            ) : activeQrSvg ? (
               <div
                 className="w-full h-full [&>svg]:w-full [&>svg]:h-full"
-                dangerouslySetInnerHTML={{ __html: qrSvg }}
+                dangerouslySetInnerHTML={{ __html: activeQrSvg }}
               />
             ) : (
               <div className="w-6 h-6 rounded-full border-2 border-slate-300 border-t-sky-500 animate-spin" />
@@ -578,7 +577,7 @@ export function PairingDock({
                     {clip.text}
                   </pre>
                   <div className="flex items-center justify-end gap-2">
-                    {clip.contentType === "url" && (
+                    {clip.contentType === "url" && isSafeHttpUrl(clip.text) && (
                       <a
                         href={clip.text}
                         target="_blank"

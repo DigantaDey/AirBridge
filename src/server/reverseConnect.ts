@@ -200,14 +200,37 @@ function capture(cmd: string, args: string[], ms: number): Promise<string> {
       resolve('');
       return;
     }
+    let killEscalation: NodeJS.Timeout | null = null;
+    const stopChild = () => {
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        // ignore
+      }
+      if (!killEscalation) {
+        killEscalation = setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            // ignore
+          }
+        }, 500);
+        killEscalation.unref();
+      }
+    };
     child.stdout?.on('data', (c) => {
       out += String(c);
-      if (out.length > 64 * 1024) child.kill();
+      if (out.length > 64 * 1024) stopChild();
     });
-    child.on('error', () => resolve(out));
-    const timer = setTimeout(() => child.kill(), ms);
+    child.on('error', () => {
+      if (killEscalation) clearTimeout(killEscalation);
+      resolve(out);
+    });
+    const timer = setTimeout(() => stopChild(), ms);
+    timer.unref();
     child.on('close', () => {
       clearTimeout(timer);
+      if (killEscalation) clearTimeout(killEscalation);
       resolve(out);
     });
   });
@@ -252,6 +275,8 @@ export interface ReverseConnectorOptions {
   maxBackoffMs?: number;
   /** A session shorter than this (phone closed it: busy, wrong computer) counts as a failure. */
   minSessionMs?: number;
+  /** Idle timeout on an injected reverse socket before it is destroyed (default 60s). */
+  idleTimeoutMs?: number;
   connect?: (address: string, port: number, timeoutMs: number) => Promise<net.Socket>;
   now?: () => number;
   log?: (message: string) => void;
@@ -270,6 +295,7 @@ export function defaultConnect(address: string, port: number, timeoutMs: number)
       socket.destroy();
       reject(new Error('timeout'));
     }, timeoutMs);
+    timer.unref();
     socket.once('connect', () => {
       clearTimeout(timer);
       socket.setNoDelay(true);
@@ -293,6 +319,7 @@ export class ReverseConnector {
   private readonly connectTimeoutMs: number;
   private readonly maxBackoffMs: number;
   private readonly minSessionMs: number;
+  private readonly idleTimeoutMs: number;
   private readonly connectFn: NonNullable<ReverseConnectorOptions['connect']>;
   private readonly now: () => number;
 
@@ -301,6 +328,7 @@ export class ReverseConnector {
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 1_500;
     this.maxBackoffMs = opts.maxBackoffMs ?? 10_000;
     this.minSessionMs = opts.minSessionMs ?? 10_000;
+    this.idleTimeoutMs = opts.idleTimeoutMs ?? 60_000;
     this.connectFn = opts.connect ?? defaultConnect;
     this.now = opts.now ?? Date.now;
   }
@@ -387,17 +415,33 @@ export class ReverseConnector {
     }
     const startedAt = this.now();
     this.opts.log?.(`reverse connection to ${target.address}:${target.port} (${target.source})`);
-    socket.once('close', () => {
+    let released = false;
+    const releaseLive = () => {
+      if (released) return;
+      released = true;
       st.live = false;
       if (this.now() - startedAt < this.minSessionMs) st.failures++;
       else st.failures = 0;
       st.nextAt = this.now() + (st.failures ? this.backoff(st.failures) : this.intervalMs);
+    };
+    if (this.idleTimeoutMs > 0 && typeof socket.setTimeout === 'function') {
+      socket.setTimeout(this.idleTimeoutMs);
+      socket.once('timeout', () => {
+        socket.destroy();
+        releaseLive();
+      });
+    }
+    socket.once('close', releaseLive);
+    socket.once('error', () => {
+      socket.destroy();
+      releaseLive();
     });
     markReversePeer(socket);
     try {
       this.opts.inject(socket);
     } catch {
       socket.destroy();
+      releaseLive();
     }
   }
 }

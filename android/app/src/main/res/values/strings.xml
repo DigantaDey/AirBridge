@@ -5,4 +5,20 @@
     <string name="qr_scan_close">Close the scanner</string>
     <string name="qr_scan_hint">No camera or a broken code? Close this and enter the address shown by AirBridge.</string>
     <string name="qr_scan_manual">Enter address instead</string>
+
+    <string name="screen_share_consent_title">Share your screen with %1$s?</string>
+    <string name="screen_share_consent_body">%1$s will see everything on this phone\'s screen, including notifications, until you stop sharing. App audio is off unless you select it below. Android and the source app decide whether playback capture is allowed; protected or opted-out content may be blank or silent. The optional audio permission is for app playback capture, not microphone recording. The stream is end-to-end encrypted and never leaves your devices.</string>
+    <string name="screen_share_audio_checkbox">Also share permitted app audio (videos, music, games)</string>
+    <string name="screen_share_audio_unsupported">App audio requires Android 10 or later</string>
+    <string name="screen_share_continue">Continue</string>
+    <string name="screen_share_decline">Decline</string>
+    <string name="screen_share_expired">That screen-sharing request has expired</string>
+    <string name="screen_share_disabled_toast">Enable Screen sharing in AirBridge settings first</string>
+    <string name="screen_share_audio_rationale_title">App playback audio permission</string>
+    <string name="screen_share_audio_rationale_body">Android uses the Record Audio permission to gate app playback capture during screen sharing. AirBridge captures only permitted media/game audio and never records the microphone.</string>
+    <string name="screen_share_audio_settings_title">Audio capture permission disabled</string>
+    <string name="screen_share_audio_settings_body">Audio capture permission is disabled in Android Settings. You can open Settings to allow it, or continue sharing video without app audio.</string>
+    <string name="screen_share_audio_continue_video_only">Continue without audio</string>
+    <string name="screen_share_open_settings">Open Settings</string>
+    <string name="screen_share_audio_denied_toast">Android\'s audio-capture permission was not granted; app audio will stay off</string>
 </resources>

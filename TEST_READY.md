@@ -1,7 +1,7 @@
 # E2E Test Suite Ready (`TEST_READY`)
 
 **Status**: `READY & VERIFIED` (100% Pass, Exit Code 0)  
-**Execution Timestamp**: 2026-11-15T16:40:00Z  
+**Execution Timestamp**: 2026-11-20T00:46:40Z  
 **Canonical Invocation Command**: `npm run test:e2e` (or `npx vitest run tests/e2e/`)
 
 ---
@@ -10,21 +10,22 @@
 
 | Test Tier | Suite Directory | Test Suites | Passing Tests | Execution Time |
 |---|---|:---:|:---:|:---:|
-| **Harness Self-Verification** | `tests/e2e/harness/` | 1 | 8 | ~0.23s |
-| **Tier 1: Feature Coverage (F01–F19)** | `tests/e2e/tier1-feature-coverage/` | 19 | 107 | ~7.5s |
-| **Tier 2: Boundary & Corner Cases** | `tests/e2e/tier2-boundary-corner/` | 7 | 97 | ~6.3s |
-| **Tier 3: Cross-Feature Combinations** | `tests/e2e/tier3-cross-feature/` | 5 | 22 | ~18.1s |
-| **Tier 4: Real-World Scenarios** | `tests/e2e/tier4-real-world/` | 10 | 20 | ~10.2s |
-| **Total Opaque-Box E2E Suite** | `tests/e2e/` | **42** | **254** | **~25.88s** |
+| **Harness Self-Verification** | `tests/e2e/harness/` | 1 | 8 | ~1.08s |
+| **Tier 1: Feature Coverage (F01–F21)** | `tests/e2e/tier1-feature-coverage/` | 21 | 116 | ~5.43s |
+| **Tier 2: Boundary & Corner Cases** | `tests/e2e/tier2-boundary-corner/` | 7 | 97 | ~6.36s |
+| **Tier 3: Cross-Feature Combinations** | `tests/e2e/tier3-cross-feature/` | 5 | 22 | ~18.23s |
+| **Tier 4: Real-World Scenarios** | `tests/e2e/tier4-real-world/` | 10 | 20 | ~10.33s |
+| **Total Opaque-Box E2E Suite** | `tests/e2e/` | **44** | **263** | **~19.23s** |
 
 *Note on Full Project Test Suite*:
-- **Full Vitest Suite (`npm test`)**: **69 test files, 433 tests passing** (duration: ~32.6s, exit code 0).
+- **Full Vitest Suite (`npm test`)**: **105 test files, 714 tests passing** (duration: ~63.13s, exit code 0), including production-hardening suites (`tests/server-production-hardening.test.ts`, `tests/install-hardening.test.ts`, `tests/build-config-hardening.test.ts`, `tests/client-hardening.test.ts`, `tests/website-hardening.test.ts`, `tests/mac-supervisor.test.ts`).
+- **Native Android & JVM Hardening Suites**: Verified via `./android/gradlew -p android :engine:check :app:testDebugUnitTest :app:lintDebug :app:assembleDebug` (`AndroidHardeningTest.kt`, `ModelTest.kt`, `TlsSanAndTelemetryTest.kt`, `WebSocketResilienceTest.kt`).
 
 ---
 
 ## 2. Feature Inventory Verification Matrix
 
-All 17 Features from `PROJECT.md` Feature Inventory (plus supplementary packaging and ANR remediations) are verified across all 4 tiers:
+All 17 Features from `PROJECT.md` Feature Inventory (plus supplementary packaging, pairing, continuity, and ANR remediations) are verified across all 4 tiers:
 
 1. **F01 (Compose Native UI Contract)**: Verified via `f01_compose_ui_contract.test.ts` (5 tests), edge cases, and Scenario 01.
 2. **F02 (Connection & Discovery Screen)**: Verified via `f02_discovery_and_connect.test.ts` (5 tests), pair code validation, and Scenario 01, 05.
@@ -45,6 +46,8 @@ All 17 Features from `PROJECT.md` Feature Inventory (plus supplementary packagin
 17. **F17 (APK Signing & Sideload Packaging)**: Verified via `f17_apk_signing_schemes.test.ts` (6 tests), V1/V2 schemes, and Scenario 01, 10.
 18. **F18 (Version Code & Packaging Config)**: Verified via `f18_version_code_packaging.test.ts` (6 tests), semantic versioning, and Scenario 10.
 19. **F19 (ANR Elimination & Non-Blocking Discovery)**: Verified via `f19_anr_and_discovery_fix.test.ts` (6 tests), non-blocking queues, and Scenario 01, 05.
+20. **F20 (Per-Device Pair Code Sync & Notification Isolation)**: Verified via `f20_pair_code_synchronization_and_qr.test.ts` (3 tests), per-device room isolation, and Scenario 01, 05.
+21. **F21 (Phone Continuity on Android)**: Verified via `f21_phone_continuity_android.test.ts` (6 tests), permission scoping, ScreenShare/Contacts/Calls, and Scenario 03, 07.
 
 ---
 
@@ -56,9 +59,6 @@ All 17 Features from `PROJECT.md` Feature Inventory (plus supplementary packagin
 
 ---
 
-## 4. Discovered Implementation Defects (Escalated to Milestone Owners)
+## 4. Resolved Implementation Defects
 
-- **Implementation Bug in Milestone 1 Desktop Sender**:
-  - **File**: `src/client/engine/warpClient.ts:3848:11`
-  - **Issue**: TypeScript compilation error TS2722 (`Cannot invoke an object which is possibly 'undefined'`) when invoking `rawSocket.once('drain', onDrain)`. `rawSocket` is typed as nullable in the event-driven backpressure drain handler.
-  - **Escalation**: Requires non-null assertion or optional chaining guard (`rawSocket?.once('drain', onDrain)`) in `src/client/engine/warpClient.ts`.
+- **Resolved in `src/client/engine/warpClient.ts`**: The `rawSocket.once('drain', onDrain)` TypeScript TS2722 strict-null check issue in the WebSocket relay backpressure drain handler has been fixed with local function capture and receiver binding, verified by `npm run typecheck` (exit 0) and `tests/transfer-speed.test.ts`.

@@ -193,7 +193,11 @@ export async function startRelayServer(opts: RelayServerOptions = {}): Promise<R
         if (rest.length) { socket.end('ERR PROTOCOL\n'); return; }
         const room = relayRoomFor(arg);
         const queued = waiters.get(room);
-        const heartbeat = setInterval(() => socket.write('P\n'), heartbeatMs);
+        const heartbeat = setInterval(() => {
+          if (!socket.destroyed && socket.writable) {
+            socket.write('P\n');
+          }
+        }, heartbeatMs);
         heartbeat.unref();
         const entry: Standby = { socket, heartbeat };
         socket.write('OK\n');
@@ -250,12 +254,25 @@ export async function startRelayServer(opts: RelayServerOptions = {}): Promise<R
     }).catch(() => socket.destroy());
   });
 
+  let boundHost = opts.host ?? '::';
   await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(opts.port ?? DEFAULT_RELAY_PORT, opts.host ?? '::', () => resolve());
+    const onFirstError = (err: NodeJS.ErrnoException) => {
+      if (!opts.host && (err.code === 'EAFNOSUPPORT' || err.code === 'EADDRNOTAVAIL' || err.code === 'EINVAL')) {
+        boundHost = '0.0.0.0';
+        server.once('error', reject);
+        server.listen({ port: opts.port ?? DEFAULT_RELAY_PORT, host: boundHost }, () => resolve());
+        return;
+      }
+      reject(err);
+    };
+    server.once('error', onFirstError);
+    server.listen({ port: opts.port ?? DEFAULT_RELAY_PORT, host: boundHost, ipv6Only: false }, () => {
+      server.off('error', onFirstError);
+      resolve();
+    });
   });
   const port = (server.address() as net.AddressInfo).port;
-  log(`AirBridge relay listening on ${opts.host ?? '::'}:${port}`);
+  log(`AirBridge relay listening on ${boundHost}:${port}`);
 
   return {
     port,

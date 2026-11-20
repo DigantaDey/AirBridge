@@ -49,3 +49,22 @@ export function copyTextToDesktopShell(text: string): boolean {
     return false;
   }
 }
+
+/** Ask the macOS app shell to open an external http(s) URL in the default browser. */
+export function openExternalInDesktopShell(url: string): boolean {
+  if (!isThisComputerPage()) return false;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  } catch {
+    return false;
+  }
+  const bridge = shellBridge();
+  if (!bridge) return false;
+  try {
+    bridge.postMessage({ action: 'open-external', url });
+    return true;
+  } catch {
+    return false;
+  }
+}

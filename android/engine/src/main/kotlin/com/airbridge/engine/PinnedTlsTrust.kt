@@ -41,6 +41,13 @@ class PinnedTlsTrust(
     fun isAnchored(): Boolean =
         expectedPinSha256?.let { PairingLink.isValidPin(it) } == true ||
             runCatching { loadAnchor() != null }.getOrDefault(false)
+
+    /** Safe 12-character pin prefix for diagnostics (never exposes full key material). */
+    fun anchorPinPrefix(): String? {
+        expectedPinSha256?.takeIf { PairingLink.isValidPin(it) }?.let { return it.take(12) }
+        val saved = runCatching { loadAnchor() }.getOrNull() ?: return null
+        return runCatching { pinOf(saved).take(12) }.getOrNull()
+    }
     override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
         throw CertificateException("Client certificates are not supported")
     }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 interface FsEntry {
   name: string;
@@ -30,7 +30,7 @@ export function FolderPickerModal({ initialPath, onSelect, onClose }: FolderPick
   const [newFolderName, setNewFolderName] = useState('');
   const [creating, setCreating] = useState(false);
 
-  const fetchList = async (path: string) => {
+  const fetchList = useCallback(async (path: string) => {
     setLoading(true);
     setError(null);
     try {
@@ -47,11 +47,13 @@ export function FolderPickerModal({ initialPath, onSelect, onClose }: FolderPick
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    fetchList(initialPath || home).catch(() => {});
-  }, []);
+    queueMicrotask(() => {
+      fetchList(initialPath).catch(() => {});
+    });
+  }, [fetchList, initialPath]);
 
   const handleNavigate = (path: string) => {
     fetchList(path).catch(() => {});

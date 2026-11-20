@@ -79,7 +79,7 @@ export function buildLinuxLauncherEntry(options: LauncherOptions): string {
     'Type=Application',
     'Name=AirBridge',
     'GenericName=Phone & File Bridge',
-    `Comment=AirBridge ${version} — end-to-end encrypted files, clipboard, contacts, calls and screen sharing with your phone`,
+    `Comment=AirBridge ${version} — end-to-end encrypted files, photo & text clipboard, contacts, call audio and H.264 screen sharing (by Diganta Dey)`,
     `Exec=${exec(['--open'])}`,
     'Icon=airbridge',
     'Terminal=false',

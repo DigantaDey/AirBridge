@@ -49,7 +49,6 @@ describe('Tier 4 Scenario 02: Large Media Gallery & Mixed Video Batch Sync', () 
 
       await negotiateTransfer(androidPeer, desktopPeer, tid, manifest);
 
-      const totalBytes = sourceFiles.reduce((acc, f) => acc + f.data.byteLength, 0);
       const assembled = sourceFiles.map((f) => new Uint8Array(f.data.byteLength));
       const receivedCounts = new Array<number>(sourceFiles.length).fill(0);
 

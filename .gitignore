@@ -37,3 +37,8 @@ android/*.jks
 android/*.keystore
 
 .cache/
+
+# IDE metadata & local Android debug APK exports
+android/.idea/
+.idea/gradle.xml
+android/app/debug/

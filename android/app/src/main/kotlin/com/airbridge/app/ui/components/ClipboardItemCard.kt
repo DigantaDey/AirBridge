@@ -39,10 +39,50 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.airbridge.app.AndroidDiagnostics
 import com.airbridge.app.ui.formatTimestamp
 import com.airbridge.engine.ClipboardItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+
+/**
+ * Thread-safe bounded LRU cache for decoded clipboard thumbnail bitmaps.
+ *
+ * Implemented with pure JVM `LinkedHashMap(accessOrder = true)` so both
+ * runtime Compose scrolling and JVM unit tests verify LRU eviction deterministically.
+ */
+class ThumbnailLruCache<K : Any, V : Any>(
+    private val maxEntries: Int = DEFAULT_MAX_ENTRIES,
+) {
+    init {
+        require(maxEntries >= 1) { "maxEntries must be >= 1" }
+    }
+
+    private val map = object : LinkedHashMap<K, V>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?): Boolean =
+            size > maxEntries
+    }
+
+    @Synchronized
+    fun get(key: K): V? = map[key]
+
+    @Synchronized
+    fun put(key: K, value: V) {
+        map[key] = value
+    }
+
+    @Synchronized
+    fun size(): Int = map.size
+
+    @Synchronized
+    fun clear() = map.clear()
+
+    companion object {
+        const val DEFAULT_MAX_ENTRIES = 24
+    }
+}
+
+private val clipboardThumbnailCache = ThumbnailLruCache<String, ImageBitmap>(maxEntries = 24)
 
 @Composable
 fun ClipboardItemCard(
@@ -52,13 +92,29 @@ fun ClipboardItemCard(
 ) {
     val incoming = item.direction == "incoming"
     val dataUrl = item.imageDataUrl
-    var previewBitmap by remember(dataUrl) { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(dataUrl) {
-        previewBitmap = if (dataUrl == null) {
-            null
+    val cacheKey = remember(item.beamId, dataUrl) {
+        if (dataUrl == null) null else "${item.beamId}:${dataUrl.length}:${dataUrl.hashCode()}"
+    }
+    var previewBitmap by remember(cacheKey) {
+        mutableStateOf(cacheKey?.let { clipboardThumbnailCache.get(it) })
+    }
+    LaunchedEffect(cacheKey, dataUrl) {
+        if (dataUrl == null || cacheKey == null) {
+            previewBitmap = null
         } else {
-            withContext(Dispatchers.Default) {
-                decodeThumbnailBitmap(dataUrl, maxDim = 900)
+            val cached = clipboardThumbnailCache.get(cacheKey)
+            if (cached != null) {
+                AndroidDiagnostics.recordBitmapCacheHit()
+                previewBitmap = cached
+            } else {
+                AndroidDiagnostics.recordBitmapCacheMiss()
+                val decoded = withContext(Dispatchers.Default) {
+                    decodeThumbnailBitmap(dataUrl, maxDim = 900)
+                }
+                if (decoded != null) {
+                    clipboardThumbnailCache.put(cacheKey, decoded)
+                }
+                previewBitmap = decoded
             }
         }
     }

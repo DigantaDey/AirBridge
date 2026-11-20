@@ -8,7 +8,7 @@ import tlsModule from 'node:tls';
 import type { TLSSocket } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
-import { asyncRoute, isSameOriginRequest, requestErrorHandler } from './httpSafety.js';
+import { asyncRoute, isAllowedHostHeader, isSameOriginRequest, requestErrorHandler } from './httpSafety.js';
 import { SignalingHub, isLocalMachineAddress } from './signalingHub.js';
 import { getLanCandidates, startMdnsResponder, type MdnsHandle } from './mdnsService.js';
 import { candidateUrl, type InterfaceMap, type LanCandidate } from './lanAddresses.js';
@@ -40,7 +40,7 @@ import { startBackgroundClipboardPeer, type BackgroundClipboardPeer } from './ba
 import { REVERSE_CONNECT_PORT, isValidPairCode, normalizePairCode, type HostFirewallStatus, type LanEndpoint } from '../shared/protocol.js';
 import { firewallKey, readMacFirewall } from './macFirewall.js';
 import { addShellSubscriber, shellSubscriberCount } from './shellEvents.js';
-import { buildDiagnostics } from './diagnostics.js';
+import { buildDiagnostics, getClientDiagnostics, recordClientDiagnostics } from './diagnostics.js';
 import { BLE_UUIDS, BEACON_WINDOW_MS, HandoffService, loadOrCreateHandoffKeys, handoffInfoFor, type HandoffPolicy } from './handoff.js';
 import { createWifiJoiner, type WifiJoiner } from './wifiJoin.js';
 import { emitShellEvent } from './shellEvents.js';
@@ -148,6 +148,10 @@ export interface AirBridgeServerOptions {
    * (AIRBRIDGE_HANDOFF=0 turns it off); `false` disables.
    */
   handoff?: false | { stateDir?: string; joiner?: WifiJoiner; consentTimeoutMs?: number };
+  /** Timeout (ms) waiting for the first byte on a TCP socket before closing it (default 5000). */
+  tcpPeekTimeoutMs?: number;
+  /** Timeout (ms) waiting for TLS handshake completion (default 10000). */
+  tlsHandshakeTimeoutMs?: number;
 }
 
 /** Loopback peer that this server did not dial itself. */
@@ -260,6 +264,13 @@ export async function createAirBridgeServer(
     }));
   const tlsPin = (): string | null => tls?.pinSha256 ?? null;
   let hostFirewall: HostFirewallStatus | null = null;
+  const allowedHostsForRequest = (): string[] => [
+    ...currentCandidates().map((c) => c.address),
+    ...(tls?.hosts ?? []),
+  ];
+  let peekTimeouts = 0;
+  let tlsHandshakeErrors = 0;
+  let lastDaemonError: string | null = null;
 
   const daemonCfg = createMacDaemonConfig(options.daemonConfig);
   const cliSessions = options.cliSessions ?? new Map<string, CliBeamSession>();
@@ -295,7 +306,7 @@ export async function createAirBridgeServer(
       );
       res.setHeader(
         'Permissions-Policy',
-        'camera=(), microphone=(), geolocation=(), payment=(), usb=()'
+        'camera=(), microphone=(self), geolocation=(), payment=(), usb=()'
       );
       res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
     }
@@ -306,12 +317,23 @@ export async function createAirBridgeServer(
   // daemon on this machine. CLI bearer downloads are intentionally shareable.
   app.use('/api', (req, res, next) => {
     if (req.method === 'GET' && req.path.startsWith('/beam/')) { next(); return; }
-    if (!isSameOriginRequest(req)) { res.status(403).json({ error: 'Cross-origin requests are not allowed.' }); return; }
+    if (!isSameOriginRequest(req, allowedHostsForRequest())) {
+      res.status(403).json({ error: 'Cross-origin or unrecognized Host requests are not allowed.' });
+      return;
+    }
     next();
   });
 
   const httpServer = http.createServer(app);
   const httpsServer = tls ? https.createServer({ key: tls.key, cert: tls.cert }, app) : null;
+  httpServer.keepAliveTimeout = 65_000;
+  httpServer.headersTimeout = 70_000;
+  httpServer.requestTimeout = 0;
+  if (httpsServer) {
+    httpsServer.keepAliveTimeout = 65_000;
+    httpsServer.headersTimeout = 70_000;
+    httpsServer.requestTimeout = 0;
+  }
   // SecureContext for the dispatcher's explicit TLS termination (see below).
   // Reassigned when the leaf is re-issued for a new LAN address.
   let httpsSecureContext = tls
@@ -374,7 +396,7 @@ export async function createAirBridgeServer(
     ? mode !== 'test' && process.env.AIRBRIDGE_HANDOFF !== '0'
     : options.handoff !== false;
   const handoffOpts = options.handoff || {};
-  const handoffStateDir = handoffOpts.stateDir ?? path.dirname(tls?.certDir ?? path.join(process.env.HOME ?? os.homedir(), '.airbridge', 'tls'));
+  const handoffStateDir = handoffOpts.stateDir ?? path.dirname(tls?.certDir ?? path.join(os.homedir(), '.airbridge', 'tls'));
   const handoffKeys = handoffEnabled ? loadOrCreateHandoffKeys(handoffStateDir) : null;
   const handoffTargets: ReverseTarget[] = [];
   if (handoffKeys) {
@@ -454,22 +476,27 @@ export async function createAirBridgeServer(
         res.status(400).send('Missing Host header.');
         return;
       }
-      res.redirect(308, `https://${hostHeader}${req.originalUrl}`);
+      if (!isAllowedHostHeader(req, allowedHostsForRequest())) {
+        res.status(403).send('Unrecognized Host header.');
+        return;
+      }
+      const safeOriginalUrl = (req.originalUrl || '/').replace(/[\r\n]/g, '');
+      res.redirect(308, `https://${hostHeader}${safeOriginalUrl}`);
     });
   }
 
   // Received-files folder settings. Loopback only: a phone (or any LAN
   // device / website reaching this port) must not be able to move where the
   // host saves files or pop open folders on the host's screen.
-  const isLoopbackRequest = (req: Request) => isLoopbackPeer(req.socket);
+  const isLoopbackRequest = (req: Request) => isLoopbackPeer(req.socket) && isAllowedHostHeader(req, allowedHostsForRequest());
   // The daemon save/stream routes are restricted to this machine, not just
   // loopback: the host's own browser is often reached over a LAN IP, and the
   // WebSocket layer already treats that as a host client. Remote devices (a
   // phone, another laptop) have an address that is not one of our interfaces.
-  const isLocalMachineRequest = (req: Request) => isLocalMachinePeer(req.socket);
+  const isLocalMachineRequest = (req: Request) => isLocalMachinePeer(req.socket) && isAllowedHostHeader(req, allowedHostsForRequest());
   const receivedSettingsPath = options.receivedFolderSettingsPath === null || (options.receivedFolderSettingsPath === undefined && mode === 'test')
     ? null
-    : options.receivedFolderSettingsPath ?? path.join(path.dirname(tls?.certDir ?? path.join(process.env.HOME ?? '', '.airbridge', 'tls')), 'settings.json');
+    : options.receivedFolderSettingsPath ?? path.join(path.dirname(tls?.certDir ?? path.join(os.homedir(), '.airbridge', 'tls')), 'settings.json');
   if (receivedSettingsPath && !options.daemonConfig?.downloadDir && !process.env.AIRBRIDGE_DOWNLOAD_DIR) {
     const persisted = await loadPersistedDownloadDir(receivedSettingsPath);
     if (persisted) daemonCfg.downloadDir = persisted;
@@ -482,6 +509,13 @@ export async function createAirBridgeServer(
   // so a huge inbound file never lives entirely in browser memory and an
   // interrupted transfer can resume from disk.
   const receiveStore = new PartialReceiveStore(daemonCfg);
+  await receiveStore.cleanupExpiredPartials().catch(() => {});
+  const partialCleanupTimer = mode === 'test'
+    ? null
+    : setInterval(() => {
+        void receiveStore.cleanupExpiredPartials().catch(() => {});
+      }, 60 * 60_000);
+  partialCleanupTimer?.unref();
   app.get('/api/received-folder', (req, res) => {
     if (!isLoopbackRequest(req)) { res.status(403).json({ error: 'Received-folder settings are restricted to this device.' }); return; }
     res.json({ downloadDir: daemonCfg.downloadDir, autoSaveToDownloads: daemonCfg.enabled && daemonCfg.autoSaveToDownloads, enabled: daemonCfg.enabled });
@@ -515,13 +549,64 @@ export async function createAirBridgeServer(
     } catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : 'Could not open folder' }); }
   }));
 
+  const canonicalPath = (targetPath: string): string => {
+    const abs = path.resolve(targetPath);
+    try {
+      return fs.realpathSync(abs);
+    } catch {
+      try {
+        const parentReal = fs.realpathSync(path.dirname(abs));
+        return path.join(parentReal, path.basename(abs));
+      } catch {
+        return abs;
+      }
+    }
+  };
+  const isAllowedFsBrowsePath = (targetPath: string): boolean => {
+    const abs = path.resolve(targetPath);
+    const real = canonicalPath(abs);
+    const roots = new Set<string>([
+      path.resolve(os.homedir()),
+      canonicalPath(os.homedir()),
+      path.resolve(daemonCfg.downloadDir),
+      canonicalPath(daemonCfg.downloadDir),
+      path.resolve(os.tmpdir()),
+      canonicalPath(os.tmpdir()),
+    ]);
+    if (process.platform === 'darwin') {
+      roots.add('/Volumes');
+    }
+    const within = (p: string, r: string): boolean => p === r || p.startsWith(r.endsWith(path.sep) ? r : r + path.sep);
+    for (const root of roots) {
+      if (root && (within(abs, root) || within(real, root))) return true;
+    }
+    return false;
+  };
+  const sanitizeFolderSegment = (raw: string): string => {
+    let out = '';
+    for (let i = 0; i < raw.length; i++) {
+      const ch = raw[i]!;
+      const code = ch.charCodeAt(0);
+      if (code <= 0x1f || code === 0x7f || '\\/:*?"<>|'.includes(ch)) {
+        out += '_';
+      } else {
+        out += ch;
+      }
+    }
+    return out.trim();
+  };
+
   // Loopback-only filesystem browser for the "Browse…" path picker in Settings.
-  // Exposes only directory listings, never file contents.
+  // Exposes only directory listings within allowed user roots, never file contents.
   app.get('/api/fs/list', asyncRoute(async (req, res) => {
     if (!isLoopbackRequest(req)) { res.status(403).json({ error: 'Filesystem browsing is restricted to this device.' }); return; }
     try {
       const raw = typeof req.query.path === 'string' ? req.query.path : daemonCfg.downloadDir;
       const resolved = path.resolve(raw);
+      if (!isAllowedFsBrowsePath(resolved)) {
+        res.status(403).json({ error: 'Path is outside the allowed folders.' });
+        return;
+      }
       const stat = await fs.promises.stat(resolved);
       if (!stat.isDirectory()) { res.status(400).json({ error: 'Not a directory' }); return; }
       const entries = await fs.promises.readdir(resolved, { withFileTypes: true });
@@ -532,7 +617,7 @@ export async function createAirBridgeServer(
       const parent = path.dirname(resolved);
       res.json({
         current: resolved,
-        parent: parent !== resolved ? parent : null,
+        parent: parent !== resolved && isAllowedFsBrowsePath(parent) ? parent : null,
         home: os.homedir(),
         downloadDir: daemonCfg.downloadDir,
         entries: dirs,
@@ -546,12 +631,20 @@ export async function createAirBridgeServer(
     try {
       const { base, name } = req.body as { base?: unknown; name?: unknown };
       if (typeof base !== 'string' || typeof name !== 'string') { res.status(400).json({ error: 'base and name required' }); return; }
-      const sanitized = name.replace(/[\\/:*?\"<>|\\x00-\\x1f]/g, '_').trim();
+      const sanitized = sanitizeFolderSegment(name);
       if (!sanitized || sanitized === '.' || sanitized === '..') { res.status(400).json({ error: 'Invalid folder name' }); return; }
       const resolvedBase = path.resolve(base);
+      if (!isAllowedFsBrowsePath(resolvedBase)) {
+        res.status(403).json({ error: 'Path is outside the allowed folders.' });
+        return;
+      }
       const stat = await fs.promises.stat(resolvedBase).catch(() => null);
       if (!stat?.isDirectory()) { res.status(400).json({ error: 'Base is not a directory' }); return; }
       const target = path.join(resolvedBase, sanitized);
+      if (!isAllowedFsBrowsePath(target)) {
+        res.status(403).json({ error: 'Path is outside the allowed folders.' });
+        return;
+      }
       await fs.promises.mkdir(target, { recursive: true });
       res.json({ ok: true, path: target });
     } catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : 'Cannot create folder' }); }
@@ -617,9 +710,34 @@ export async function createAirBridgeServer(
     res.status(202).json({ accepted: true });
   });
 
-  app.get('/api/diagnostics', (req, res) => {
+  app.post('/api/client-diagnostics', express.json({ limit: '64kb' }), (req, res) => {
+    if (!localOnly(req, res)) return;
+    if (!isSameOriginRequest(req, allowedHostsForRequest())) {
+      res.status(403).json({ error: 'Cross-origin request refused' });
+      return;
+    }
+    const recorded = recordClientDiagnostics(req.body ?? {});
+    res.json({ ok: true, receivedAt: recorded.receivedAt });
+  });
+
+  app.get('/api/diagnostics', asyncRoute(async (req, res) => {
     if (!localOnly(req, res)) return;
     res.setHeader('Cache-Control', 'no-store');
+    let writable = false;
+    let freeBytes: number | null = null;
+    if (daemonCfg.enabled && daemonCfg.downloadDir) {
+      writable = await fs.promises.access(daemonCfg.downloadDir, fs.constants.W_OK).then(() => true).catch(() => false);
+      const statFs = await fs.promises.statfs?.(daemonCfg.downloadDir).catch(() => null);
+      if (statFs && typeof statFs.bavail === 'number' && typeof statFs.bsize === 'number') {
+        freeBytes = statFs.bavail * statFs.bsize;
+      }
+    }
+    const partialStats = receiveStore.getStats();
+    const hubTelemetry = hub.getTelemetry();
+    const handoffTelemetry = handoffService ? handoffService.getTelemetry() : null;
+    const unsupportedReason = handoffService
+      ? await (handoffOpts.joiner ?? cachedJoiner()).unsupportedReason().catch(() => null)
+      : null;
     res.json(buildDiagnostics({
       version: serviceVersion,
       port: activePort,
@@ -638,14 +756,52 @@ export async function createAirBridgeServer(
         : null,
       hostFirewall,
       mdnsActive: mdns ? mdns.active : null,
+      mdnsLastError: mdns ? mdns.getLastError() : null,
       reverseConnect: reverseConnector ? reverseConnector.describe() : 'disabled',
       relay: relayAgent ? relayAgent.describe() : 'disabled',
       connectedDevices: hub.describeClients(),
+      signaling: {
+        ...hubTelemetry,
+        peekTimeouts,
+        tlsHandshakeErrors,
+      },
+      localDaemon: {
+        enabled: daemonCfg.enabled,
+        downloadDir: daemonCfg.downloadDir,
+        writable,
+        freeBytes,
+        activePartials: partialStats.activePartials,
+        orphanedPartialsCleaned: partialStats.orphanedPartialsCleaned,
+        finalizeCount: partialStats.finalizeCount,
+        finalizeRehashCount: partialStats.finalizeRehashCount,
+        lastFinalizeDurationMs: partialStats.lastFinalizeDurationMs,
+        lastError: lastDaemonError,
+      },
+      clipboard: hub.getClipboardTelemetry(),
+      handoff: handoffTelemetry
+        ? {
+            enabled: true,
+            policy: handoffTelemetry.policy,
+            shared: handoffTelemetry.shared,
+            unsupportedReason,
+            activeOffers: handoffTelemetry.activeOffers,
+            rejectedOffers: handoffTelemetry.rejectedOffers,
+            redactedSsidHits: handoffTelemetry.redactedSsidHits,
+            recentFailureReasons: handoffTelemetry.recentFailureReasons,
+          }
+        : {
+            enabled: false,
+            policy: 'off',
+            shared: false,
+            unsupportedReason: null,
+            recentFailureReasons: [],
+          },
       shellSubscribers: shellSubscriberCount(),
       update: options.updater ? options.updater.getStatus() : { supported: false },
       crashes: options.crashStore ? options.crashStore.list().slice(0, 10) : [],
+      client: getClientDiagnostics(),
     }));
-  });
+  }));
 
   const updater = options.updater ?? null;
   app.get('/api/update', (req, res) => {
@@ -800,8 +956,9 @@ export async function createAirBridgeServer(
         const saved = await saveBufferToLocalDownloads(daemonCfg, filename, body, sender);
         res.json({ ok: true, ...saved });
       } catch (err) {
+        lastDaemonError = err instanceof Error ? err.message : 'Failed to save to local Downloads';
         res.status(500).json({
-          error: err instanceof Error ? err.message : 'Failed to save to local Downloads',
+          error: lastDaemonError,
         });
       }
     })
@@ -868,8 +1025,9 @@ export async function createAirBridgeServer(
         );
         res.json({ ok: true });
       } catch (err) {
+        lastDaemonError = err instanceof Error ? err.message : 'Failed to write chunk.';
         res.status(400).json({
-          error: err instanceof Error ? err.message : 'Failed to write chunk.',
+          error: lastDaemonError,
         });
       }
     })
@@ -1010,8 +1168,9 @@ export async function createAirBridgeServer(
         const result = await receiveStore.finalize(transferId, fileIndex, expectedSha256);
         res.json({ ok: true, ...result });
       } catch (err) {
+        lastDaemonError = err instanceof Error ? err.message : 'Failed to finalize file.';
         res.status(400).json({
-          error: err instanceof Error ? err.message : 'Failed to finalize file.',
+          error: lastDaemonError,
         });
       }
     })
@@ -1092,7 +1251,7 @@ export async function createAirBridgeServer(
       try {
         const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
         if (url.pathname === '/ws') {
-          if (!isSameOriginRequest(req)) {
+          if (!isSameOriginRequest(req, allowedHostsForRequest())) {
             socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
             socket.destroy();
             return;
@@ -1117,11 +1276,19 @@ export async function createAirBridgeServer(
     // into the bundle or fail the build.
     const viteSpecifier = ['vi', 'te'].join('');
     const { createServer: createViteServer } = await import(viteSpecifier);
+    const viteHost = process.env.AIRBRIDGE_VITE_HOST?.trim() || (process.env.AIRBRIDGE_LAN_DEV === '1' ? '0.0.0.0' : '127.0.0.1');
+    const viteAllowed = new Set<string>(['localhost', '.localhost', '127.0.0.1', '::1', ...allowedHostsForRequest()]);
+    if (process.env.AIRBRIDGE_VITE_ALLOWED_HOSTS) {
+      for (const entry of process.env.AIRBRIDGE_VITE_ALLOWED_HOSTS.split(',')) {
+        const trimmed = entry.trim();
+        if (trimmed && trimmed !== '*' && trimmed.toLowerCase() !== 'true') viteAllowed.add(trimmed);
+      }
+    }
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        host: '0.0.0.0',
-        allowedHosts: true,
+        host: viteHost,
+        allowedHosts: [...viteAllowed],
         hmr: {
           server: httpServer,
         },
@@ -1163,8 +1330,8 @@ export async function createAirBridgeServer(
       };
       app.get('*', (req, res) => {
         const requested = req.path === '/' ? '/index.html' : req.path;
-        const embedded = assets[requested];
-        if (embedded !== undefined) {
+        const embedded = Object.hasOwn(assets, requested) ? assets[requested] : undefined;
+        if (typeof embedded === 'string') {
           res.setHeader('Content-Type', contentTypeFor(requested));
           res.setHeader(
             'Cache-Control',
@@ -1193,9 +1360,12 @@ export async function createAirBridgeServer(
   // error). Sockets are handed over directly, never proxied, so
   // `remoteAddress` still identifies the real peer.
   let dispatcher: net.Server | null = null;
+  const dispatcherSockets = new Set<net.Socket>();
   let dispatchSocket: (socket: net.Socket) => void = (socket) => {
     httpServer.emit('connection', socket);
   };
+  const tcpPeekTimeoutMs = options.tcpPeekTimeoutMs ?? 5_000;
+  const tlsHandshakeTimeoutMs = options.tlsHandshakeTimeoutMs ?? 10_000;
   if (httpsServer) {
     dispatchSocket = (socket) => {
       // Relayed transfer frames are large and latency-sensitive; Nagle's
@@ -1203,7 +1373,19 @@ export async function createAirBridgeServer(
       socket.setNoDelay(true);
       const onPeekError = () => socket.destroy();
       socket.once('error', onPeekError);
+      const peekTimer = tcpPeekTimeoutMs > 0
+        ? setTimeout(() => {
+            peekTimeouts++;
+            socket.removeListener('error', onPeekError);
+            socket.destroy();
+          }, tcpPeekTimeoutMs)
+        : null;
+      peekTimer?.unref();
+      socket.once('close', () => {
+        if (peekTimer) clearTimeout(peekTimer);
+      });
       socket.once('data', (firstChunk) => {
+        if (peekTimer) clearTimeout(peekTimer);
         socket.removeListener('error', onPeekError);
         socket.pause();
         if (firstChunk[0] === 0x16 && httpsSecureContext) {
@@ -1222,8 +1404,27 @@ export async function createAirBridgeServer(
           });
           if (isReversePeer(socket)) markReversePeer(tlsSocket);
           if (isRelayedPeer(socket)) markRelayedPeer(tlsSocket);
-          tlsSocket.on('error', () => tlsSocket.destroy());
+          let handshakeCompleted = false;
+          const hsTimer = tlsHandshakeTimeoutMs > 0
+            ? setTimeout(() => {
+                if (!handshakeCompleted) {
+                  tlsHandshakeErrors++;
+                  tlsSocket.destroy();
+                }
+              }, tlsHandshakeTimeoutMs)
+            : null;
+          hsTimer?.unref();
+          tlsSocket.on('error', () => {
+            if (!handshakeCompleted) tlsHandshakeErrors++;
+            if (hsTimer) clearTimeout(hsTimer);
+            tlsSocket.destroy();
+          });
+          tlsSocket.once('close', () => {
+            if (hsTimer) clearTimeout(hsTimer);
+          });
           tlsSocket.on('secure', () => {
+            handshakeCompleted = true;
+            if (hsTimer) clearTimeout(hsTimer);
             httpServer.emit('connection', tlsSocket);
             process.nextTick(() => {
               if (!tlsSocket.destroyed) tlsSocket.resume();
@@ -1238,7 +1439,11 @@ export async function createAirBridgeServer(
         }
       });
     };
-    dispatcher = net.createServer((socket) => dispatchSocket(socket));
+    dispatcher = net.createServer((socket) => {
+      dispatcherSockets.add(socket);
+      socket.once('close', () => dispatcherSockets.delete(socket));
+      dispatchSocket(socket);
+    });
   }
 
   const listeningServer: net.Server = dispatcher ?? httpServer;
@@ -1357,7 +1562,7 @@ export async function createAirBridgeServer(
     : null;
   reverseConnector?.start();
 
-  const airbridgeDir = path.dirname(tls?.certDir ?? path.join(process.env.HOME ?? '', '.airbridge', 'tls'));
+  const airbridgeDir = path.dirname(tls?.certDir ?? path.join(os.homedir(), '.airbridge', 'tls'));
   const savedRelay = mode === 'test' ? '' : await fs.promises.readFile(path.join(airbridgeDir, RELAY_ENDPOINT_FILE), 'utf8').catch(() => '');
   const relayEndpoint = process.env.AIRBRIDGE_RELAY ?? savedRelay.trim();
   const relayConfig = options.relay === false
@@ -1386,10 +1591,15 @@ export async function createAirBridgeServer(
         port: activePort,
         defaultPairCode: hub.getDefaultPairCode(),
         writeClipboard: (text) => hub.writeHostClipboard(text),
+        writeClipboardImage: (imageDataUrl) => hub.writeHostClipboardImage(imageDataUrl),
         storagePath: options.backgroundClipboardStoragePath,
       });
       hub.setDefaultPairCode(backgroundPeer.getPairCode());
-      hub.setBackgroundClipboardActive(true, (text) => backgroundPeer?.handleHostClipboard(text));
+      hub.setBackgroundClipboardActive(
+        true,
+        (text) => backgroundPeer?.handleHostClipboard(text),
+        (imageDataUrl, imageName) => backgroundPeer?.handleHostClipboardImage(imageDataUrl, imageName),
+      );
     } catch (err) {
       console.warn('Background clipboard peer could not start:', err instanceof Error ? err.message : err);
     }
@@ -1422,6 +1632,7 @@ export async function createAirBridgeServer(
     async close() {
       if (networkTimer) clearInterval(networkTimer);
       if (firewallTimer) clearInterval(firewallTimer);
+      if (partialCleanupTimer) clearInterval(partialCleanupTimer);
       reverseConnector?.stop();
       await handoffService?.dispose().catch(() => {});
       relayAgent?.stop();
@@ -1431,7 +1642,13 @@ export async function createAirBridgeServer(
       hub.close();
       await receiveStore.dispose();
       // The internal HTTP/HTTPS servers don't listen directly in TLS mode;
-      // drop their live connections so the dispatcher's close can finish.
+      // drop their live connections and any keep-alive sockets held by the
+      // dispatcher so close() finishes immediately instead of waiting for
+      // keepAliveTimeout.
+      for (const sock of dispatcherSockets) {
+        sock.destroy();
+      }
+      dispatcherSockets.clear();
       httpServer.closeAllConnections?.();
       httpsServer?.closeAllConnections?.();
       await new Promise<void>((resolve) => {
@@ -1443,6 +1660,44 @@ export async function createAirBridgeServer(
       }
     },
   };
+}
+
+/** Build the complete terminal QR URL (`?pair=<code>&alt=<csv>&ca=<pin>`) matching the web UI. */
+export function buildTerminalPairingUrl(instance: Pick<AirBridgeServerInstance, 'lanUrls' | 'port' | 'hub' | 'tls'>): string {
+  const targetUrl = instance.lanUrls[0] || `http://localhost:${instance.port}`;
+  const pairCode = instance.hub?.getDefaultPairCode?.() || '';
+  if (!pairCode) return targetUrl;
+  let primaryUrl: URL;
+  try {
+    primaryUrl = new URL(targetUrl);
+  } catch {
+    return `${targetUrl}${targetUrl.includes('?') ? '&' : '?'}pair=${encodeURIComponent(pairCode)}`;
+  }
+  const alternates: string[] = [];
+  for (const url of instance.lanUrls.slice(1)) {
+    try {
+      const parsed = new URL(url);
+      if (
+        parsed.origin !== primaryUrl.origin &&
+        parsed.protocol === primaryUrl.protocol &&
+        parsed.port === primaryUrl.port &&
+        !alternates.includes(parsed.hostname)
+      ) {
+        alternates.push(parsed.hostname);
+      }
+    } catch {
+      // ignore invalid URL
+    }
+  }
+  let result = `${primaryUrl.origin}/?pair=${encodeURIComponent(pairCode)}`;
+  if (alternates.length > 0) {
+    result += `&alt=${alternates.slice(0, 5).map(encodeURIComponent).join(',')}`;
+  }
+  const pin = instance.tls?.pinSha256;
+  if (pin && primaryUrl.protocol === 'https:' && /^[A-Za-z0-9_-]{43}$/.test(pin)) {
+    result += `&ca=${pin}`;
+  }
+  return result;
 }
 
 /** Human-facing startup guidance shared by the direct entrypoint. */

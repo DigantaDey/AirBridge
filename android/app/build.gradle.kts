@@ -44,7 +44,7 @@ android {
         // A stable production floor prevents a local Play bundle from going
         // backwards from the old CI-generated sideload version codes.
         versionCode = configuredVersionCode ?: 2_300_000 + gitCommitCount
-        versionName = "2.4.8"
+        versionName = "2.5.0"
     }
 
     signingConfigs {
@@ -85,8 +85,10 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
     sourceSets["main"].kotlin.srcDir("src/main/kotlin")
 }

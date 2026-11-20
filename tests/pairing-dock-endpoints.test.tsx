@@ -27,7 +27,7 @@ describe("PairingDock endpoint choice (multi-network computer)", () => {
   });
 
   async function copiedLink(): Promise<string> {
-    const writeText = vi.fn((_text: string) => Promise.resolve());
+    const writeText = vi.fn<(text: string) => Promise<void>>(() => Promise.resolve());
     Object.assign(navigator, { clipboard: { writeText } });
     const button = container!.querySelector<HTMLButtonElement>('button[title="Copy direct pairing URL"]')!;
     await act(async () => button.click());
@@ -161,7 +161,7 @@ describe("PairingDock while the local service is unreachable", () => {
   });
 
   async function copiedLink(): Promise<string> {
-    const writeText = vi.fn((_text: string) => Promise.resolve());
+    const writeText = vi.fn<(text: string) => Promise<void>>(() => Promise.resolve());
     Object.assign(navigator, { clipboard: { writeText } });
     const button = container!.querySelector<HTMLButtonElement>('button[title="Copy direct pairing URL"]')!;
     await act(async () => button.click());

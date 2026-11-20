@@ -41,7 +41,7 @@ describe("Native Compose app replacement for Android WebView shell", () => {
     expect(activity).toContain("enableEdgeToEdge(");
     expect(activity).toContain("AirBridgeApp(");
     expect(activity).toContain("ConnectionService.ACTION_UI_ATTACH");
-    expect(activity).toContain("ConnectionService.ACTION_UI_DETACH");
+    expect(activity).toContain("ConnectionService.detachUi()");
 
     const gradle = read("android/app/build.gradle.kts");
     expect(gradle).toContain("compose = true");

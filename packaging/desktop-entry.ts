@@ -21,6 +21,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import QRCode from 'qrcode';
 import {
+  buildTerminalPairingUrl,
   createAirBridgeServer,
   describeTlsSetup,
   type AirBridgeServerOptions,
@@ -94,9 +95,18 @@ function printHelp(): void {
 `);
 }
 
+function validatePort(raw: string, source = '--port'): number {
+  const n = Number.parseInt(raw, 10);
+  if (!/^\d+$/.test(String(raw).trim()) || !Number.isInteger(n) || n < 1 || n > 65535) {
+    console.error(`Error: ${source} must be an integer between 1 and 65535 (got "${raw}")`);
+    process.exit(1);
+  }
+  return n;
+}
+
 function parseArgs(argv: string[]): CliOptions {
   const opts: CliOptions = {
-    port: Number.parseInt(process.env.PORT || '3000', 10),
+    port: process.env.PORT ? validatePort(process.env.PORT, 'PORT') : 3000,
     downloadDir: undefined,
     reveal: false,
     https: undefined,
@@ -116,8 +126,12 @@ function parseArgs(argv: string[]): CliOptions {
     const arg = argv[i];
     if (arg === '-h' || arg === '--help') opts.help = true;
     else if (arg === '-v' || arg === '--version') opts.version = true;
-    else if ((arg === '-p' || arg === '--port') && argv[i + 1]) {
-      opts.port = Number.parseInt(argv[++i], 10);
+    else if (arg === '-p' || arg === '--port') {
+      if (!argv[i + 1]) {
+        console.error('Error: --port requires a port number (1..65535)');
+        process.exit(1);
+      }
+      opts.port = validatePort(argv[++i]!, '--port');
     } else if ((arg === '-d' || arg === '--dir') && argv[i + 1]) {
       opts.downloadDir = path.resolve(argv[++i]);
     } else if (arg === '--reveal') opts.reveal = true;
@@ -469,32 +483,37 @@ async function main(): Promise<void> {
         },
       })
     : null;
-  const server = await createAirBridgeServer({
-    port: opts.port,
-    mode: 'production',
-    version: VERSION,
-    updater,
-    crashStore,
-    crashDsn: loadCrashDsn(stateDir),
-    clientAssets: clientAssets as Record<string, string>,
-    ...tlsOptions,
-    daemonConfig: {
-      enabled: true,
-      autoSaveToDownloads: true,
-      notifyOnReceive: true,
-      revealInFinder: opts.reveal,
-      ...(opts.downloadDir ? { downloadDir: opts.downloadDir } : {}),
-    },
-  });
+  let server;
+  try {
+    server = await createAirBridgeServer({
+      port: opts.port,
+      mode: 'production',
+      version: VERSION,
+      updater,
+      crashStore,
+      crashDsn: loadCrashDsn(stateDir),
+      clientAssets: clientAssets as Record<string, string>,
+      ...tlsOptions,
+      daemonConfig: {
+        enabled: true,
+        autoSaveToDownloads: true,
+        notifyOnReceive: true,
+        revealInFinder: opts.reveal,
+        ...(opts.downloadDir ? { downloadDir: opts.downloadDir } : {}),
+      },
+    });
+  } catch (err) {
+    // Port conflict (EADDRINUSE) or bind failure is not an unclean crash:
+    // clear run-marker.json before exiting so next launch does not report a false abnormal-exit.
+    endRunCleanly(stateDir);
+    throw err;
+  }
 
   const targetUrl = server.lanUrls[0] || `http://localhost:${server.port}`;
   const localUrl = `http://localhost:${server.port}`;
-  // The QR embeds this session's default pair code so the phone lands inside
-  // the host's pairing group on first open (?pair= handled by the client).
-  const pairCode = server.hub?.getDefaultPairCode?.() || '';
-  const connectUrl = pairCode
-    ? `${targetUrl}${targetUrl.includes('?') ? '&' : '?'}pair=${pairCode}`
-    : targetUrl;
+  // The QR embeds this session's default pair code, TLS anchor pin, and alternate LAN IPs
+  // so the phone lands inside the host's pairing group on first open.
+  const connectUrl = buildTerminalPairingUrl(server);
   const qr = await QRCode.toString(connectUrl, { type: 'terminal', small: true });
 
   console.log(`\n  ⚡ AirBridge ${VERSION} active on port ${server.port}`);
@@ -607,6 +626,9 @@ function installDaemonSafetyNets(crashStore: CrashStore): void {
 }
 
 main().catch((err) => {
+  if ((err as NodeJS.ErrnoException)?.code === 'EADDRINUSE') {
+    endRunCleanly(path.join(os.homedir(), '.airbridge'));
+  }
   console.error('AirBridge failed to start:', err);
   process.exit(1);
 });

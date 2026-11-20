@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'">
   <meta name="theme-color" content="#f7f8f7">
   <meta name="description" content="AirBridge privacy policy: direct encrypted sharing between your Android device and computer.">
   <meta name="robots" content="index,follow">
@@ -12,13 +13,13 @@
   <title>Privacy Policy — AirBridge</title>
 </head>
 <body>
-  <header class="legal-header"><nav class="nav wrap" aria-label="Main navigation"><a class="brand" href="index.html" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a><a class="nav-cta" href="index.html">Back to AirBridge <span>←</span></a></nav></header>
+  <header class="legal-header"><nav class="nav wrap" aria-label="Main navigation"><a class="brand" href="index.html" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a><a class="nav-cta" href="index.html">Back to AirBridge <span aria-hidden="true">←</span></a></nav></header>
   <main class="legal wrap">
     <article class="legal-card">
       <p class="section-label"><span>PRIVACY</span> AIRBRIDGE</p>
       <h1>Privacy Policy</h1>
-      <p class="updated">Effective 17 November 2026</p>
-      <p>AirBridge is built to move information directly between devices you choose. This policy explains the information handled by the Android app, desktop companion and AirBridge website.</p>
+      <p class="updated">Effective 20 November 2026</p>
+      <p>AirBridge is built by Diganta Dey to move information directly between devices you choose. This policy explains the information handled by the Android app, desktop companion and AirBridge website.</p>
 
       <h2>Summary</h2>
       <p>AirBridge does not require an account and does not sell personal data. The Android app contains no advertising SDK, analytics SDK, Accessibility Service or notification-listener service. It does not upload your selected content to an AirBridge cloud service.</p>
@@ -26,10 +27,11 @@
       <h2>Information handled to provide the feature you choose</h2>
       <ul>
         <li><strong>Files and media.</strong> Files are read only after you select or share them, then sent to the paired device you choose. Received files are stored on the receiving device.</li>
-        <li><strong>Clipboard content.</strong> Text or images are sent when you use an explicit AirBridge action, or when Android permits the optional automatic clipboard setting. Android may block hidden clipboard reads; AirBridge does not use Accessibility access to bypass that rule.</li>
-        <li><strong>Contacts and phone controls.</strong> These optional features are disabled until you turn them on and grant Android’s matching permission. Contact data is sent only to a paired computer while the feature is on. AirBridge does not request call-log access.</li>
-        <li><strong>Screen sharing.</strong> A paired computer can request a visual screen share only after you approve it in AirBridge and in Android’s system capture prompt. Application audio is not captured. DRM-protected video may be blank by design.</li>
+        <li><strong>Clipboard content.</strong> Text or images are sent when you use an explicit AirBridge action, or when Android/macOS permits the optional automatic clipboard setting. On macOS, image capture reads native pasteboard image types directly and stores transient SHA-256 hashes in memory only to avoid echo loops. Android may block hidden clipboard reads; AirBridge does not use Accessibility access to bypass that rule.</li>
+        <li><strong>Contacts, phone controls, and call audio.</strong> These optional features are disabled until you turn them on and grant Android’s matching permission. Contact data is stored locally on your paired computer only until you remove it or disconnect the device. Two-way call audio is completely optional, requires microphone permission on both devices while active (speakerphone-assisted on Android), and travels strictly over the encrypted peer session. AirBridge does not request call-log access.</li>
+        <li><strong>Screen sharing.</strong> A paired computer can request a visual screen share only after you approve it in AirBridge and in Android’s system capture prompt. Permitted playback audio is optional per session and off by default; microphone audio is not captured, and DRM-protected video may be blank by design.</li>
         <li><strong>Connection data.</strong> The app stores the paired computer address, device identity material, encrypted-pairing state and TLS trust pin locally so it can reconnect safely. Android backup is disabled for this app.</li>
+        <li><strong>Crash reports and diagnostics.</strong> The desktop companion and Android app keep bounded, scrubbed local crash reports and diagnostic logs on your device (redacting home paths, usernames, IP/MAC addresses, Wi-Fi SSIDs, pairing codes, tokens and cryptographic keys). Nothing is sent automatically: reports and diagnostic bundles are only copied to your clipboard or submitted (for example via a prefilled GitHub issue or configured crash sink) when you explicitly click <strong>Copy diagnostics</strong>, <strong>Report on GitHub</strong>, or <strong>Send report</strong> after reviewing the contents.</li>
       </ul>
 
       <h2>How information moves</h2>
@@ -39,7 +41,7 @@
       <p>Camera access is requested only when you open the QR scanner. Notifications support visible transfer progress and incoming offers. Contacts, phone controls and media projection are requested only when you enable the corresponding optional feature. Nearby Wi-Fi and Bluetooth capabilities support nearby discovery and optional hotspot handoff. You can revoke Android permissions at any time in system settings.</p>
 
       <h2>Sharing and retention</h2>
-      <p>AirBridge shares selected content only with the paired peer or peers involved in the action. It does not sell or use it for advertising. Transfer history and clipboard history are kept on the participating devices subject to the product’s limits; you can clear clipboard history, delete received files, revoke permissions or use <strong>Forget</strong> to remove the saved pairing from Android.</p>
+      <p>AirBridge shares selected content only with the paired peer or peers involved in the action. It does not sell or use it for advertising. Transfer history, clipboard history and local scrubbed crash reports are kept on the participating devices subject to the product’s retention limits; you can dismiss crash reports, clear clipboard history, delete received files, revoke permissions or use <strong>Forget</strong> to remove the saved pairing from Android.</p>
 
       <h2>Website</h2>
       <p>The public website is a static site. It does not require a sign-in or set advertising cookies. Links to GitHub and email are governed by those services when you choose to follow or use them.</p>

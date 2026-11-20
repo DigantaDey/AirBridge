@@ -29,7 +29,8 @@ describe('F14: Background Continuity, WakeLocks & Network Recovery', () => {
     expect(svc).toContain('PowerManager.PARTIAL_WAKE_LOCK');
     expect(svc).toContain('"$packageName:AirBridgeTransfer"');
     expect(svc).toContain('setReferenceCounted(false)');
-    expect(svc).toContain('val wakeTimeoutMs = if (transferActive) 10 * 60_000L else 3 * 60_000L');
+    expect(svc).toContain('lockPolicy.shouldHoldLocks(transferActive, prefs.connectionContinuity)');
+    expect(svc).toContain('val wakeTimeoutMs = 10 * 60_000L');
     expect(svc).toContain('releaseTransferWakeLock()');
   });
 
@@ -44,8 +45,9 @@ describe('F14: Background Continuity, WakeLocks & Network Recovery', () => {
   it('registers ConnectivityManager.NetworkCallback to trigger immediate reconnect on network change/loss', async () => {
     const svc = await readRepoFile('android/app/src/main/kotlin/com/airbridge/app/ConnectionService.kt');
     expect(svc).toContain('registerDefaultNetworkCallback');
-    expect(svc).toContain('override fun onAvailable(network: android.net.Network)');
-    expect(svc).toContain('override fun onLost(network: android.net.Network)');
+    expect(svc).toContain('import android.net.Network');
+    expect(svc).toContain('override fun onAvailable(network: Network)');
+    expect(svc).toContain('override fun onLost(network: Network)');
     expect(svc).toContain('engineHost?.reconnect()');
   });
 

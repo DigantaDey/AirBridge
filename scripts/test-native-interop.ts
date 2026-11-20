@@ -151,8 +151,7 @@ try {
       const desktop = (async () => {
         const done = path.join(dir, 'k-done.txt');
         const deadline = Date.now() + 90_000;
-        let peerId = '';
-        while (!(peerId = (await read(done, 'utf8').catch(() => '')).trim())) {
+        while (!(await read(done, 'utf8').catch(() => '')).trim()) {
           if (Date.now() > deadline) throw new Error('phone never reached welcome');
           await new Promise((r) => setTimeout(r, 50));
         }

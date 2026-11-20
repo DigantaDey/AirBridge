@@ -6,9 +6,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -19,6 +23,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -28,8 +33,10 @@ import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Computer
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.QrCode2
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.Button
@@ -49,6 +56,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -85,8 +93,12 @@ fun TransfersScreen(
     onOpenDownloads: (String?) -> Unit,
     onRequestBatteryExemption: () -> Unit,
     modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(0.dp),
     onStartHotspotHandoff: () -> Unit = {},
     onStopHotspotHandoff: () -> Unit = {},
+    onCopyDiagnostics: () -> Unit = {},
+    onShareDiagnostics: () -> Unit = {},
+    onOpenAppSettings: () -> Unit = {},
 ) {
     val activeStatuses = setOf(
         TransferStatus.PENDING_ACCEPT,
@@ -96,6 +108,8 @@ fun TransfersScreen(
     val activeTransfers = uiState.engine.transfers.filter { it.status in activeStatuses }
     val recentTransfers = uiState.engine.transfers.filterNot { it.status in activeStatuses }
     val selectedPeer = uiState.engine.peers.firstOrNull { it.peerId == uiState.selectedPeerId }
+    val layoutDirection = LocalLayoutDirection.current
+    val listState = rememberLazyListState()
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val isWide = maxWidth >= 840.dp
@@ -103,29 +117,44 @@ fun TransfersScreen(
             Row(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 24.dp, vertical = 16.dp),
+                    .padding(
+                        start = contentPadding.calculateStartPadding(layoutDirection) + 24.dp,
+                        end = contentPadding.calculateEndPadding(layoutDirection) + 24.dp,
+                        top = contentPadding.calculateTopPadding(),
+                    ),
                 horizontalArrangement = Arrangement.spacedBy(20.dp),
             ) {
                 Column(
                     modifier = Modifier
                         .weight(0.46f)
-                        .verticalScroll(rememberScrollState()),
+                        .verticalScroll(rememberScrollState())
+                        .padding(
+                            top = 16.dp,
+                            bottom = contentPadding.calculateBottomPadding() + 24.dp,
+                        ),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     ConnectionStatusCard(
                         uiState = uiState,
                         onOpenPairingSheet = onOpenPairingSheet,
                         onReconnect = onReconnect,
+                        onCopyDiagnostics = onCopyDiagnostics,
+                        onShareDiagnostics = onShareDiagnostics,
+                        onOpenAppSettings = onOpenAppSettings,
                     )
-                    BackgroundHealthCard(
-                        uiState = uiState,
-                        onRequestBatteryExemption = onRequestBatteryExemption,
-                    )
-                    HotspotHandoffCard(
-                        state = uiState.engine.handoff,
-                        onStart = onStartHotspotHandoff,
-                        onStop = onStopHotspotHandoff,
-                    )
+                    if (!uiState.batteryExempt) {
+                        BackgroundHealthCard(
+                            uiState = uiState,
+                            onRequestBatteryExemption = onRequestBatteryExemption,
+                        )
+                    }
+                    if (uiState.engine.handoff.available || uiState.engine.handoff.phase != HandoffUiState.Phase.IDLE) {
+                        HotspotHandoffCard(
+                            state = uiState.engine.handoff,
+                            onStart = onStartHotspotHandoff,
+                            onStop = onStopHotspotHandoff,
+                        )
+                    }
                     PeersSelectorCard(
                         peers = uiState.engine.peers,
                         selectedPeer = selectedPeer,
@@ -144,8 +173,12 @@ fun TransfersScreen(
                 }
 
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.weight(0.54f),
-                    contentPadding = PaddingValues(bottom = 24.dp),
+                    contentPadding = PaddingValues(
+                        top = 16.dp,
+                        bottom = contentPadding.calculateBottomPadding() + 24.dp,
+                    ),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     transferFeedItems(
@@ -160,9 +193,15 @@ fun TransfersScreen(
             }
         } else {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+                contentPadding = PaddingValues(
+                    start = contentPadding.calculateStartPadding(layoutDirection) + 16.dp,
+                    end = contentPadding.calculateEndPadding(layoutDirection) + 16.dp,
+                    top = contentPadding.calculateTopPadding() + 16.dp,
+                    bottom = contentPadding.calculateBottomPadding() + 16.dp,
+                ),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 val mediumCardModifier = Modifier.widthIn(max = 760.dp)
@@ -171,6 +210,9 @@ fun TransfersScreen(
                         uiState = uiState,
                         onOpenPairingSheet = onOpenPairingSheet,
                         onReconnect = onReconnect,
+                        onCopyDiagnostics = onCopyDiagnostics,
+                        onShareDiagnostics = onShareDiagnostics,
+                        onOpenAppSettings = onOpenAppSettings,
                         modifier = mediumCardModifier,
                     )
                 }
@@ -308,6 +350,9 @@ private fun ConnectionStatusCard(
     uiState: AirBridgeAppUiState,
     onOpenPairingSheet: () -> Unit,
     onReconnect: () -> Unit,
+    onCopyDiagnostics: () -> Unit,
+    onShareDiagnostics: () -> Unit,
+    onOpenAppSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val state = uiState.engine.connectionState
@@ -378,6 +423,17 @@ private fun ConnectionStatusCard(
                 )
             }
 
+            if (!uiState.localNetworkPermissionGranted) {
+                Text(
+                    text = "Local network access is blocked for AirBridge. Allow Local Network in Android Settings to connect to your computer over Wi-Fi.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                OutlinedButton(onClick = onOpenAppSettings) {
+                    Text("Allow Local Network in Settings")
+                }
+            }
+
             val help = uiState.engine.connectionHelp
             if (help != null && state != ConnectionState.CONNECTED) {
                 // Layer-specific headline + guidance: a TCP timeout says the
@@ -437,17 +493,48 @@ private fun ConnectionStatusCard(
             }
 
             if (state != ConnectionState.CONNECTED) {
-                TextButton(
-                    onClick = onReconnect,
-                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Refresh,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Reconnect now")
+                    TextButton(
+                        onClick = onReconnect,
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Reconnect now")
+                    }
+                    TextButton(
+                        onClick = onCopyDiagnostics,
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.ContentCopy,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Copy diagnostics")
+                    }
+                    TextButton(
+                        onClick = onShareDiagnostics,
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Share,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Share report")
+                    }
                 }
             }
         }
@@ -533,7 +620,10 @@ private fun PeersSelectorCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LazyRow(
+                    state = rememberLazyListState(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     items(peers, key = { it.peerId }) { peer ->
                         FilterChip(
                             selected = peer.peerId == selectedPeer?.peerId,

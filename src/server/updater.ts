@@ -75,6 +75,8 @@ export interface UpdaterOptions {
   /** Restrict downloads to these hosts (production: GitHub). Empty = any (tests). */
   allowedHosts?: string[];
   maxDownloadBytes?: number;
+  /** Idle read timeout (ms) for streaming asset downloads (default 30s). */
+  downloadIdleTimeoutMs?: number;
   runVersion?: (binary: string) => Promise<string | null>;
   extractZip?: (zip: string, destDir: string) => Promise<void>;
   verifyBundle?: (bundle: string) => Promise<boolean>;
@@ -210,6 +212,7 @@ export class Updater {
       checkIntervalMs: 6 * 60 * 60 * 1000,
       allowedHosts: GITHUB_HOSTS,
       maxDownloadBytes: 400 * 1024 * 1024,
+      downloadIdleTimeoutMs: 30_000,
       runVersion: defaultRunVersion,
       extractZip: defaultExtractZip,
       verifyBundle: defaultVerifyBundle,
@@ -289,6 +292,21 @@ export class Updater {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+  }
+
+  private validateReleaseAssetUrl(assetUrl: string): void {
+    const u = new URL(assetUrl);
+    if (this.o.allowedHosts.length > 0) {
+      if (u.protocol !== 'https:' || !this.o.allowedHosts.includes(u.hostname)) {
+        throw new Error(`refusing to download from ${u.protocol}//${u.hostname}`);
+      }
+      if (u.hostname === 'github.com' || u.hostname === 'api.github.com') {
+        const expectedPrefix = u.hostname === 'api.github.com' ? `/repos/${this.o.repo}/` : `/${this.o.repo}/`;
+        if (!u.pathname.toLowerCase().startsWith(expectedPrefix.toLowerCase())) {
+          throw new Error(`refusing asset URL outside repository ${this.o.repo}: ${u.pathname}`);
+        }
+      }
+    }
   }
 
   private async fetchChecked(url: string, init?: RequestInit): Promise<Response> {
@@ -376,26 +394,79 @@ export class Updater {
   }
 
   private async download(url: string, dest: string, expectedSha: string): Promise<void> {
+    this.validateReleaseAssetUrl(url);
     const res = await this.fetchChecked(url);
     if (!res.ok || !res.body) throw new Error(`download failed (HTTP ${res.status})`);
     const hash = crypto.createHash('sha256');
     const out = fs.createWriteStream(dest, { mode: 0o600 });
+    let streamError: Error | null = null;
+    out.on('error', (err) => {
+      streamError = err;
+    });
+    const waitDrainOrError = (): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        if (streamError) {
+          reject(streamError);
+          return;
+        }
+        const onDrain = () => {
+          out.off('error', onErr);
+          resolve();
+        };
+        const onErr = (err: Error) => {
+          out.off('drain', onDrain);
+          reject(err);
+        };
+        out.once('drain', onDrain);
+        out.once('error', onErr);
+      });
+    const readWithTimeout = async (reader: ReadableStreamDefaultReader<Uint8Array>): Promise<ReadableStreamReadResult<Uint8Array>> => {
+      const timeoutMs = this.o.downloadIdleTimeoutMs;
+      if (!timeoutMs || timeoutMs <= 0) return reader.read();
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        return await Promise.race([
+          reader.read(),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => {
+              void reader.cancel().catch(() => {});
+              reject(new Error('download stalled (idle timeout)'));
+            }, timeoutMs);
+            timer.unref();
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
     let total = 0;
     try {
       const reader = res.body.getReader();
       for (;;) {
-        const { done, value } = await reader.read();
+        if (streamError) throw streamError;
+        const { done, value } = await readWithTimeout(reader);
         if (done) break;
+        if (streamError) throw streamError;
         total += value.byteLength;
         if (total > this.o.maxDownloadBytes) throw new Error('download exceeds the size limit');
         hash.update(value);
-        if (!out.write(value)) await new Promise<void>((r) => out.once('drain', () => r()));
+        if (!out.write(value)) await waitDrainOrError();
       }
+      if (streamError) throw streamError;
     } finally {
       // Wait for the descriptor to close: executing a file that is still open
       // for writing fails with ETXTBSY on Linux.
-      await new Promise<void>((r) => { out.once('close', () => r()); out.end(); });
+      await new Promise<void>((r) => {
+        if (out.closed || out.destroyed) {
+          r();
+          return;
+        }
+        out.once('close', () => r());
+        out.once('error', () => r());
+        out.end();
+      });
     }
+    if (streamError) throw streamError;
     const actual = hash.digest('hex');
     if (actual !== expectedSha) {
       fs.rmSync(dest, { force: true });
@@ -415,6 +486,8 @@ export class Updater {
       const sums = release.assets.find((a) => a.name === 'SHA256SUMS.txt');
       if (!asset) throw new Error(`release ${release.tag} has no ${assetName}`);
       if (!sums) throw new Error(`release ${release.tag} has no SHA256SUMS.txt`);
+      this.validateReleaseAssetUrl(sums.url);
+      this.validateReleaseAssetUrl(asset.url);
       const sumsRes = await this.fetchChecked(sums.url);
       if (!sumsRes.ok) throw new Error(`checksum list download failed (HTTP ${sumsRes.status})`);
       const expected = parseChecksums(await sumsRes.text()).get(assetName);

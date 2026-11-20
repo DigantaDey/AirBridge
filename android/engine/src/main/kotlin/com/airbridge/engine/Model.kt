@@ -28,6 +28,24 @@ object Limits {
         (ACK_BYTE_CADENCE / maxOf(MIN_CHUNK_SIZE, chunkSize)).coerceIn(2, 16)
 }
 
+private val WHITESPACE_RUN = Regex("\\s+")
+
+/** Sanitizes an untrusted peer or local device label for safe UI/notification display. */
+fun sanitizeDeviceName(raw: String?, fallback: String = "Peer"): String {
+    if (raw == null) return fallback
+    val sb = StringBuilder(minOf(raw.length, 160))
+    for (c in raw) {
+        when {
+            c.isWhitespace() -> sb.append(' ')
+            c.isISOControl() -> Unit
+            else -> sb.append(c)
+        }
+    }
+    val collapsed = sb.toString().trim().replace(WHITESPACE_RUN, " ")
+    val capped = if (collapsed.length > 80) collapsed.substring(0, 80).trimEnd() else collapsed
+    return capped.ifEmpty { fallback }
+}
+
 data class DeviceProfile(
     val name: String,
     val platform: String,
@@ -53,10 +71,10 @@ data class DeviceProfile(
 
     companion object {
         fun fromJson(o: JsonValue.Obj): DeviceProfile = DeviceProfile(
-            name = o.optStr("name") ?: "AirBridge Device",
-            platform = o.optStr("platform") ?: "unknown",
-            model = o.optStr("model") ?: "Device",
-            formFactor = o.optStr("formFactor") ?: "laptop",
+            name = sanitizeDeviceName(o.optStr("name"), fallback = "Peer"),
+            platform = sanitizeDeviceName(o.optStr("platform"), fallback = "unknown"),
+            model = sanitizeDeviceName(o.optStr("model"), fallback = "Device"),
+            formFactor = sanitizeDeviceName(o.optStr("formFactor"), fallback = "laptop"),
             publicKey = o.optStr("publicKey") ?: "",
             deviceId = o.optStr("deviceId"),
             identityKey = o.optStr("identityKey"),
@@ -64,6 +82,43 @@ data class DeviceProfile(
         )
     }
 }
+
+data class WebSocketDiagnosticsSnapshot(
+    val tlsMode: String,
+    val verifiedIpSanHost: String?,
+    val anchorPinPrefix: String?,
+    val connectedHost: String?,
+    val connectedViaReverse: Boolean,
+    val connectedViaRelay: Boolean,
+    val dialAttemptCount: Int,
+    val lastDnsMs: Long?,
+    val writeStallCount: Long,
+    val activeDialThreads: Int,
+    val attempts: List<EndpointAttempt>,
+)
+
+data class EngineDiagnosticsSnapshot(
+    val connectionState: ConnectionState,
+    val tlsMode: String,
+    val tlsAnchored: Boolean,
+    val verifiedIpSanHost: String?,
+    val anchorPinPrefix: String?,
+    val connectedHost: String?,
+    val connectedViaReverse: Boolean,
+    val connectedViaRelay: Boolean,
+    val admission: String?,
+    val reversePort: Int?,
+    val wsConnectAttempts: Long,
+    val wsLastDnsMs: Long?,
+    val wsWriteStallCount: Long,
+    val wsActiveDialThreads: Int,
+    val lastAttempts: List<EndpointAttempt>,
+    val activeTransferCount: Int,
+    val peerCount: Int,
+    val transferResumes: Long = 0,
+    val transferInterruptions: Long = 0,
+    val outboundBatchFlushes: Long = 0,
+)
 
 data class Peer(
     val peerId: String,

@@ -8,6 +8,7 @@ import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import androidx.compose.runtime.Immutable
 import com.airbridge.engine.DirectoryFileSink
 import com.airbridge.engine.FileFinalize
 import com.airbridge.engine.FileManifestItem
@@ -27,19 +28,16 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.security.MessageDigest
 import java.util.BitSet
-import java.util.UUID
 
 /** URI capabilities stay in native code: file bytes never cross UI/VM state boundaries. */
 object NativeFiles {
+    @Immutable
     data class PickedUriMeta(
         val uri: Uri,
         val name: String,
         val size: Long,
         val mimeType: String,
     )
-
-    private data class Pick(val uri: Uri, val name: String, val size: Long, var claimed: Boolean = false)
-    private val picks = LinkedHashMap<String, Pick>()
 
     fun inspectUri(context: Context, uri: Uri): PickedUriMeta {
         val resolver = context.contentResolver
@@ -105,27 +103,6 @@ object NativeFiles {
             "Selected image exceeds size or format limits"
         }
         return dataUrl
-    }
-
-    @Synchronized
-    fun remember(context: Context, uris: List<Uri>) {
-        for (uri in uris.take(100)) {
-            val meta = inspectUri(context, uri)
-            picks[UUID.randomUUID().toString()] = Pick(uri, meta.name, meta.size)
-        }
-        while (picks.size > 200) picks.remove(picks.keys.first())
-    }
-
-    @Synchronized
-    fun claim(name: String, size: Long): String = picks.entries.firstOrNull {
-        !it.value.claimed && it.value.name == name && (it.value.size < 0 || it.value.size == size)
-    }?.let { it.value.claimed = true; it.key }.orEmpty()
-
-    @Synchronized
-    fun source(context: Context, token: String, declaredSize: Long): FileSource {
-        val pick = picks[token] ?: throw IOException("Choose the file again; its URI permission expired.")
-        require(declaredSize >= 0 && (pick.size < 0 || declaredSize == pick.size)) { "Source size changed" }
-        return UriSource(context.applicationContext, pick.uri, pick.name, declaredSize)
     }
 
     /** Direct FileChannel pread for seekable URIs, falling back to buffered stream for pipe providers. */
@@ -228,19 +205,23 @@ class AndroidFileSinkFactory(private val context: Context) : FileSinkFactory {
         val cleanName = safeName(meta.name)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             try {
+                AndroidDiagnostics.storageSinkType = "mediastore"
                 return MediaStoreFileSink(context.applicationContext, mediaMetaDir, meta, transferId, cleanName)
             } catch (_: Exception) {
                 // OEM provider refused "rw" MediaStore fd; fall back cleanly to staged publish.
             }
         }
-        return DirectoryFileSink(staging, meta, transferId) { part, _ -> publishLegacyOrFallback(part, cleanName, meta.mimeType) }
+        AndroidDiagnostics.storageSinkType = "staging"
+        return DirectoryFileSink.withLocationFinisher(staging, meta, transferId) { part, _ ->
+            publishLegacyOrFallback(part, cleanName, meta.mimeType)
+        }
     }
 
     private fun safeName(raw: String): String = raw.substringAfterLast('/').substringAfterLast('\\')
         .map { if (it.isISOControl() || it in ":*?\"<>|") '_' else it }.joinToString("")
         .trim().take(120).takeUnless { it.isEmpty() || it == "." || it == ".." } ?: "airbridge-file"
 
-    private fun publishLegacyOrFallback(part: File, name: String, mime: String): File {
+    private fun publishLegacyOrFallback(part: File, name: String, mime: String): String {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
             val values = ContentValues().apply {
@@ -258,8 +239,9 @@ class AndroidFileSinkFactory(private val context: Context) : FileSinkFactory {
                     throw IOException("Could not publish Downloads item")
                 }
                 part.delete()
-                return File("/Download/AirBridge/$name")
+                return uri.toString()
             } catch (e: Exception) {
+                AndroidDiagnostics.storageLastError = e.message
                 runCatching { resolver.delete(uri, null, null) }
                 throw e
             }
@@ -274,9 +256,13 @@ class AndroidFileSinkFactory(private val context: Context) : FileSinkFactory {
         val target = uniqueFile(dir, name)
         try {
             part.inputStream().use { input -> target.outputStream().use { input.copyTo(it, 512 * 1024) } }
-        } catch (e: Exception) { target.delete(); throw e }
+        } catch (e: Exception) {
+            AndroidDiagnostics.storageLastError = e.message
+            target.delete()
+            throw e
+        }
         part.delete()
-        return target
+        return target.absolutePath
     }
 
     private fun uniqueFile(dir: File, name: String): File {
@@ -471,6 +457,7 @@ private class MediaStoreFileSink(
             }
         } catch (e: Exception) {
             error = e.message ?: "MediaStore write failed"
+            AndroidDiagnostics.storageLastError = error
             throw IOException("MediaStore write failed: ${e.message}", e)
         }
     }
@@ -529,11 +516,13 @@ private class MediaStoreFileSink(
         if (!allArrived && !force) return null
         if (!allArrived && force) {
             error = error ?: "Transfer incomplete: some chunks never arrived."
+            AndroidDiagnostics.storageLastError = error
             closeHandle()
             return null
         }
         if (declaredSha256 == null || !Regex("^[0-9a-f]{64}$").matches(declaredSha256)) {
             error = "Missing or invalid SHA-256 digest; file was not published."
+            AndroidDiagnostics.storageLastError = error
             closeHandle()
             return null
         }
@@ -565,6 +554,7 @@ private class MediaStoreFileSink(
             }
             if (declaredSha256 != hex) {
                 error = "SHA-256 verification failed; partial file discarded."
+                AndroidDiagnostics.storageLastError = error
                 discard()
                 return null
             }
@@ -576,9 +566,10 @@ private class MediaStoreFileSink(
             journalFile.delete()
             error = null
             finalized = true
-            return FileFinalize("/Download/AirBridge/$cleanName", hex, true)
+            return FileFinalize(mediaUri.toString(), hex, true)
         } catch (e: Exception) {
             error = e.message ?: "MediaStore finalize failed"
+            AndroidDiagnostics.storageLastError = error
             return null
         }
     }

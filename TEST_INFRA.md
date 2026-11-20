@@ -37,6 +37,8 @@ All features defined in `PROJECT.md` and `SCOPE.md` are mapped across four syste
 | **F17** | APK Signing & Sideload Packaging | R5, Survey 3 | 6 | 5 | ✓ | Scenario 01, 10 | 12+ |
 | **F18** | Version Code & Packaging Configuration | R5, Survey 3 | 6 | 5 | ✓ | Scenario 10 | 12+ |
 | **F19** | ANR Elimination & Non-Blocking Discovery | R1, Survey 3 | 6 | 5 | ✓ | Scenario 01, 05 | 12+ |
+| **F20** | Per-Device Pair Code Sync & Notification Isolation | Security & Pairing | 3 | ✓ | ✓ | Scenario 01, 05 | 3+ |
+| **F21** | Phone Continuity (Battery, Screen, Calls, Contacts) | Mobile Continuity | 6 | ✓ | ✓ | Scenario 03, 07 | 6+ |
 
 ---
 
@@ -55,7 +57,7 @@ tests/e2e/
 │   ├── testHelpers.ts                                  # Async timing, buffer comparison, temp folder lifecycle
 │   └── harness.test.ts                                 # Self-verification suite for test harness components
 │
-├── tier1-feature-coverage/                             # Tier 1: Primary Feature Coverage (19 suites, 107 tests)
+├── tier1-feature-coverage/                             # Tier 1: Primary Feature Coverage (21 suites, 116 tests)
 │   ├── f01_compose_ui_contract.test.ts                 # F01: Compose screen hierarchy, window insets, state contracts
 │   ├── f02_discovery_and_connect.test.ts               # F02: mDNS & direct IP connection, pair codes, SAS verification
 │   ├── f03_transfer_dashboard.test.ts                  # F03: Transfer item rendering, progress states, throughput metrics
@@ -74,7 +76,9 @@ tests/e2e/
 │   ├── f16_bidirectional_clipboard_sync.test.ts        # F16: End-to-end clipboard sync, echo cancellation, burst dedup
 │   ├── f17_apk_signing_schemes.test.ts                 # F17: V1 & V2 APK signing configs, release key configuration
 │   ├── f18_version_code_packaging.test.ts              # F18: Semantic versioning, versionCode auto-calculation, min/target SDK
-│   └── f19_anr_and_discovery_fix.test.ts               # F19: Non-blocking discovery queue, UI thread ANR elimination
+│   ├── f19_anr_and_discovery_fix.test.ts               # F19: Non-blocking discovery queue, UI thread ANR elimination
+│   ├── f20_pair_code_synchronization_and_qr.test.ts    # F20: Per-device unique pair code isolation & QR notification gating
+│   └── f21_phone_continuity_android.test.ts            # F21: Phone continuity permissions, MediaProjection ordering, Screen/Contacts/Calls
 │
 ├── tier2-boundary-corner/                              # Tier 2: Boundary & Corner Cases (7 suites, 97 tests)
 │   ├── file_size_extremes.test.ts                      # 0-byte, 1-byte, multi-GB streams, empty manifest handling
@@ -110,7 +114,7 @@ tests/e2e/
 ## 4. Test Execution Commands
 
 ### Canonical E2E Command
-To run all 42 test suites (254 tests) cleanly:
+To run all 44 E2E test suites (263 tests) cleanly:
 ```bash
 npm run test:e2e
 ```
@@ -121,7 +125,7 @@ npx vitest run tests/e2e/
 
 ### Individual Tier Commands
 ```bash
-# Tier 1: Feature Coverage (19 suites, 107 tests)
+# Tier 1: Feature Coverage (21 suites, 116 tests)
 npm run test:e2e:tier1
 
 # Tier 2: Boundary & Corner Cases (7 suites, 97 tests)
@@ -136,16 +140,18 @@ npm run test:e2e:tier4
 
 ### Full Project Test Suite
 ```bash
-# Executes both unit and E2E suites (69 suites, 433 tests)
+# Executes unit, hardening, and E2E suites (105 suites, 714 tests)
 npm test
 ```
+
+Additional production-hardening unit/integration suites (included in `npm test`) and native Android/JVM suites:
+- **Node/Web/Build/macOS Hardening (Vitest)**: `tests/build-config-hardening.test.ts`, `tests/install-hardening.test.ts`, `tests/server-production-hardening.test.ts`, `tests/client-hardening.test.ts`, `tests/website-hardening.test.ts`, `tests/mac-supervisor.test.ts` (plus `scripts/test-mac-app.sh` for packaged macOS `.app` verification).
+- **Android & JVM Engine Hardening (Gradle)**: `android/app/src/test/kotlin/com/airbridge/app/AndroidHardeningTest.kt`, `android/engine/src/test/kotlin/com/airbridge/engine/ModelTest.kt`, `android/engine/src/test/kotlin/com/airbridge/engine/TlsSanAndTelemetryTest.kt`, and `android/engine/src/test/kotlin/com/airbridge/engine/WebSocketResilienceTest.kt`.
 
 ---
 
 ## 5. Verification & Integrity Metrics
 
-- **Total Test Suites**: 42 suites
-- **Total Tests**: 254 passing tests (100% pass rate, 0 skipped, 0 failing)
-- **Execution Time**: ~25.8 seconds
-- **Exit Code**: 0
-- **Test Integrity**: Every test connects to an ephemeral live network server (`port: 0`), conducts full cryptographic handshakes (ECDH P-256, AES-256-GCM), streams framed binary protocols, and validates byte-for-byte SHA-256 hashes against synthetic buffers. Zero mocks or facade test implementations exist.
+- **Total E2E Test Suites**: 44 suites (263 passing tests in ~19.23s, exit code 0)
+- **Full Vitest Suite (`npm test`)**: 105 suites (714 passing tests, 0 skipped, 0 failing, ~63.13s, exit code 0)
+- **Test Integrity**: Every E2E test connects to an ephemeral live network server (`port: 0`), conducts full cryptographic handshakes (ECDH P-256, AES-256-GCM), streams framed binary protocols, and validates byte-for-byte SHA-256 hashes against synthetic buffers. Zero mocks or facade test implementations exist in E2E runs.

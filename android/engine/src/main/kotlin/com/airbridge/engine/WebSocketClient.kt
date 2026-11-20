@@ -7,12 +7,32 @@ import java.io.EOFException
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.net.URI
+import java.net.UnknownHostException
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
+import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Future
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLPeerUnverifiedException
 import javax.net.ssl.SSLSocket
@@ -31,7 +51,6 @@ fun interface TcpConnector {
 class WebSocketClient(
     url: String,
     private val listener: Listener,
-    private val trustAllTls: Boolean = false,
     private val tlsTrustManager: X509TrustManager? = null,
     private val connectTimeoutMs: Int = 10_000,
     private val maxMessageBytes: Int = 16 * 1024 * 1024,
@@ -61,6 +80,12 @@ class WebSocketClient(
      * relay and must terminate at [RelayDial.expectedPin].
      */
     private val relay: RelayDial? = null,
+    private val writeTimeoutMs: Long = 30_000L,
+    private val dnsTimeoutMs: Long = 5_000L,
+    private val dnsResolver: (String) -> Array<InetAddress> = { InetAddress.getAllByName(it) },
+    private val onWriteStall: (() -> Unit)? = null,
+    private val onDnsMeasured: ((Long) -> Unit)? = null,
+    private val relayTimeoutMs: Long = (relay?.delayMs ?: 0L) + connectTimeoutMs.toLong() + 13_500L,
 ) {
     /**
      * A relay rendezvous the code-authenticated computer offered, plus the TLS
@@ -95,7 +120,16 @@ class WebSocketClient(
         if (uri.rawQuery != null) append('?').append(uri.rawQuery)
     }
     private val candidates: List<String> =
-        (listOf(primaryHost) + alternateHosts).filter { it.isNotBlank() }.distinctBy { it.lowercase() }
+        (listOf(primaryHost) + alternateHosts.map { it.trim().removePrefix("[").removeSuffix("]") })
+            .filter { it.isNotBlank() }
+            .distinctBy { it.lowercase() }
+
+    val tlsMode: String = when {
+        !secure -> "none"
+        tlsTrustManager is PinnedTlsTrust -> "pinned"
+        tlsTrustManager != null -> "custom"
+        else -> "system"
+    }
 
     @Volatile
     var isOpen = false
@@ -104,6 +138,11 @@ class WebSocketClient(
     /** The candidate address the connection was established to (null until connected). */
     @Volatile
     var connectedHost: String? = null
+        private set
+
+    /** The verified IP-literal SAN host if the last TLS handshake verified an IP SAN. */
+    @Volatile
+    var verifiedIpSanHost: String? = null
         private set
 
     /** True when the connection is a socket the computer opened to this phone. */
@@ -120,6 +159,9 @@ class WebSocketClient(
     var tlsAnchorPin: String? = null
         private set
 
+    val anchorPinPrefix: String?
+        get() = (tlsAnchorPin ?: (tlsTrustManager as? PinnedTlsTrust)?.anchorPinPrefix())?.take(12)
+
     /** True when the connection runs through [relay] (TLS still ends at the computer). */
     @Volatile
     var connectedViaRelay = false
@@ -130,13 +172,50 @@ class WebSocketClient(
     var attempts: List<EndpointAttempt> = emptyList()
         private set
 
+    @Volatile
+    var lastDnsMs: Long? = null
+        internal set
+
+    @Volatile
+    var dialAttemptCount: Int = 0
+        private set
+
+    private val writeStalls = AtomicLong(0)
+    val writeStallCount: Long get() = writeStalls.get()
+
+    val activeDialThreads: Int get() = activeDialTasks.get()
+
+    fun diagnosticsSnapshot(): WebSocketDiagnosticsSnapshot = WebSocketDiagnosticsSnapshot(
+        tlsMode = tlsMode,
+        verifiedIpSanHost = verifiedIpSanHost,
+        anchorPinPrefix = anchorPinPrefix,
+        connectedHost = connectedHost,
+        connectedViaReverse = connectedViaReverse,
+        connectedViaRelay = connectedViaRelay,
+        dialAttemptCount = dialAttemptCount,
+        lastDnsMs = lastDnsMs,
+        writeStallCount = writeStallCount,
+        activeDialThreads = activeDialThreads,
+        attempts = attempts,
+    )
+
+    @Volatile private var rawTcpSocket: Socket? = null
     @Volatile private var socket: Socket? = null
-    private val inFlight = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Socket, Boolean>())
+    @Volatile private var activeResultsQueue: LinkedBlockingQueue<TcpResult>? = null
+    private val inFlight = java.util.Collections.newSetFromMap(ConcurrentHashMap<Socket, Boolean>())
     private var input: InputStream? = null
     private var output: OutputStream? = null
-    private val writeLock = Any()
+    private val writeLock = ReentrantLock(true)
     private val closeLock = Any()
     @Volatile private var closed = false
+    private val pendingPong = AtomicReference<ByteArray?>(null)
+    private val pendingPing = AtomicBoolean(false)
+    private val controlScheduled = AtomicBoolean(false)
+    private val controlRetryScheduled = AtomicBoolean(false)
+    @Volatile private var controlRetryFuture: ScheduledFuture<*>? = null
+    @Volatile private var activeWriteStartedNanos: Long = 0L
+    private val writeWatchdogLock = Any()
+    private var writeWatchdog: ScheduledFuture<*>? = null
     private val maskBuffer = ByteArray(1024 * 1024 + 128)
     private val headerBuffer = ByteArray(14)
     private val lengthScratch = ByteArray(8)
@@ -145,17 +224,40 @@ class WebSocketClient(
     private val random = SecureRandom()
 
     private data class TcpResult(
-        val host: String, val socket: Socket?, val error: Throwable?,
-        val reverse: Boolean = false, val relayed: Boolean = false,
+        val host: String,
+        val socket: Socket?,
+        val error: Throwable?,
+        val reverse: Boolean = false,
+        val relayed: Boolean = false,
+        val candidateIndex: Int = -1,
     )
 
     private data class TcpWinner(val host: String, val socket: Socket, val reverse: Boolean, val relayed: Boolean = false)
 
     private class RelayUnavailable(message: String) : IOException(message)
 
+    private fun dialHost(host: String, port: Int, timeoutMs: Int, register: (Socket) -> Unit): Socket {
+        return if (tcpConnector === DEFAULT_TCP_CONNECTOR) {
+            connectWithBoundedDns(
+                host = host,
+                port = port,
+                timeoutMs = timeoutMs,
+                dnsTimeoutMs = dnsTimeoutMs,
+                dnsResolver = dnsResolver,
+                onDns = { ms ->
+                    lastDnsMs = ms
+                    onDnsMeasured?.invoke(ms)
+                },
+                register = register,
+            )
+        } else {
+            tcpConnector.connect(host, port, timeoutMs, register)
+        }
+    }
+
     /** TCP to the relay, `DIAL <room>`, wait for `GO`. The socket is then a raw pipe to the computer. */
     private fun dialRelay(dial: RelayDial, register: (Socket) -> Unit): Socket {
-        val s = tcpConnector.connect(dial.route.host, dial.route.port, connectTimeoutMs, register)
+        val s = dialHost(dial.route.host, dial.route.port, connectTimeoutMs, register)
         try {
             s.soTimeout = 12_000
             s.tcpNoDelay = true
@@ -193,62 +295,132 @@ class WebSocketClient(
      * [ConnectFailure] (phase TCP).
      */
     private fun connectTcp(): TcpWinner {
-        val results = java.util.concurrent.LinkedBlockingQueue<TcpResult>()
+        val results = LinkedBlockingQueue<TcpResult>()
+        activeResultsQueue = results
         val failures = ArrayList<EndpointAttempt>()
-        val raceDone = java.util.concurrent.atomic.AtomicBoolean(false)
+        val raceDone = AtomicBoolean(false)
+        val raceLock = Any()
+        val futures = ArrayList<Future<*>>()
+        val completedCandidates = BooleanArray(candidates.size)
         var started = 0
         var finished = 0
-        var forwardDoneAt = 0L
         var inboundPending = false
         var reverseNote: String? = null
         var relayPending = false
         var relayNote: String? = null
+
         val register: (Socket) -> Unit = { s ->
-            inFlight.add(s)
-            if (closed) runCatching { s.close() }
-        }
-        fun startNext() {
-            val host = candidates[started++]
-            Thread({
-                try {
-                    results.put(TcpResult(host, tcpConnector.connect(host, port, connectTimeoutMs, register), null))
-                } catch (e: Throwable) {
-                    results.put(TcpResult(host, null, e))
+            var keep = false
+            synchronized(raceLock) {
+                if (!raceDone.get() && !closed) {
+                    inFlight.add(s)
+                    keep = true
                 }
-            }, "airbridge-dial-$host").apply { isDaemon = true; start() }
+            }
+            if (!keep) runCatching { s.close() }
         }
+
+        fun submitResult(result: TcpResult) {
+            var handedOff = false
+            synchronized(raceLock) {
+                if (!raceDone.get() && !closed) {
+                    results.offer(result)
+                    handedOff = true
+                }
+            }
+            if (!handedOff) result.socket?.let { runCatching { it.close() } }
+        }
+
+        fun submitDial(task: () -> Unit): Future<*>? = try {
+            dialExecutor.submit {
+                activeDialTasks.incrementAndGet()
+                try {
+                    task()
+                } finally {
+                    activeDialTasks.decrementAndGet()
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            null
+        }
+
+        fun cleanupRace(winnerSocket: Socket?) {
+            synchronized(raceLock) { raceDone.set(true) }
+            futures.forEach { it.cancel(true) }
+            synchronized(raceLock) {
+                for (other in inFlight) if (other !== winnerSocket) runCatching { other.close() }
+                inFlight.clear()
+            }
+            while (true) {
+                val late = results.poll() ?: break
+                if (late.socket !== winnerSocket) runCatching { late.socket?.close() }
+            }
+        }
+
+        fun startNext() {
+            val idx = started++
+            val host = candidates[idx]
+            dialAttemptCount++
+            val f = submitDial {
+                try {
+                    submitResult(TcpResult(host, dialHost(host, port, connectTimeoutMs, register), null, candidateIndex = idx))
+                } catch (e: Throwable) {
+                    submitResult(TcpResult(host, null, e, candidateIndex = idx))
+                }
+            }
+            if (f != null) futures.add(f)
+            else submitResult(TcpResult(host, null, IOException("Dial executor busy"), candidateIndex = idx))
+        }
+
         val source = inbound
         if (source != null) {
             inboundPending = true
-            Thread({
+            dialAttemptCount++
+            val f = submitDial {
                 try {
                     val s = source.await(connectTimeoutMs.toLong() + reverseGraceMs + 1_000, { closed || raceDone.get() }, register)
-                    if (s == null) results.put(TcpResult("", null, NoInboundConnection(), reverse = true))
-                    else results.put(TcpResult(ReverseListener.normalizeHost(s.inetAddress.hostAddress), s, null, reverse = true))
+                    if (s == null) submitResult(TcpResult("", null, NoInboundConnection(), reverse = true))
+                    else submitResult(TcpResult(ReverseListener.normalizeHost(s.inetAddress.hostAddress), s, null, reverse = true))
                 } catch (e: Throwable) {
-                    results.put(TcpResult("", null, e, reverse = true))
+                    submitResult(TcpResult("", null, e, reverse = true))
                 }
-            }, "airbridge-inbound").apply { isDaemon = true; start() }
+            }
+            if (f != null) futures.add(f)
+            else {
+                inboundPending = false
+                reverseNote = "dial executor busy"
+            }
         }
+
         val relayDial = relay
         if (relayDial != null) {
             relayPending = true
-            Thread({
+            dialAttemptCount++
+            val f = submitDial {
                 try {
-                    val until = System.currentTimeMillis() + relayDial.delayMs
-                    while (System.currentTimeMillis() < until && !closed && !raceDone.get()) Thread.sleep(25)
+                    val until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(relayDial.delayMs)
+                    while (System.nanoTime() < until && !closed && !raceDone.get()) {
+                        val sleepMs = TimeUnit.NANOSECONDS.toMillis(until - System.nanoTime()).coerceIn(1L, 25L)
+                        Thread.sleep(sleepMs)
+                    }
                     if (closed || raceDone.get()) {
-                        results.put(TcpResult("", null, NoInboundConnection(), relayed = true))
+                        submitResult(TcpResult("", null, NoInboundConnection(), relayed = true))
                     } else {
-                        results.put(TcpResult(relayDial.tlsHostname, dialRelay(relayDial, register), null, relayed = true))
+                        submitResult(TcpResult(relayDial.tlsHostname, dialRelay(relayDial, register), null, relayed = true))
                     }
                 } catch (e: Throwable) {
-                    results.put(TcpResult("", null, e, relayed = true))
+                    submitResult(TcpResult("", null, e, relayed = true))
                 }
-            }, "airbridge-relay").apply { isDaemon = true; start() }
+            }
+            if (f != null) futures.add(f)
+            else {
+                relayPending = false
+                relayNote = "dial executor busy"
+            }
         }
+
         fun allFailed(last: Throwable?): Nothing {
-            raceDone.set(true)
+            cleanupRace(null)
             attempts = failures.toList()
             val kind = summarize(failures)
             val reverse = (if (source != null) "; computer→phone: ${reverseNote ?: "no connection"}" else "") +
@@ -259,62 +431,101 @@ class WebSocketClient(
                 last,
             )
         }
+
+        val startedAtNanos = System.nanoTime()
+        var nextStaggerAtNanos = startedAtNanos + TimeUnit.MILLISECONDS.toNanos(staggerMs)
+        val forwardHardDeadlineNanos = startedAtNanos + TimeUnit.MILLISECONDS.toNanos(
+            maxOf(0, candidates.size - 1) * staggerMs + connectTimeoutMs.toLong() + 2_000L,
+        )
+        val relayDeadlineNanos = if (relayDial != null) {
+            startedAtNanos + TimeUnit.MILLISECONDS.toNanos(relayTimeoutMs.coerceAtLeast(1L))
+        } else 0L
+        var reverseDeadlineNanos = 0L
+
         startNext()
         var lastError: Throwable? = null
-        while (true) {
-            if (closed) {
-                raceDone.set(true)
-                inFlight.forEach { runCatching { it.close() } }
-                throw ConnectFailure(ConnectPhase.TCP, FailureKind.CANCELLED, primaryHost, failures, "Socket closed during connect")
-            }
-            val forwardDone = finished == candidates.size
-            val waitMs = when {
-                started < candidates.size -> staggerMs
-                !forwardDone -> connectTimeoutMs.toLong() + 1_000
-                // The relay bounds itself (connect + 12 s rendezvous).
-                relayPending -> relayDial!!.delayMs + connectTimeoutMs + 13_000L
-                // Only the reverse path is left: a short grace for the computer to dial in.
-                else -> maxOf(0L, forwardDoneAt + reverseGraceMs - System.currentTimeMillis())
-            }
-            val result = results.poll(waitMs, java.util.concurrent.TimeUnit.MILLISECONDS)
-            if (result == null) {
-                if (started < candidates.size) startNext()
-                else if (forwardDone && inboundPending && !relayPending) allFailed(lastError)
-                continue
-            }
-            if (result.socket != null && !closed) {
-                raceDone.set(true)
-                // Winner: abort every other in-flight dial / queued inbound socket.
-                for (other in inFlight) if (other !== result.socket) runCatching { other.close() }
-                inFlight.clear()
-                // A later success that loses the race must be closed too.
-                Thread({
-                    repeat(candidates.size + 2) {
-                        val late = results.poll(connectTimeoutMs.toLong() + reverseGraceMs + 2_000, java.util.concurrent.TimeUnit.MILLISECONDS) ?: return@Thread
-                        late.socket?.let { runCatching { it.close() } }
+        try {
+            while (true) {
+                if (closed) {
+                    cleanupRace(null)
+                    attempts = failures.toList()
+                    throw ConnectFailure(ConnectPhase.TCP, FailureKind.CANCELLED, primaryHost, failures.toList(), "Socket closed during connect")
+                }
+
+                val now = System.nanoTime()
+                while (started < candidates.size && now >= nextStaggerAtNanos) {
+                    startNext()
+                    nextStaggerAtNanos = now + TimeUnit.MILLISECONDS.toNanos(staggerMs)
+                }
+                if (finished < candidates.size && now >= forwardHardDeadlineNanos) {
+                    for (i in candidates.indices) {
+                        if (!completedCandidates[i]) {
+                            completedCandidates[i] = true
+                            val err = SocketTimeoutException("Connect timed out")
+                            lastError = lastError ?: err
+                            val route = routeProbe(candidates[i], port)
+                            failures += EndpointAttempt(candidates[i], port, FailureKind.TCP_TIMEOUT, "Connect timed out", route)
+                            finished++
+                        }
                     }
-                }, "airbridge-dial-reaper").apply { isDaemon = true; start() }
-                attempts = failures.toList()
-                return TcpWinner(result.host, result.socket, result.reverse, result.relayed)
+                    started = candidates.size
+                    if (finished == candidates.size && reverseDeadlineNanos == 0L) {
+                        reverseDeadlineNanos = now + TimeUnit.MILLISECONDS.toNanos(reverseGraceMs)
+                    }
+                }
+                val forwardDone = finished == candidates.size
+                if (relayPending && now >= relayDeadlineNanos) {
+                    relayPending = false
+                    relayNote = relayNote ?: "relay timed out"
+                }
+                if (forwardDone && inboundPending && now >= reverseDeadlineNanos) {
+                    inboundPending = false
+                }
+                if (forwardDone && !inboundPending && !relayPending) allFailed(lastError)
+
+                var nextWakeNanos = Long.MAX_VALUE
+                if (started < candidates.size) nextWakeNanos = minOf(nextWakeNanos, nextStaggerAtNanos)
+                if (!forwardDone) nextWakeNanos = minOf(nextWakeNanos, forwardHardDeadlineNanos)
+                if (relayPending) nextWakeNanos = minOf(nextWakeNanos, relayDeadlineNanos)
+                if (forwardDone && inboundPending) nextWakeNanos = minOf(nextWakeNanos, reverseDeadlineNanos)
+                val waitNanos = if (nextWakeNanos == Long.MAX_VALUE) 1_000_000L else maxOf(1_000_000L, nextWakeNanos - System.nanoTime())
+
+                val result = results.poll(waitNanos, TimeUnit.NANOSECONDS) ?: continue
+                if (result.socket != null && !closed) {
+                    cleanupRace(result.socket)
+                    attempts = failures.toList()
+                    return TcpWinner(result.host, result.socket, result.reverse, result.relayed)
+                }
+                result.socket?.let { runCatching { it.close() } }
+                if (result.relayed) {
+                    relayPending = false
+                    if (result.error !is NoInboundConnection) relayNote = result.error?.message
+                } else if (result.reverse) {
+                    inboundPending = false
+                    if (result.error !is NoInboundConnection) reverseNote = result.error?.message
+                } else {
+                    val idx = result.candidateIndex
+                    if (idx in completedCandidates.indices && completedCandidates[idx]) continue
+                    if (idx in completedCandidates.indices) completedCandidates[idx] = true
+                    val error = result.error ?: IOException("Socket closed during connect")
+                    lastError = error
+                    val kind = ConnectionHelp.classify(error, ConnectPhase.TCP, closedLocally = closed)
+                    val route = if (kind == FailureKind.TCP_TIMEOUT || kind == FailureKind.NO_ROUTE) routeProbe(result.host, port) else null
+                    failures += EndpointAttempt(result.host, port, kind, error.message ?: error.javaClass.simpleName, route)
+                    finished++
+                    if (finished == candidates.size && reverseDeadlineNanos == 0L) {
+                        reverseDeadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(reverseGraceMs)
+                    }
+                    if (started < candidates.size) {
+                        startNext()
+                        nextStaggerAtNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(staggerMs)
+                    }
+                }
+                if (finished == candidates.size && !inboundPending && !relayPending) allFailed(lastError)
             }
-            result.socket?.let { runCatching { it.close() } }
-            if (result.relayed) {
-                relayPending = false
-                if (result.error !is NoInboundConnection) relayNote = result.error?.message
-            } else if (result.reverse) {
-                inboundPending = false
-                if (result.error !is NoInboundConnection) reverseNote = result.error?.message
-            } else {
-                val error = result.error ?: IOException("Socket closed during connect")
-                lastError = error
-                val kind = ConnectionHelp.classify(error, ConnectPhase.TCP, closedLocally = closed)
-                val route = if (kind == FailureKind.TCP_TIMEOUT || kind == FailureKind.NO_ROUTE) routeProbe(result.host, port) else null
-                failures += EndpointAttempt(result.host, port, kind, error.message ?: error.javaClass.simpleName, route)
-                finished++
-                if (finished == candidates.size) forwardDoneAt = System.currentTimeMillis()
-                if (started < candidates.size) startNext()
-            }
-            if (finished == candidates.size && !inboundPending && !relayPending) allFailed(lastError)
+        } finally {
+            activeResultsQueue = null
+            if (!raceDone.get()) cleanupRace(null)
         }
     }
 
@@ -344,39 +555,36 @@ class WebSocketClient(
             viaReverse = reverse
             connectedViaReverse = reverse
             connectedViaRelay = relayed
-            if (relayed && (!secure || trustAllTls || tlsTrustManager == null)) {
+            if (relayed && (!secure || tlsTrustManager == null)) {
                 runCatching { plain.close() }
                 throw SSLPeerUnverifiedException("Relay connections require a pinned computer identity")
             }
             phase = ConnectPhase.TLS
+            val tlsPeerHost = host.removePrefix("[").removeSuffix("]").substringBefore('%')
             val raw: Socket = if (secure) {
                 val ctx = SSLContext.getInstance("TLS")
-                ctx.init(null, when { tlsTrustManager != null -> arrayOf<TrustManager>(tlsTrustManager);
-                    trustAllTls -> arrayOf<TrustManager>(TrustAllManager); else -> null }, null)
+                ctx.init(null, tlsTrustManager?.let { arrayOf<TrustManager>(it) }, null)
                 plain.soTimeout = connectTimeoutMs
-                (ctx.socketFactory.createSocket(plain, host, port, true) as SSLSocket).apply {
+                (ctx.socketFactory.createSocket(plain, tlsPeerHost, port, true) as SSLSocket).apply {
                     useClientMode = true
-                    if (!trustAllTls) sslParameters = sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+                    sslParameters = sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
                 }
             } else plain
+            rawTcpSocket = plain
             socket = raw
             if (closed) { raw.close(); throw IOException("Socket closed during connect") }
             raw.soTimeout = connectTimeoutMs
             if (raw is SSLSocket) {
                 raw.startHandshake()
-                if (!trustAllTls) verifyIpSan(raw, host)
+                verifyIpSan(raw, tlsPeerHost)
                 tlsAnchorPin = runCatching { PinnedTlsTrust.pinOf(raw.session.peerCertificates.last().encoded) }.getOrNull()
                 if (relayed && tlsAnchorPin != relay?.expectedPin) {
                     throw SSLPeerUnverifiedException("Relayed TLS identity changed: the relay did not lead to the paired computer")
                 }
             }
             phase = ConnectPhase.UPGRADE
-            // Stream buffers enlarged to 1 MiB (1024 * 1024) to saturate high-speed links:
-            // (Baseline was: BufferedOutputStream(raw.getOutputStream(), 512 * 1024))
-            // (Baseline was: BufferedInputStream(raw.getInputStream(), 512 * 1024))
-            val streamBufferSize = 1024 * 1024
-            val out = BufferedOutputStream(raw.getOutputStream(), streamBufferSize)
-            val inp = BufferedInputStream(raw.getInputStream(), streamBufferSize)
+            val out = BufferedOutputStream(raw.getOutputStream(), 512 * 1024)
+            val inp = BufferedInputStream(raw.getInputStream(), 512 * 1024)
             output = out
             input = inp
 
@@ -391,9 +599,14 @@ class WebSocketClient(
                 append("Sec-WebSocket-Version: 13\r\n")
                 append("\r\n")
             }
-            synchronized(writeLock) {
-                out.write(handshake.toByteArray(Charsets.US_ASCII))
-                out.flush()
+            writeLock.lock()
+            try {
+                withWriteWatchdog {
+                    out.write(handshake.toByteArray(Charsets.US_ASCII))
+                    out.flush()
+                }
+            } finally {
+                writeLock.unlock()
             }
 
             // Read status line + headers
@@ -434,9 +647,11 @@ class WebSocketClient(
             if (e is ConnectFailure) throw e
             val kind = ConnectionHelp.classify(e, phase, closedLocally = cancelled)
             val detail = e.message ?: e.javaClass.simpleName
+            val combinedAttempts = attempts + EndpointAttempt(host, port, kind, detail)
+            attempts = combinedAttempts
             throw ConnectFailure(
                 phase, kind, host,
-                attempts + EndpointAttempt(host, port, kind, detail),
+                combinedAttempts,
                 "${phase.name} ${kind.name.lowercase()} at $host:$port: $detail", e,
             )
         }
@@ -449,13 +664,13 @@ class WebSocketClient(
      * fails here as TLS_HOSTNAME instead of silently succeeding.
      */
     private fun verifyIpSan(ssl: SSLSocket, host: String) {
-        if (LocalNetworks.ipv4ToInt(host) == null) return
+        LocalNetworks.ipAddressBytes(host) ?: return
         val leaf = ssl.session.peerCertificates.firstOrNull() as? X509Certificate
             ?: throw SSLPeerUnverifiedException("No server certificate")
-        val ok = runCatching {
-            leaf.subjectAlternativeNames?.any { (it[0] as? Int) == 7 && it[1] == host } == true
-        }.getOrDefault(false)
-        if (!ok) throw SSLPeerUnverifiedException("No subject alternative name for $host in the server certificate")
+        if (!matchesIpSan(leaf, host)) {
+            throw SSLPeerUnverifiedException("No subject alternative name for $host in the server certificate")
+        }
+        verifiedIpSanHost = host.removePrefix("[").removeSuffix("]").substringBefore('%')
     }
 
     private fun readLine(inp: InputStream): String {
@@ -543,7 +758,7 @@ class WebSocketClient(
                         closeInternal(1000, "remote close", notify = true)
                         return "remote closed"
                     }
-                    0x9 -> sendFrame(0xA, payload, flush = true) // ping -> pong
+                    0x9 -> enqueuePong(payload)
                     0xA -> { /* pong */ }
                     else -> throw IOException("unknown opcode $opcode")
                 }
@@ -577,46 +792,180 @@ class WebSocketClient(
         return buf
     }
 
+    private fun enqueuePong(payload: ByteArray) {
+        if (!isOpen || closed) return
+        pendingPong.set(payload)
+        scheduleControlDrain(0L)
+    }
+
     fun sendText(text: String, flush: Boolean = true) = sendFrame(0x1, text.toByteArray(Charsets.UTF_8), flush)
 
     fun sendBinary(bytes: ByteArray, flush: Boolean = true) = sendFrame(0x2, bytes, flush)
 
-    fun sendPing() = sendFrame(0x9, emptyPayload, flush = true)
+    fun sendPing() {
+        if (output == null || !isOpen || closed) throw IOException("socket closed")
+        pendingPing.set(true)
+        scheduleControlDrain(0L)
+    }
+
+    private fun scheduleControlDrain(delayMs: Long) {
+        if (!isOpen || closed) return
+        if (delayMs <= 0L) {
+            if (!controlScheduled.compareAndSet(false, true)) return
+            try {
+                controlScheduler.execute {
+                    controlScheduled.set(false)
+                    drainControlFrames()
+                }
+            } catch (_: RejectedExecutionException) {
+                controlScheduled.set(false)
+            }
+        } else {
+            if (!controlRetryScheduled.compareAndSet(false, true)) return
+            try {
+                val f = controlScheduler.schedule({
+                    controlRetryScheduled.set(false)
+                    drainControlFrames()
+                }, delayMs, TimeUnit.MILLISECONDS)
+                controlRetryFuture = f
+                if (closed) {
+                    f.cancel(false)
+                    controlRetryScheduled.set(false)
+                }
+            } catch (_: RejectedExecutionException) {
+                controlRetryScheduled.set(false)
+            }
+        }
+    }
+
+    private fun drainControlFrames() {
+        val out = output ?: return
+        if (!isOpen || closed) return
+        val acquired = try {
+            writeLock.tryLock(25, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            return
+        }
+        if (!acquired) {
+            if (isOpen && !closed && (pendingPong.get() != null || pendingPing.get())) {
+                scheduleControlDrain(150L)
+            }
+            return
+        }
+        try {
+            if (!isOpen || closed) return
+            pendingPong.getAndSet(null)?.let { writeFrameLocked(out, 0xA, it, flush = true) }
+            if (pendingPing.getAndSet(false)) writeFrameLocked(out, 0x9, emptyPayload, flush = true)
+        } catch (e: Exception) {
+            closeInternal(1006, e.message ?: "control write error", notify = true)
+            return
+        } finally {
+            writeLock.unlock()
+        }
+        if (isOpen && !closed && (pendingPong.get() != null || pendingPing.get())) {
+            scheduleControlDrain(0L)
+        }
+    }
+
+    /** Flush any queued Pong/Ping between outbound transfer batches so heartbeats never starve. */
+    fun drainPendingControlIfAny() {
+        if (!isOpen || closed) return
+        if (pendingPong.get() != null || pendingPing.get()) {
+            drainControlFrames()
+        }
+    }
+
+    private fun armWriteWatchdogIfNeeded() {
+        if (writeTimeoutMs <= 0L || closed) return
+        synchronized(writeWatchdogLock) {
+            if (writeWatchdog != null || closed) return
+            writeWatchdog = runCatching {
+                controlScheduler.schedule({ checkWriteStall() }, writeTimeoutMs, TimeUnit.MILLISECONDS)
+            }.getOrNull()
+        }
+    }
+
+    private fun checkWriteStall() {
+        val started = activeWriteStartedNanos
+        if (closed || started == 0L) {
+            synchronized(writeWatchdogLock) { writeWatchdog = null }
+            return
+        }
+        val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+        if (elapsedMs < writeTimeoutMs) {
+            val remaining = maxOf(10L, writeTimeoutMs - elapsedMs)
+            synchronized(writeWatchdogLock) {
+                writeWatchdog = if (!closed) {
+                    runCatching { controlScheduler.schedule({ checkWriteStall() }, remaining, TimeUnit.MILLISECONDS) }.getOrNull()
+                } else null
+            }
+            return
+        }
+        synchronized(writeWatchdogLock) { writeWatchdog = null }
+        writeStalls.incrementAndGet()
+        runCatching { onWriteStall?.invoke() }
+        val tcp = rawTcpSocket
+        val sock = socket
+        if (tcp != null && tcp !== sock) runCatching { tcp.close() }
+        closeInternal(1006, "write stalled after ${elapsedMs}ms", notify = true)
+    }
+
+    private inline fun <T> withWriteWatchdog(block: () -> T): T {
+        activeWriteStartedNanos = System.nanoTime()
+        armWriteWatchdogIfNeeded()
+        try {
+            return block()
+        } finally {
+            activeWriteStartedNanos = 0L
+        }
+    }
 
     fun flush() {
         val out = output ?: return
         if (!isOpen || closed) return
-        synchronized(writeLock) {
+        writeLock.lock()
+        try {
             if (!isOpen || closed) return
-            out.flush()
+            withWriteWatchdog { out.flush() }
+        } finally {
+            writeLock.unlock()
         }
     }
 
     private fun sendFrame(opcode: Int, payload: ByteArray, flush: Boolean) {
         val out = output ?: throw IOException("not connected")
         if (!isOpen || closed) throw IOException("socket closed")
-        synchronized(writeLock) {
+        writeLock.lock()
+        try {
             if (!isOpen || closed) throw IOException("socket closed")
-            random.nextBytes(maskKey)
-            var h = 0
-            headerBuffer[h++] = (0x80 or opcode).toByte()
-            val len = payload.size
-            when {
-                len < 126 -> headerBuffer[h++] = (0x80 or len).toByte()
-                len <= 0xffff -> {
-                    headerBuffer[h++] = (0x80 or 126).toByte()
-                    headerBuffer[h++] = ((len ushr 8) and 0xff).toByte()
-                    headerBuffer[h++] = (len and 0xff).toByte()
-                }
-                else -> {
-                    headerBuffer[h++] = (0x80 or 127).toByte()
-                    for (shift in 56 downTo 0 step 8) {
-                        headerBuffer[h++] = ((len.toLong() ushr shift) and 0xff).toByte()
-                    }
+            writeFrameLocked(out, opcode, payload, flush)
+        } finally {
+            writeLock.unlock()
+        }
+    }
+
+    private fun writeFrameLocked(out: OutputStream, opcode: Int, payload: ByteArray, flush: Boolean) {
+        random.nextBytes(maskKey)
+        var h = 0
+        headerBuffer[h++] = (0x80 or opcode).toByte()
+        val len = payload.size
+        when {
+            len < 126 -> headerBuffer[h++] = (0x80 or len).toByte()
+            len <= 0xffff -> {
+                headerBuffer[h++] = (0x80 or 126).toByte()
+                headerBuffer[h++] = ((len ushr 8) and 0xff).toByte()
+                headerBuffer[h++] = (len and 0xff).toByte()
+            }
+            else -> {
+                headerBuffer[h++] = (0x80 or 127).toByte()
+                for (shift in 56 downTo 0 step 8) {
+                    headerBuffer[h++] = ((len.toLong() ushr shift) and 0xff).toByte()
                 }
             }
-            System.arraycopy(maskKey, 0, headerBuffer, h, 4)
-            h += 4
+        }
+        System.arraycopy(maskKey, 0, headerBuffer, h, 4)
+        h += 4
+        withWriteWatchdog {
             out.write(headerBuffer, 0, h)
             val key0 = maskKey[0].toInt()
             val key1 = maskKey[1].toInt()
@@ -624,6 +973,7 @@ class WebSocketClient(
             val key3 = maskKey[3].toInt()
             var offset = 0
             while (offset < len) {
+                activeWriteStartedNanos = System.nanoTime()
                 val count = minOf(maskBuffer.size, len - offset)
                 if ((offset and 3) == 0) {
                     var i = 0
@@ -660,7 +1010,10 @@ class WebSocketClient(
                 out.write(maskBuffer, 0, count)
                 offset += count
             }
-            if (flush) out.flush()
+            if (flush) {
+                activeWriteStartedNanos = System.nanoTime()
+                out.flush()
+            }
         }
     }
 
@@ -680,11 +1033,24 @@ class WebSocketClient(
             closed = true
             isOpen = false
         }
+        pendingPong.set(null)
+        pendingPing.set(false)
+        controlRetryFuture?.cancel(false)
+        controlRetryFuture = null
+        controlRetryScheduled.set(false)
+        synchronized(writeWatchdogLock) {
+            writeWatchdog?.cancel(false)
+            writeWatchdog = null
+        }
         // Never wait for writeLock here: the writer may be blocked on a dead
         // network. Closing the socket is what unblocks it.
-        try { socket?.close() } catch (_: Exception) {}
+        val tcp = rawTcpSocket
+        val sock = socket
+        if (tcp != null && tcp !== sock) runCatching { tcp.close() }
+        try { sock?.close() } catch (_: Exception) {}
         for (pending in inFlight) runCatching { pending.close() }
         inFlight.clear()
+        activeResultsQueue?.offer(TcpResult("", null, IOException(reason)))
         if (notify) listener.onClosed(reason)
     }
 
@@ -692,35 +1058,162 @@ class WebSocketClient(
         if (this.isNullOrEmpty()) fallback else this
 
     companion object {
-        val DEFAULT_TCP_CONNECTOR = TcpConnector { host, port, timeoutMs, register ->
-            val s = Socket()
-            register(s)
-            s.tcpNoDelay = true
-            s.keepAlive = true
-            // Allow Linux/Android dynamic TCP window auto-tuning (tcp_moderate_rcvbuf)
-            // to scale up to kernel limits (4MB-8MB) without setting SOCK_RCVBUF_LOCK.
-            // Guarded: setting SO_RCVBUF manually on Linux/Android clamps window to rmem_max.
-            val isLinuxOrAndroid = try {
-                val os = System.getProperty("os.name")?.lowercase() ?: ""
-                os.contains("linux") || os.contains("android")
-            } catch (_: Exception) { true }
-            if (!isLinuxOrAndroid) {
-                s.receiveBufferSize = 4 * 1024 * 1024
-                s.sendBufferSize = 2 * 1024 * 1024
+        const val MAX_DIAL_THREADS = 16
+        const val MAX_DNS_THREADS = 8
+
+        private val activeDialTasks = AtomicInteger(0)
+
+        fun activeDialThreadCount(): Int = activeDialTasks.get()
+
+        private fun daemonFactory(prefix: String): ThreadFactory {
+            val nextId = AtomicInteger(1)
+            return ThreadFactory { r ->
+                Thread(r, "$prefix-${nextId.getAndIncrement()}").apply { isDaemon = true }
             }
-            try {
-                s.connect(InetSocketAddress(host, port), timeoutMs)
-            } catch (e: Exception) {
-                runCatching { s.close() }
-                throw e
-            }
-            s
         }
 
-        object TrustAllManager : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+        private val dialExecutor: ThreadPoolExecutor = ThreadPoolExecutor(
+            MAX_DIAL_THREADS,
+            MAX_DIAL_THREADS,
+            30L,
+            TimeUnit.SECONDS,
+            LinkedBlockingQueue(128),
+            daemonFactory("airbridge-dial"),
+        ).apply { allowCoreThreadTimeOut(true) }
+
+        private val dnsExecutor: ThreadPoolExecutor = ThreadPoolExecutor(
+            MAX_DNS_THREADS,
+            MAX_DNS_THREADS,
+            30L,
+            TimeUnit.SECONDS,
+            LinkedBlockingQueue(64),
+            daemonFactory("airbridge-dns"),
+        ).apply { allowCoreThreadTimeOut(true) }
+
+        private val controlScheduler: ScheduledThreadPoolExecutor = ScheduledThreadPoolExecutor(
+            2,
+            daemonFactory("airbridge-ws-ctrl"),
+        ).apply { removeOnCancelPolicy = true }
+
+        private fun isLinuxOrAndroid(): Boolean = try {
+            val os = System.getProperty("os.name")?.lowercase() ?: ""
+            os.contains("linux") || os.contains("android")
+        } catch (_: Exception) { true }
+
+        internal fun matchesIpSan(leaf: X509Certificate, host: String): Boolean {
+            val targetBytes = LocalNetworks.ipAddressBytes(host) ?: return true
+            return runCatching {
+                leaf.subjectAlternativeNames?.any { entry ->
+                    if ((entry.getOrNull(0) as? Int) != 7) return@any false
+                    val sanBytes = when (val v = entry.getOrNull(1)) {
+                        is String -> LocalNetworks.ipAddressBytes(v)
+                        is ByteArray -> when (v.size) {
+                            4 -> v
+                            16 -> if ((0..9).all { v[it] == 0.toByte() } && v[10] == 0xff.toByte() && v[11] == 0xff.toByte()) {
+                                v.copyOfRange(12, 16)
+                            } else v
+                            else -> null
+                        }
+                        else -> null
+                    }
+                    sanBytes != null && targetBytes.contentEquals(sanBytes)
+                } == true
+            }.getOrDefault(false)
+        }
+
+        private fun resolveAddresses(
+            host: String,
+            timeoutMs: Int,
+            dnsTimeoutMs: Long,
+            dnsResolver: (String) -> Array<InetAddress>,
+            onDns: (Long) -> Unit,
+        ): Array<InetAddress> {
+            val literalBytes = LocalNetworks.ipAddressBytes(host)
+            if (literalBytes != null) {
+                val stripped = host.trim().removePrefix("[").removeSuffix("]")
+                val addr = runCatching { InetAddress.getByName(stripped) }
+                    .getOrElse { InetAddress.getByAddress(literalBytes) }
+                return arrayOf(addr)
+            }
+            val effectiveTimeoutMs = minOf(timeoutMs.toLong(), dnsTimeoutMs).coerceAtLeast(1L)
+            val t0 = System.nanoTime()
+            val future = try {
+                dnsExecutor.submit(Callable { dnsResolver(host) })
+            } catch (_: RejectedExecutionException) {
+                throw UnknownHostException("DNS resolver busy for $host")
+            }
+            try {
+                val addrs = future.get(effectiveTimeoutMs, TimeUnit.MILLISECONDS)
+                if (addrs.isEmpty()) throw UnknownHostException("No addresses for $host")
+                return addrs
+            } catch (_: TimeoutException) {
+                future.cancel(true)
+                throw UnknownHostException("DNS lookup exceeded ${effectiveTimeoutMs}ms for $host")
+            } catch (_: InterruptedException) {
+                future.cancel(true)
+                Thread.currentThread().interrupt()
+                throw UnknownHostException("DNS lookup interrupted for $host")
+            } catch (e: ExecutionException) {
+                val cause = e.cause
+                if (cause is UnknownHostException) throw cause
+                throw UnknownHostException("DNS lookup failed for $host: ${cause?.message ?: e.message}")
+            } finally {
+                onDns(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0))
+            }
+        }
+
+        internal fun connectWithBoundedDns(
+            host: String,
+            port: Int,
+            timeoutMs: Int,
+            dnsTimeoutMs: Long,
+            dnsResolver: (String) -> Array<InetAddress>,
+            onDns: (Long) -> Unit,
+            register: (Socket) -> Unit,
+        ): Socket {
+            val addrs = resolveAddresses(host, timeoutMs, dnsTimeoutMs, dnsResolver, onDns)
+            val startNanos = System.nanoTime()
+            var lastErr: Exception? = null
+            val linuxOrAndroid = isLinuxOrAndroid()
+            for (i in addrs.indices) {
+                val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos)
+                val remainingMs = (timeoutMs.toLong() - elapsedMs).toInt()
+                if (i > 0 && remainingMs <= 0) break
+                val perAddrTimeout = if (addrs.size == 1) maxOf(500, remainingMs)
+                else maxOf(500, remainingMs / (addrs.size - i))
+                val s = Socket()
+                register(s)
+                s.tcpNoDelay = true
+                s.keepAlive = true
+                // Allow Linux/Android dynamic TCP window auto-tuning (tcp_moderate_rcvbuf)
+                // to scale up to kernel limits (4MB-8MB) without setting SOCK_RCVBUF_LOCK.
+                // Guarded: setting SO_RCVBUF manually on Linux/Android clamps window to rmem_max.
+                if (!linuxOrAndroid) {
+                    s.receiveBufferSize = 4 * 1024 * 1024
+                    s.sendBufferSize = 2 * 1024 * 1024
+                }
+                try {
+                    s.connect(InetSocketAddress(addrs[i], port), perAddrTimeout)
+                    return s
+                } catch (e: Exception) {
+                    runCatching { s.close() }
+                    lastErr = e
+                    if (Thread.currentThread().isInterrupted) break
+                }
+            }
+            throw lastErr ?: SocketTimeoutException("Connect timed out")
+        }
+
+        val DEFAULT_TCP_CONNECTOR = TcpConnector { host, port, timeoutMs, register ->
+            connectWithBoundedDns(
+                host = host,
+                port = port,
+                timeoutMs = timeoutMs,
+                dnsTimeoutMs = 5_000L,
+                dnsResolver = { InetAddress.getAllByName(it) },
+                onDns = {},
+                register = register,
+            )
         }
     }
 }

@@ -17,7 +17,6 @@ import {
   encodeBinarySackFrame,
   encodeEncryptedChunkFrame,
   FRAME_BINARY_SACK,
-  FRAME_ENCRYPTED_CHUNK,
   formatPairCode,
   isValidPairCode,
   base64UrlToBytes,
@@ -43,9 +42,11 @@ import {
 import { loadOrCreateDeviceId } from './deviceDetect.js';
 import {
   ContinuityManager,
+  type CallAudioFrame,
   type CallCommandResult,
   type ContactShareItem,
   type ContactsQueryResult,
+  type ContinuityDiagnosticsSnapshot,
   type ContinuityOptions,
   type ContinuitySnapshot,
   type ScreenAudioFrame,
@@ -53,7 +54,7 @@ import {
   type ScreenVideoFrame,
   type ScreenFrameSource,
 } from './continuity.js';
-import { FRAME_SCREEN, FRAME_SCREEN_AUDIO, type CallInfo, type ContactCard } from '../../shared/continuity.js';
+import { FRAME_CALL_AUDIO, FRAME_SCREEN, FRAME_SCREEN_AUDIO, type CallInfo, type ContactCard } from '../../shared/continuity.js';
 import {
   type DeviceIdentity,
   type IdentityStore,
@@ -83,6 +84,35 @@ export const MAX_CHUNKS_PER_TRANSFER = 262_144; // Manifest safety ceiling: 64 G
 export const MAX_CLIPBOARD_TEXT = 256_000;
 export const MAX_BROWSER_BUFFERED_BYTES = 128 * 1024 * 1024; // larger receives require disk/native storage
 export const MAX_CLIPBOARD_IMAGE_DATAURL_LENGTH = MAX_CLIPBOARD_IMAGE_DATAURL;
+
+/** Verify that a candidate URL uses http: or https: before rendering or classifying as a link. */
+export function isSafeHttpUrl(raw: string): boolean {
+  if (typeof raw !== 'string') return false;
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function stripPreviewDataUrl(file: FileManifestItem): Omit<FileManifestItem, 'previewDataUrl'> {
+  const copy: FileManifestItem = { ...file };
+  delete copy.previewDataUrl;
+  return copy;
+}
+
+function sanitizeFileSegmentChars(raw: string): string {
+  let out = '';
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i);
+    const ch = raw[i]!;
+    out += code < 0x20 || '<>:"|?*'.includes(ch) ? '_' : ch;
+  }
+  return out.trim();
+}
 
 export function isValidFileManifest(files: unknown, totalBytes: unknown): files is FileManifestItem[] {
   if (!Array.isArray(files) || files.length === 0 || files.length > MAX_FILES_PER_TRANSFER) return false;
@@ -272,6 +302,28 @@ export interface PeerSecurityInfo {
   identityChanged: boolean;
 }
 
+export interface WarpClientDiagnostics {
+  wsCloseCode: number | null;
+  wsCloseReason: string;
+  reconnectAttempts: number;
+  rtcState: Record<string, { connectionState: string; iceConnectionState?: string; dataChannelState: string }>;
+  transferErrors: Array<{ transferId: string; stage: string; message: string; at: number }>;
+  fallbackTimerFires: number;
+  clientErrorRing: Array<{ source: string; message: string; at: number }>;
+  transferResumes: number;
+  transferChunkRetries: number;
+  lastFinalizeDurationMs: number | null;
+  screenShare: ContinuityDiagnosticsSnapshot['screenShare'];
+  contacts: ContinuityDiagnosticsSnapshot['contacts'];
+  callAudio: ContinuityDiagnosticsSnapshot['callAudio'];
+  clipboardBridge: {
+    imagesSent: number;
+    imagesReceived: number;
+    autoSyncEnabled: boolean;
+    receiveEnabled: boolean;
+  };
+}
+
 export interface WarpClientSnapshot {
   connectionState: 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
   connectionError?: string;
@@ -302,6 +354,8 @@ export interface WarpClientSnapshot {
   notificationSharing: boolean;
   /** Contacts, calls and screen sharing with paired devices. */
   continuity?: ContinuitySnapshot;
+  /** Structured client diagnostics for support bundles. */
+  diagnostics?: WarpClientDiagnostics;
 }
 
 export interface NotificationBeamItem {
@@ -321,6 +375,8 @@ export interface WarpClientOptions extends ContinuityOptions {
   storagePrefix?: string;
   deviceOverride?: Omit<DeviceProfile, 'publicKey'>;
   enableWebRtc?: boolean;
+  /** Optional ICE servers override; defaults to [] (100% offline LAN). */
+  iceServers?: RTCIceServer[];
   autoAcceptAll?: boolean;
   autoClipboardSync?: boolean;
   onIncomingNotification?: (notification: NotificationBeamItem) => void;
@@ -354,6 +410,7 @@ interface InternalReceiveState {
   lastAckTimes?: number[];
   /** Key that granted consent; a matching display name/deviceId is not authentication. */
   peerPublicKey?: string;
+  peerIdentityKey?: string;
   bytesReceived: number;
   lastSpeedTs: number;
   lastSpeedBytes: number;
@@ -361,6 +418,7 @@ interface InternalReceiveState {
   finalizedFiles: Set<number>;
   transferCompleteReceived: boolean;
   finalizeChain: Promise<void>;
+  inFlightChunks: Set<Promise<void>>;
   fallbackTimer?: ReturnType<typeof setTimeout>;
   /** Disk-backed receivers, one per file, when the host daemon is enabled. */
   diskReceivers?: Map<number, DaemonReceiver>;
@@ -380,7 +438,9 @@ interface InternalSendState {
   lastAckAt: number;
   ackWaitStartedAt?: number;
   peerPublicKey?: string;
+  peerIdentityKey?: string;
   peerConnectedAt?: number;
+  fileDigests?: Map<number, string>;
   connection?: WebSocket;
   lastAckedBytes: number;
   /** Speed sampling is separate from ACK-stall detection, so a paused stream can show 0 B/s. */
@@ -597,6 +657,18 @@ abstract class ChunkStreamReceiver {
     return this.stored.has(chunkIndex);
   }
 
+  getReceivedCount(): number {
+    return this.received.size;
+  }
+
+  getStoredCount(): number {
+    return this.stored.size;
+  }
+
+  isBusy(): boolean {
+    return this.pending > 0 || this.queue.length > 0;
+  }
+
   markReceived(chunkIndex: number): void {
     this.received.add(chunkIndex);
     this.stored.add(chunkIndex);
@@ -662,8 +734,10 @@ abstract class ChunkStreamReceiver {
           if (this.stopped) { this.notifyStored(item.chunkIndex, false); return; }
           this.stored.add(item.chunkIndex);
           this.notifyStored(item.chunkIndex, true);
-          // A later successful re-delivery heals an earlier write failure.
-          if (this.received.size === this.meta.totalChunks) this.error = undefined;
+          // A later successful re-delivery heals an earlier write failure once every chunk is stored.
+          if (this.stored.size >= this.meta.totalChunks && this.received.size === this.meta.totalChunks) {
+            this.error = undefined;
+          }
         })
         .catch((err) => {
           // A chunk that never landed on disk must not count as received,
@@ -728,6 +802,7 @@ class DaemonReceiver extends ChunkStreamReceiver {
     meta: DiskReceiveMeta,
     private readonly senderName: string,
     private readonly apiBase: string,
+    private readonly onChunkRetry?: () => void,
   ) {
     super(meta, DISK_SEND_WINDOW);
   }
@@ -744,14 +819,34 @@ class DaemonReceiver extends ChunkStreamReceiver {
       'X-AirBridge-Total-Chunks': String(this.meta.totalChunks),
     };
     if (this.senderName) headers['X-AirBridge-Sender'] = encodeURIComponent(this.senderName);
-    const resp = await fetch(`${this.apiBase}/api/daemon/receive-chunk`, {
-      method: 'POST',
-      headers,
-      body: data as unknown as BodyInit,
-    });
-    if (!resp.ok) {
-      throw new Error(`chunk ${chunkIndex} rejected (HTTP ${resp.status})`);
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (this.stopped) throw new Error('Transfer stopped.');
+      try {
+        const resp = await fetch(`${this.apiBase}/api/daemon/receive-chunk`, {
+          method: 'POST',
+          headers,
+          body: data as unknown as BodyInit,
+        });
+        if (resp.ok) return;
+        const statusErr = new Error(`chunk ${chunkIndex} rejected (HTTP ${resp.status})`);
+        if (resp.status !== 429 && resp.status < 500) {
+          throw statusErr;
+        }
+        lastError = statusErr;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (message.startsWith('chunk ') && !message.includes('HTTP 5') && !message.includes('HTTP 429')) {
+          throw err;
+        }
+        lastError = err instanceof Error ? err : new Error(message);
+      }
+      if (attempt < 3 && !this.stopped) {
+        this.onChunkRetry?.();
+        await new Promise((resolve) => setTimeout(resolve, 150 * Math.pow(2, attempt)));
+      }
     }
+    throw lastError ?? new Error(`chunk ${chunkIndex} failed after retries`);
   }
 
   protected async finalize(): Promise<DiskFinalizeResult | null> {
@@ -827,7 +922,7 @@ class FileSystemReceiver extends ChunkStreamReceiver {
   }
 
   async open(): Promise<void> {
-    const base = this.meta.name.replace(/\\/g, '/').split('/').pop()!.replace(/[\x00-\x1f<>:"|?*]/g, '_').trim();
+    const base = sanitizeFileSegmentChars(this.meta.name.replace(/\\/g, '/').split('/').pop()!);
     const safeName = base && base !== '.' && base !== '..' ? base : 'airbridge-file';
     const dot = safeName.lastIndexOf('.');
     const stem = dot > 0 ? safeName.slice(0, dot) : safeName;
@@ -970,13 +1065,30 @@ export class WarpClient {
   private rtcPeers = new Map<string, RTCPeerConnection>();
   private rtcChannels = new Map<string, RTCDataChannel>();
   private rtcMakingOffer = new Map<string, boolean>();
+  private rtcWaitTimers = new Map<ReturnType<typeof setInterval>, () => void>();
+  private binaryFrameQueue: Promise<void> = Promise.resolve();
+  private pendingBlobFrames = 0;
+
+  // Diagnostics telemetry
+  private lastWsCloseCode: number | null = null;
+  private lastWsCloseReason = '';
+  private reconnectAttempts = 0;
+  private rateLimitedReconnect = false;
+  private fallbackTimerFires = 0;
+  private transferResumes = 0;
+  private transferChunkRetries = 0;
+  private lastFinalizeDurationMs: number | null = null;
+  private clipboardImagesSent = 0;
+  private clipboardImagesReceived = 0;
+  private transferErrors: Array<{ transferId: string; stage: string; message: string; at: number }> = [];
+  private clientErrorRing: Array<{ source: string; message: string; at: number }> = [];
 
   // Active & historical transfers / clipboard
   private transfers: TransferSessionView[] = [];
   // Local offers only: restored/peer-reported history is never a verified receipt.
   // Weak keys make the binding expire with pruned transfer history.
   private receiveOfferBindings = new WeakMap<TransferSessionView, {
-    publicKey: string; files: FileManifestItem[]; totalBytes: number;
+    publicKey: string; identityKey?: string; files: FileManifestItem[]; totalBytes: number;
   }>();
   private incomingStates = new Map<string, InternalReceiveState>();
   private outgoingStates = new Map<string, InternalSendState>();
@@ -1002,14 +1114,19 @@ export class WarpClient {
   private clipboardReceiveEnabled = true;
   private notificationSharing = true;
   private lastSyncedClipboardText = '';
+  private lastSyncedClipboardImageHash = '';
   private seenBeamIds = new Set<string>();
   private lastIncomingClip: { peerId: string; text: string; ts: number } | null = null;
   private pendingAutoClipboard: { text: string; capturedAt: number; deliveredTo: Set<string> } | null = null;
   private autoClipboardSending = false;
+  private pendingAutoClipboardImage: { imageDataUrl: string; imageName?: string; hash: string; capturedAt: number; deliveredTo: Set<string> } | null = null;
+  private autoClipboardImageSending = false;
   private readonly continuity: ContinuityManager;
 
   constructor(opts: WarpClientOptions = {}) {
     this.opts = opts;
+    this.storagePrefix = opts.storagePrefix ?? 'airbridge';
+    this.storage = opts.storage === undefined ? getSafeLocalStorage() : opts.storage;
     this.continuity = new ContinuityManager({
       sendControl: (peerId, payload) => this.sendControlMessage(peerId, payload, true),
       sendFrame: (peerId, frame) => this.sendContinuityFrame(peerId, frame),
@@ -1031,9 +1148,7 @@ export class WarpClient {
       isPaired: (peerId) => this.peers.some((p) => p.peerId === peerId && p.discoveryScope === 'paired'),
       peerIds: () => this.peers.map((p) => p.peerId),
       emit: () => this.emit(),
-    }, opts);
-    this.storagePrefix = opts.storagePrefix ?? 'airbridge';
-    this.storage = opts.storage === undefined ? getSafeLocalStorage() : opts.storage;
+    }, { ...opts, storage: this.storage, storagePrefix: this.storagePrefix });
     this.peerId = loadOrCreatePeerId(this.storagePrefix, this.storage);
     if (opts.autoClipboardSync !== undefined) {
       this.autoClipboardSync = opts.autoClipboardSync;
@@ -1095,6 +1210,11 @@ export class WarpClient {
           if (Array.isArray(parsedClips)) {
             this.clipboardItems = parsedClips
               .filter((c) => c && typeof c.beamId === 'string' && typeof c.text === 'string')
+              .map((c) =>
+                c.contentType === 'url' && !isSafeHttpUrl(c.text)
+                  ? { ...c, contentType: 'text' as const }
+                  : c
+              )
               .slice(0, 50);
             this.pruneClipboardHistory();
             for (const c of this.clipboardItems) {
@@ -1202,6 +1322,12 @@ export class WarpClient {
     }
     this.incomingStates.clear();
     this.outgoingStates.clear();
+    for (const cancelWait of [...this.rtcWaitTimers.values()]) {
+      cancelWait();
+    }
+    this.rtcWaitTimers.clear();
+    this.binaryFrameQueue = Promise.resolve();
+    this.pendingBlobFrames = 0;
     for (const dc of this.rtcChannels.values()) {
       try {
         dc.close();
@@ -1281,14 +1407,75 @@ export class WarpClient {
       clipboardReceiveEnabled: this.clipboardReceiveEnabled,
       notificationSharing: this.notificationSharing,
       continuity: this.continuity.snapshot(),
+      diagnostics: this.getDiagnostics(),
     };
+  }
+
+  public getDiagnostics(): WarpClientDiagnostics {
+    const rtcState: WarpClientDiagnostics['rtcState'] = {};
+    for (const [peerId, pc] of this.rtcPeers.entries()) {
+      const dc = this.rtcChannels.get(peerId);
+      rtcState[peerId] = {
+        connectionState: pc.connectionState ?? 'new',
+        iceConnectionState: pc.iceConnectionState,
+        dataChannelState: dc?.readyState ?? 'none',
+      };
+    }
+    const continuityDiag = this.continuity.getDiagnostics();
+    return {
+      wsCloseCode: this.lastWsCloseCode,
+      wsCloseReason: this.lastWsCloseReason,
+      reconnectAttempts: this.reconnectAttempts,
+      rtcState,
+      transferErrors: [...this.transferErrors],
+      fallbackTimerFires: this.fallbackTimerFires,
+      clientErrorRing: [...this.clientErrorRing],
+      transferResumes: this.transferResumes,
+      transferChunkRetries: this.transferChunkRetries,
+      lastFinalizeDurationMs: this.lastFinalizeDurationMs,
+      screenShare: continuityDiag.screenShare,
+      contacts: continuityDiag.contacts,
+      callAudio: continuityDiag.callAudio,
+      clipboardBridge: {
+        imagesSent: this.clipboardImagesSent,
+        imagesReceived: this.clipboardImagesReceived,
+        autoSyncEnabled: this.autoClipboardSync,
+        receiveEnabled: this.clipboardReceiveEnabled,
+      },
+    };
+  }
+
+  public recordTransferError(transferId: string, stage: string, message: string): void {
+    this.transferErrors.push({
+      transferId,
+      stage,
+      message: String(message || 'unknown error').slice(0, 300),
+      at: Date.now(),
+    });
+    if (this.transferErrors.length > 20) {
+      this.transferErrors.splice(0, this.transferErrors.length - 20);
+    }
+  }
+
+  public recordClientError(source: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error ?? 'unknown error');
+    this.clientErrorRing.push({
+      source,
+      message: message.slice(0, 300),
+      at: Date.now(),
+    });
+    if (this.clientErrorRing.length > 30) {
+      this.clientErrorRing.splice(0, this.clientErrorRing.length - 30);
+    }
   }
 
   public setNotificationSharing(enabled: boolean): void {
     this.notificationSharing = enabled;
     try {
       this.storage?.setItem(`${this.storagePrefix}:notificationSharing`, enabled ? '1' : '0');
-    } catch (_e) {}
+    } catch {
+      // ignore storage error
+    }
     this.emit();
   }
 
@@ -1340,6 +1527,42 @@ export class WarpClient {
     this.continuity.clearSharedContacts();
   }
 
+  public removeSavedContact(contactId: string): boolean {
+    return this.continuity.removeSavedContact(contactId);
+  }
+
+  public clearSavedContacts(peerId?: string): number {
+    return this.continuity.clearSavedContacts(peerId);
+  }
+
+  public startCallAudio(peerId: string, callId: string): Promise<void> {
+    return this.continuity.startCallAudio(peerId, callId);
+  }
+
+  public stopCallAudio(peerId: string, callId: string): Promise<void> {
+    return this.continuity.stopCallAudio(peerId, callId);
+  }
+
+  public setCallAudioMuted(peerId: string, callId: string, muted: boolean): Promise<void> {
+    return this.continuity.setCallAudioMuted(peerId, callId, muted);
+  }
+
+  public sendCallAudio(
+    peerId: string,
+    callId: string,
+    pcmS16le: Uint8Array,
+    sampleRate: number,
+    channels: number,
+    frames: number,
+    ptsMs: number,
+  ): Promise<boolean> {
+    return this.continuity.sendCallAudio(peerId, callId, pcmS16le, sampleRate, channels, frames, ptsMs);
+  }
+
+  public subscribeCallAudio(callId: string, listener: (frame: CallAudioFrame) => void): () => void {
+    return this.continuity.subscribeCallAudio(callId, listener);
+  }
+
   public answerCall(peerId: string, callId: string): Promise<CallCommandResult> {
     return this.continuity.sendCallCommand(peerId, 'answer', { callId });
   }
@@ -1377,6 +1600,20 @@ export class WarpClient {
 
   public stopScreenShare(sessionId: string): void {
     this.continuity.stopScreenShare(sessionId);
+  }
+
+  public requestScreenKeyframe(sessionId: string, reason?: string): void {
+    this.continuity.requestScreenKeyframe(sessionId, reason);
+  }
+
+  public recordScreenViewerStats(stats: {
+    decoderMode?: string | null;
+    codec?: string | null;
+    framesDecodedDelta?: number;
+    decodeErrorsDelta?: number;
+    keyframesReceivedDelta?: number;
+  }): void {
+    this.continuity.recordScreenViewerStats(stats);
   }
 
   /** Decrypted frames for a viewer session (the latest frame is replayed on subscribe). */
@@ -1590,6 +1827,67 @@ export class WarpClient {
     return results;
   }
 
+  /**
+   * Automatically beams newly copied clipboard images only to paired devices.
+   * Deduplicates by image hash to avoid re-sending images received from a peer.
+   */
+  public async handleDetectedLocalClipboardImage(
+    imageDataUrl: string,
+    imageName?: string,
+  ): Promise<ClipboardBeamItem[]> {
+    if (!this.autoClipboardSync || this.destroyed || !isValidClipboardImageDataUrl(imageDataUrl)) return [];
+    const hash = await sha256Hex([new TextEncoder().encode(imageDataUrl)]);
+    if (this.destroyed) return [];
+    if (hash === this.lastSyncedClipboardImageHash && this.pendingAutoClipboardImage?.hash !== hash) return [];
+    if (this.pendingAutoClipboardImage?.hash !== hash) {
+      this.pendingAutoClipboardImage = {
+        imageDataUrl,
+        imageName,
+        hash,
+        capturedAt: Date.now(),
+        deliveredTo: new Set(),
+      };
+    }
+    return this.flushAutoClipboardImage();
+  }
+
+  private async flushAutoClipboardImage(): Promise<ClipboardBeamItem[]> {
+    if (this.autoClipboardImageSending) return [];
+    this.autoClipboardImageSending = true;
+    const results: ClipboardBeamItem[] = [];
+    try {
+      while (this.pendingAutoClipboardImage && this.autoClipboardSync && !this.destroyed) {
+        const pending = this.pendingAutoClipboardImage;
+        if (Date.now() - pending.capturedAt > 60_000) {
+          this.pendingAutoClipboardImage = null;
+          break;
+        }
+        const targets = this.peers.filter((peer) => peer.discoveryScope === 'paired');
+        if (this.connectionState !== 'connected' || targets.length === 0) break;
+        for (const peer of targets) {
+          if (this.pendingAutoClipboardImage !== pending || !this.autoClipboardSync || this.destroyed) break;
+          const identity = peer.device?.publicKey || peer.peerId;
+          if (pending.deliveredTo.has(identity)) continue;
+          try {
+            results.push(await this.sendClipboardImage(peer.peerId, pending.imageDataUrl, pending.imageName, { isAuto: true }));
+            pending.deliveredTo.add(identity);
+          } catch {
+            /* retain unsent targets for reconnect retry */
+          }
+        }
+        if (this.pendingAutoClipboardImage !== pending) continue;
+        if (targets.every((peer) => pending.deliveredTo.has(peer.device?.publicKey || peer.peerId))) {
+          this.lastSyncedClipboardImageHash = pending.hash;
+          this.pendingAutoClipboardImage = null;
+        }
+        break;
+      }
+    } finally {
+      this.autoClipboardImageSending = false;
+    }
+    return results;
+  }
+
   // ==========================================================================
   // Universal Clipboard / Text & Link Instant Beam
   // ==========================================================================
@@ -1611,6 +1909,9 @@ export class WarpClient {
       throw new Error('Text too large to beam.');
     }
 
+    if (this.identityCacheKey(peer)) {
+      await this.checkPeerIdentity(peer);
+    }
     const cryptoSession = await this.ensureCryptoSession(peer);
     const beamId = randomHex16();
     const contentType = classifyTextPayload(trimmed);
@@ -1664,18 +1965,25 @@ export class WarpClient {
   public async sendClipboardImage(
     peerId: string,
     imageDataUrl: string,
-    imageName?: string
+    imageName?: string,
+    options?: { isAuto?: boolean },
   ): Promise<ClipboardBeamItem> {
     const peer = this.peers.find((p) => p.peerId === peerId);
     if (!peer) throw new Error('Selected peer is no longer online.');
     if (!isValidClipboardImageDataUrl(imageDataUrl)) throw new Error('Invalid image data. Use a PNG/JPEG/WebP image under 5 MB.');
+    if (this.identityCacheKey(peer)) {
+      await this.checkPeerIdentity(peer);
+    }
     const cryptoSession = await this.ensureCryptoSession(peer);
     const beamId = randomHex16();
     const timestamp = Date.now();
     this.seenBeamIds.add(beamId);
     if (this.seenBeamIds.size > 200) this.seenBeamIds.delete(this.seenBeamIds.values().next().value!);
-    // Use the image data as the deduplication key as well
-    this.lastSyncedClipboardText = imageDataUrl.slice(0, 1024);
+    const imageHash = await sha256Hex([new TextEncoder().encode(imageDataUrl)]);
+    if (!options?.isAuto) {
+      this.lastSyncedClipboardText = imageDataUrl.slice(0, 1024);
+      this.lastSyncedClipboardImageHash = imageHash;
+    }
 
     await this.sendControlMessage(
       peerId,
@@ -1689,6 +1997,7 @@ export class WarpClient {
       },
       true
     );
+    this.clipboardImagesSent += 1;
     const item: ClipboardBeamItem = {
       beamId,
       peerId,
@@ -1705,6 +2014,9 @@ export class WarpClient {
     this.pruneClipboardHistory();
     this.persistClipboardHistory();
     this.emit();
+    if (options?.isAuto) {
+      this.opts.onOutgoingAutoClipboard?.(item);
+    }
     return item;
   }
 
@@ -1733,6 +2045,9 @@ export class WarpClient {
     }
     if (declaredChunks > MAX_CHUNKS_PER_TRANSFER) throw new Error('Files exceed the per-transfer chunk limit.');
 
+    if (this.identityCacheKey(peer)) {
+      await this.checkPeerIdentity(peer);
+    }
     const cryptoSession = await this.ensureCryptoSession(peer);
     // Proactively warm up WebRTC DataChannel while waiting for recipient Accept
     this.initiateWebRtcIfPossible(peerId);
@@ -1784,6 +2099,8 @@ export class WarpClient {
       sentGlobalChunks: 0,
       ackedGlobalChunks: 0,
       peerPublicKey: peer.device.publicKey,
+      peerIdentityKey: this.provenIdentity(peer),
+      fileDigests: new Map(),
       sentChunksByFile: manifest.map(() => 0),
       ackedChunksByFile: manifest.map(() => 0),
       ackWaiters: [],
@@ -1840,15 +2157,21 @@ export class WarpClient {
     sendState: InternalSendState,
     initialPeer: PeerSummary,
     initialCryptoSession: PeerCryptoSession,
+    acceptTimeoutMs?: number,
   ): Promise<{ peer: PeerSummary; cryptoSession: PeerCryptoSession; preferredTransport: TransportKind }> {
     let peer = initialPeer;
     let cryptoSession = initialCryptoSession;
+    const deadline = acceptTimeoutMs !== undefined ? Date.now() + 120_000 : Infinity;
     while (!sendState.cancelled && !this.destroyed) {
       try {
-        const preferredTransport = await this.requestTransferAccept(sendState, peer);
+        const preferredTransport = await this.requestTransferAccept(sendState, peer, acceptTimeoutMs);
         return { peer, cryptoSession, preferredTransport };
       } catch (error) {
         if (!(error instanceof TransferConnectionInterruptedError)) throw error;
+        if (Date.now() >= deadline) {
+          throw new Error('Receiver did not confirm resumed transfer within two minutes.', { cause: error });
+        }
+        this.transferResumes += 1;
         sendState.session.status = 'connecting';
         sendState.session.speedBytesPerSec = 0;
         sendState.session.etaSeconds = null;
@@ -1865,13 +2188,39 @@ export class WarpClient {
   private async requestTransferAccept(
     sendState: InternalSendState,
     peer: PeerSummary,
+    acceptTimeoutMs?: number,
   ): Promise<TransportKind> {
     sendState.connection = this.ws ?? undefined;
     sendState.peerConnectedAt = peer.connectedAt;
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
     const acceptPromise = new Promise<TransportKind>((resolve, reject) => {
-      sendState.acceptResolver = resolve;
-      sendState.acceptRejecter = reject;
+      let settled = false;
+      const finishResolve = (transport: TransportKind) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = null;
+        }
+        resolve(transport);
+      };
+      const finishReject = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = null;
+        }
+        reject(err);
+      };
+      sendState.acceptResolver = finishResolve;
+      sendState.acceptRejecter = finishReject;
       sendState.acceptingPeerId = peer.peerId;
+      if (acceptTimeoutMs !== undefined) {
+        timeoutTimer = setTimeout(() => {
+          finishReject(new TransferConnectionInterruptedError('Resume offer timed out; retrying.'));
+        }, acceptTimeoutMs);
+      }
     });
     try {
       await this.sendControlMessage(
@@ -1895,6 +2244,10 @@ export class WarpClient {
       await acceptPromise.catch(() => undefined);
       throw error;
     } finally {
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer);
+        timeoutTimer = null;
+      }
       sendState.acceptResolver = undefined;
       sendState.acceptRejecter = undefined;
       sendState.acceptingPeerId = undefined;
@@ -1923,6 +2276,7 @@ export class WarpClient {
         if (!(error instanceof TransferConnectionInterruptedError) || sendState.cancelled) {
           throw error;
         }
+        this.transferResumes += 1;
         sendState.session.status = 'connecting';
         sendState.session.speedBytesPerSec = 0;
         sendState.session.etaSeconds = null;
@@ -1938,6 +2292,7 @@ export class WarpClient {
           sendState,
           currentPeer,
           currentCryptoSession,
+          10_000,
         );
         currentPeer = accepted.peer;
         currentCryptoSession = accepted.cryptoSession;
@@ -1964,9 +2319,14 @@ export class WarpClient {
             : candidate.peerId === sendState.session.peerId,
         );
         if (peer) {
-          if (sendState.peerPublicKey && peer.device.publicKey !== sendState.peerPublicKey) {
+          if (this.identityCacheKey(peer)) {
+            await this.checkPeerIdentity(peer);
+          }
+          if (!this.matchesTransferPeerIdentity(peer, sendState.peerPublicKey, sendState.peerIdentityKey)) {
             throw new Error('Receiver identity changed. Pair again before retrying.');
           }
+          sendState.peerPublicKey = peer.device.publicKey;
+          sendState.peerIdentityKey = this.provenIdentity(peer) ?? sendState.peerIdentityKey;
           sendState.session.peerId = peer.peerId;
           sendState.session.peerName = peer.device.name;
           sendState.session.peerPlatform = peer.device.platform;
@@ -2016,6 +2376,21 @@ export class WarpClient {
       // A receiver only skips the highest contiguous durable prefix, so every
       // byte still contributes exactly once to the full-file digest.
       const resumeFrom = Math.min(meta.totalChunks, resumeFromChunks?.[fileIdx] ?? 0);
+      const cachedDigest = resumeFrom >= meta.totalChunks ? sendState.fileDigests?.get(fileIdx) : undefined;
+      if (cachedDigest) {
+        this.assertTransferPeerConnected(sendState, peer.peerId);
+        await this.sendControlMessage(
+          peer.peerId,
+          {
+            kind: 'file-complete',
+            transferId: session.transferId,
+            fileIndex: fileIdx,
+            sha256: cachedDigest,
+          },
+          true
+        );
+        continue;
+      }
       const fileHasher = new Sha256Stream();
       for (let c = 0; c < resumeFrom; c++) {
         const start = c * meta.chunkSize;
@@ -2117,6 +2492,7 @@ export class WarpClient {
 
       this.assertTransferPeerConnected(sendState, peer.peerId);
       const digest = fileHasher.hex();
+      sendState.fileDigests?.set(fileIdx, digest);
       await this.sendControlMessage(
         peer.peerId,
         {
@@ -2178,7 +2554,7 @@ export class WarpClient {
     const peer = this.peers.find(
       (candidate) =>
         candidate.peerId === peerId &&
-        (!sendState.peerPublicKey || candidate.device.publicKey === sendState.peerPublicKey),
+        this.matchesTransferPeerIdentity(candidate, sendState.peerPublicKey, sendState.peerIdentityKey),
     );
     if (!peer || (sendState.peerConnectedAt !== undefined && peer.connectedAt !== sendState.peerConnectedAt)) {
       throw new TransferConnectionInterruptedError('Receiver disconnected; waiting to resume.');
@@ -2278,7 +2654,8 @@ export class WarpClient {
         await this.disposeReceivers(recvState, true); return;
       }
       const peerId = recvState.session.peerId;
-      if (!this.peers.some((peer) => peer.peerId === peerId && peer.device.publicKey === recvState.peerPublicKey)) {
+      if (!this.peers.some((peer) => peer.peerId === peerId &&
+          this.matchesTransferPeerIdentity(peer, recvState.peerPublicKey, recvState.peerIdentityKey))) {
         throw new Error('Sender disconnected or its identity changed. Ask them to send the offer again.');
       }
       if (!recvState.diskReceivers?.size && !recvState.fileSystemReceivers?.size) {
@@ -2406,6 +2783,7 @@ export class WarpClient {
           },
           recvState.session.peerName,
           this.apiBaseUrl(),
+          () => { this.transferChunkRetries += 1; },
         );
         const onDisk = await this.queryDiskPartial(recvState.session.transferId, file.index);
         if (onDisk === null && previous) {
@@ -2541,6 +2919,7 @@ export class WarpClient {
           },
           recvState.session.peerName,
           this.apiBaseUrl(),
+          () => { this.transferChunkRetries += 1; },
         );
         receivers.set(file.index, receiver);
         const onDisk = await this.queryDiskPartial(recvState.session.transferId, file.index);
@@ -2791,45 +3170,43 @@ export class WarpClient {
         try {
           const msg = JSON.parse(event.data) as ServerToClientMessage;
           this.handleServerMessage(msg);
-        } catch {
-          // ignore malformed
+        } catch (err) {
+          this.recordClientError('ws-json-parse', err);
         }
       } else if (event.data instanceof ArrayBuffer) {
-        try {
-          const bytes = new Uint8Array(event.data);
-          const { sourcePeerId, payload } = unwrapRoutedRelayFrame(bytes);
-          if (payload[0] === FRAME_BINARY_SACK) {
-            const sack = decodeBinarySackFrame(payload);
-            this.applyChunkAck(sourcePeerId, { transferId: sack.transferId, fileIndex: sack.fileIndex, ackedChunkIndex: sack.chunkIndex });
-          } else if (payload[0] === FRAME_SCREEN) {
-            void this.continuity.handleScreenFrame(sourcePeerId, payload);
-          } else if (payload[0] === FRAME_SCREEN_AUDIO) {
-            void this.continuity.handleScreenAudioFrame(sourcePeerId, payload);
-          } else {
-            this.handleIncomingEncryptedChunk(sourcePeerId, payload, 'ws-relay').catch(() => {});
-          }
-        } catch { /* malformed routed frame */ }
+        const bytes = new Uint8Array(event.data);
+        if (this.pendingBlobFrames > 0) {
+          this.binaryFrameQueue = this.binaryFrameQueue
+            .then(() => {
+              this.processIncomingBinaryFrame(ws, bytes);
+            })
+            .catch((err: unknown) => {
+              this.recordClientError('ws-arraybuffer-queue', err);
+            });
+        } else {
+          this.processIncomingBinaryFrame(ws, bytes);
+        }
       } else if (typeof Blob !== 'undefined' && event.data instanceof Blob) {
-        event.data.arrayBuffer().then((ab) => {
-          if (this.destroyed || this.ws !== ws) return;
-          const bytes = new Uint8Array(ab);
-          const { sourcePeerId, payload } = unwrapRoutedRelayFrame(bytes);
-          if (payload[0] === FRAME_BINARY_SACK) {
-            const sack = decodeBinarySackFrame(payload);
-            this.applyChunkAck(sourcePeerId, { transferId: sack.transferId, fileIndex: sack.fileIndex, ackedChunkIndex: sack.chunkIndex });
-          } else if (payload[0] === FRAME_SCREEN) {
-            void this.continuity.handleScreenFrame(sourcePeerId, payload);
-          } else if (payload[0] === FRAME_SCREEN_AUDIO) {
-            void this.continuity.handleScreenAudioFrame(sourcePeerId, payload);
-          } else {
-            this.handleIncomingEncryptedChunk(sourcePeerId, payload, 'ws-relay').catch(() => {});
-          }
-        }).catch(() => {});
+        const blob = event.data;
+        this.pendingBlobFrames++;
+        this.binaryFrameQueue = this.binaryFrameQueue
+          .then(() => blob.arrayBuffer())
+          .then((ab) => {
+            this.processIncomingBinaryFrame(ws, new Uint8Array(ab));
+          })
+          .catch((err: unknown) => {
+            this.recordClientError('ws-blob-frame', err);
+          })
+          .finally(() => {
+            this.pendingBlobFrames = Math.max(0, this.pendingBlobFrames - 1);
+          });
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev?: CloseEvent) => {
       if (this.destroyed || this.ws !== ws) return;
+      this.lastWsCloseCode = typeof ev?.code === 'number' ? ev.code : null;
+      this.lastWsCloseReason = typeof ev?.reason === 'string' ? ev.reason : '';
       this.connectionState = 'reconnecting';
       for (const sendState of this.outgoingStates.values()) {
         sendState.acceptRejecter?.(
@@ -2837,7 +3214,7 @@ export class WarpClient {
         );
         for (const wake of sendState.ackWaiters.splice(0)) wake();
         for (const wake of sendState.completionAckWaiters.splice(0)) {
-          wake({ verified: false, reason: 'Connection lost while confirming transfer.' });
+          wake(null);
         }
       }
       this.vouchKey = null;
@@ -2846,13 +3223,48 @@ export class WarpClient {
       this.emit();
       // A rejected code would only be rejected again (and count as another guess).
       if (this.pairingError) { this.connectionState = 'disconnected'; this.emit(); return; }
-      this.reconnectTimer = setTimeout(() => this.connectWebSocket(), this.reconnectDelayMs);
-      this.reconnectDelayMs = 1_500;
+      this.reconnectAttempts += 1;
+      const delay = this.computeReconnectDelayMs();
+      this.reconnectDelayMs = delay;
+      this.reconnectTimer = setTimeout(() => this.connectWebSocket(), delay);
     };
 
     ws.onerror = () => {
       // Handled by onclose
     };
+  }
+
+  private processIncomingBinaryFrame(ws: WebSocket, bytes: Uint8Array): void {
+    if (this.destroyed || this.ws !== ws) return;
+    try {
+      const { sourcePeerId, payload } = unwrapRoutedRelayFrame(bytes);
+      if (payload[0] === FRAME_BINARY_SACK) {
+        const sack = decodeBinarySackFrame(payload);
+        this.applyChunkAck(sourcePeerId, { transferId: sack.transferId, fileIndex: sack.fileIndex, ackedChunkIndex: sack.chunkIndex });
+      } else if (payload[0] === FRAME_SCREEN) {
+        void this.continuity.handleScreenFrame(sourcePeerId, payload);
+      } else if (payload[0] === FRAME_SCREEN_AUDIO) {
+        void this.continuity.handleScreenAudioFrame(sourcePeerId, payload);
+      } else if (payload[0] === FRAME_CALL_AUDIO) {
+        void this.continuity.handleCallAudioFrame(sourcePeerId, payload);
+      } else {
+        this.handleIncomingEncryptedChunk(sourcePeerId, payload, 'ws-relay').catch((err: unknown) => {
+          this.recordClientError('ws-chunk', err);
+        });
+      }
+    } catch (err) {
+      this.recordClientError('ws-binary-frame', err);
+    }
+  }
+
+  private computeReconnectDelayMs(): number {
+    if (this.rateLimitedReconnect) {
+      this.rateLimitedReconnect = false;
+      return 60_000;
+    }
+    const base = Math.min(15_000, 1_500 * Math.pow(2, Math.max(0, this.reconnectAttempts - 1)));
+    const jitter = Math.floor(Math.random() * Math.min(400, Math.round(base * 0.1)));
+    return base + jitter;
   }
 
   private handleServerMessage(msg: ServerToClientMessage): void {
@@ -2861,7 +3273,7 @@ export class WarpClient {
         const party = this.pakeParty;
         this.pakeParty = null;
         if (!party) { this.ws?.close(); break; }
-        let ok = false;
+        let ok: boolean;
         let ke: Uint8Array | null = null;
         try {
           const result = party.finish(base64UrlToBytes(msg.share));
@@ -2889,6 +3301,9 @@ export class WarpClient {
         this.admission = msg.admission ?? (this.vouchKey ? 'pake' : 'legacy');
         this.connectionNotice = null;
         this.connectionState = 'connected';
+        this.reconnectAttempts = 0;
+        this.reconnectDelayMs = 1_500;
+        this.rateLimitedReconnect = false;
         this.serverVersion = msg.serverVersion ?? null;
         this.peerId = msg.peerId;
         this.persistPeerId(msg.peerId);
@@ -2948,7 +3363,11 @@ export class WarpClient {
       }
 
       case 'host-clipboard': {
-        this.handleDetectedLocalClipboard(msg.text).catch(() => {});
+        if (msg.imageDataUrl) {
+          this.handleDetectedLocalClipboardImage(msg.imageDataUrl, msg.imageName).catch(() => {});
+        } else if (typeof msg.text === 'string' && msg.text.length > 0) {
+          this.handleDetectedLocalClipboard(msg.text).catch(() => {});
+        }
         break;
       }
 
@@ -2957,6 +3376,7 @@ export class WarpClient {
           this.failPairing("This computer doesn't know that pairing code. Check the code on its screen and enter it again.");
         } else if (msg.code === 'RATE_LIMITED') {
           this.connectionNotice = msg.message;
+          this.rateLimitedReconnect = true;
           this.reconnectDelayMs = 60_000;
           this.emit();
         }
@@ -3029,6 +3449,22 @@ export class WarpClient {
     return key && this.identityChecks.get(key) === true ? peer.device?.identityKey : undefined;
   }
 
+  private matchesTransferPeerIdentity(
+    candidate: PeerSummary,
+    expectedPublicKey?: string,
+    expectedIdentityKey?: string,
+  ): boolean {
+    const proven = this.provenIdentity(candidate);
+    if (expectedIdentityKey) {
+      if (proven) return proven === expectedIdentityKey;
+      return !!expectedPublicKey && candidate.device.publicKey === expectedPublicKey;
+    }
+    if (expectedPublicKey) {
+      return candidate.device.publicKey === expectedPublicKey;
+    }
+    return true;
+  }
+
   private trustKeyFor(peer: PeerSummary): string {
     return this.provenIdentity(peer) ?? peer.device?.publicKey;
   }
@@ -3073,7 +3509,15 @@ export class WarpClient {
       this.connectionNotice = 'A device entry failed verification and was ignored. Someone may be tampering with this network.';
     }
     this.peers = nextPeers;
-    this.continuity.onPeersChanged(nextPeers.map((p) => ({ peerId: p.peerId, publicKey: p.device.publicKey })));
+    this.continuity.onPeersChanged(
+      nextPeers.map((p) => ({
+        peerId: p.peerId,
+        publicKey: p.device.publicKey,
+        deviceId: p.device.deviceId,
+        identityKey: this.provenIdentity(p) ?? undefined,
+        name: p.device.name,
+      })),
+    );
     for (const peer of nextPeers) {
       const key = this.identityCacheKey(peer);
       if (!key || this.identityChecks.has(key) || this.identityPending.has(key)) continue;
@@ -3089,7 +3533,7 @@ export class WarpClient {
       const activePeer = nextPeers.find((peer) => peer.peerId === acceptingPeerId);
       const peerLost =
         !activePeer ||
-        (sendState.peerPublicKey !== undefined && activePeer.device.publicKey !== sendState.peerPublicKey) ||
+        !this.matchesTransferPeerIdentity(activePeer, sendState.peerPublicKey, sendState.peerIdentityKey) ||
         (sendState.peerConnectedAt !== undefined && activePeer.connectedAt !== sendState.peerConnectedAt);
       if (peerLost) {
         if (sendState.acceptRejecter) {
@@ -3125,9 +3569,12 @@ export class WarpClient {
           }
           // Reconcile recent transfer history over E2EE so Android & MacBook always match
           this.syncHistoryWithPeer(peer).catch(() => {});
-          // Flush any clipboard text copied shortly before this peer woke up / reconnected
+          // Flush any clipboard text or image copied shortly before this peer woke up / reconnected
           if (this.pendingAutoClipboard && this.autoClipboardSync) {
             this.flushAutoClipboard().catch(() => {});
+          }
+          if (this.pendingAutoClipboardImage && this.autoClipboardSync) {
+            this.flushAutoClipboardImage().catch(() => {});
           }
           this.emit();
         })
@@ -3190,10 +3637,15 @@ export class WarpClient {
     }
     if ('transferId' in payload) {
       const transfer = this.transfers.find((item) => item.transferId === payload.transferId);
-      const boundKey = this.outgoingStates.get(payload.transferId)?.peerPublicKey ??
-        this.incomingStates.get(payload.transferId)?.peerPublicKey ??
-        (transfer && this.receiveOfferBindings.get(transfer)?.publicKey);
-      if (boundKey && boundKey !== peer.device.publicKey) throw new Error('Transfer peer identity changed.');
+      const binding = transfer ? this.receiveOfferBindings.get(transfer) : undefined;
+      const sendState = this.outgoingStates.get(payload.transferId);
+      const recvState = this.incomingStates.get(payload.transferId);
+      const boundPublicKey = sendState?.peerPublicKey ?? recvState?.peerPublicKey ?? binding?.publicKey;
+      const boundIdentityKey = sendState?.peerIdentityKey ?? recvState?.peerIdentityKey ?? binding?.identityKey;
+      if ((boundPublicKey || boundIdentityKey) &&
+          !this.matchesTransferPeerIdentity(peer, boundPublicKey, boundIdentityKey)) {
+        throw new Error('Transfer peer identity changed.');
+      }
     }
     const session = await this.ensureCryptoSession(peer);
     const envelope = await encryptControlPayload(session.aesKey, payload);
@@ -3280,7 +3732,9 @@ export class WarpClient {
         if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
           try {
             new Notification(`${appName}: ${title}`, { body });
-          } catch (_e) {}
+          } catch {
+            // ignore notification error
+          }
         }
         break;
       }
@@ -3317,19 +3771,35 @@ export class WarpClient {
           if (oldest) this.seenBeamIds.delete(oldest);
         }
         this.lastIncomingClip = { peerId: fromPeerId, text: dedupKey, ts: now };
-        // For text beams still track lastSyncedClipboardText to prevent echo
+        // Track hash/text to prevent feedback loops across host and peer clipboards
         if (hasText) this.lastSyncedClipboardText = payload.text!;
-        else if (hasImage) this.lastSyncedClipboardText = payload.imageDataUrl!.slice(0, 1024);
+        if (hasImage) {
+          this.lastSyncedClipboardText = payload.imageDataUrl!.slice(0, 1024);
+          this.lastSyncedClipboardImageHash = dedupKey;
+          this.clipboardImagesReceived += 1;
+        }
 
-        // Also update the host OS clipboard (e.g. macOS pbcopy) via loopback so
-        // pasting works immediately in any app even if this browser tab is unfocused.
-        // Only for text - image clipboard bridge is not yet supported on host.
-        if (this.opts.writeHostClipboard !== false && this.localDaemon.clipboardBridge && hasText) {
-          this.sendServer({ type: 'set-host-clipboard', text: payload.text! });
+        // Also update the host OS clipboard via loopback so pasting works immediately
+        // in any app even if this browser tab is unfocused.
+        if (this.opts.writeHostClipboard !== false && this.localDaemon.clipboardBridge) {
+          if (hasImage) {
+            this.sendServer({
+              type: 'set-host-clipboard',
+              imageDataUrl: payload.imageDataUrl,
+              imageName: payload.imageName,
+            });
+          } else if (hasText) {
+            this.sendServer({ type: 'set-host-clipboard', text: payload.text! });
+          }
         }
 
         const session = this.cryptoSessions.get(fromPeerId);
         const isImageContent = payload.contentType === 'image' || hasImage;
+        const rawContentType = isImageContent ? 'image' : (payload.contentType ?? 'text');
+        const safeContentType =
+          rawContentType === 'url' && (!hasText || !isSafeHttpUrl(payload.text!))
+            ? 'text'
+            : rawContentType;
         const item: ClipboardBeamItem = {
           beamId: payload.beamId,
           peerId: fromPeerId,
@@ -3338,7 +3808,7 @@ export class WarpClient {
           text: hasText ? payload.text! : (hasImage ? payload.imageDataUrl! : ''),
           imageDataUrl: hasImage ? payload.imageDataUrl : undefined,
           imageName: payload.imageName,
-          contentType: isImageContent ? 'image' : (payload.contentType ?? 'text'),
+          contentType: safeContentType,
           timestamp: payload.timestamp,
           sasCode: session?.sasCode ?? '··· ···',
         };
@@ -3361,6 +3831,9 @@ export class WarpClient {
         // previously could declare billions of chunks and exhaust memory
         // before the user ever saw (let alone accepted) the offer.
         if (!isValidFileManifest(payload.files, payload.totalBytes)) break;
+        if (peer && this.identityCacheKey(peer)) {
+          await this.checkPeerIdentity(peer);
+        }
         const existingReceive = this.incomingStates.get(payload.transferId);
         if (existingReceive) {
           const samePeer =
@@ -3371,7 +3844,10 @@ export class WarpClient {
             );
           const sameFiles = existingReceive.session.totalBytes === payload.totalBytes &&
             sameManifest(existingReceive.session.files, payload.files);
-          if (!samePeer || !sameFiles || existingReceive.peerPublicKey !== peer?.device.publicKey) break;
+          if (!samePeer || !sameFiles || !peer ||
+              !this.matchesTransferPeerIdentity(peer, existingReceive.peerPublicKey, existingReceive.peerIdentityKey)) break;
+          existingReceive.peerPublicKey = peer.device.publicKey;
+          existingReceive.peerIdentityKey = this.provenIdentity(peer) ?? existingReceive.peerIdentityKey;
           existingReceive.session.peerId = fromPeerId;
           if (peer) {
             existingReceive.session.peerDeviceId = peer.device.deviceId;
@@ -3388,7 +3864,8 @@ export class WarpClient {
               const resume = await this.getReceiveResume(existingReceive);
               if (this.incomingStates.get(payload.transferId) !== existingReceive ||
                   existingReceive.session.status !== 'connecting' || this.ws !== connection ||
-                  !this.peers.some((current) => current.peerId === fromPeerId && current.device.publicKey === existingReceive.peerPublicKey)) break;
+                  !this.peers.some((current) => current.peerId === fromPeerId &&
+                    this.matchesTransferPeerIdentity(current, existingReceive.peerPublicKey, existingReceive.peerIdentityKey))) break;
               existingReceive.session.status = 'transferring';
               this.emit();
               await this.sendControlMessage(
@@ -3420,7 +3897,8 @@ export class WarpClient {
         );
         if (terminalReceive && isTerminalTransferStatus(terminalReceive.status)) {
           const binding = this.receiveOfferBindings.get(terminalReceive);
-          if (!binding || binding.publicKey !== peer?.device.publicKey ||
+          if (!binding || !peer ||
+              !this.matchesTransferPeerIdentity(peer, binding.publicKey, binding.identityKey) ||
               binding.totalBytes !== payload.totalBytes || !sameManifest(binding.files, payload.files)) break;
           if (terminalReceive.status === 'completed') {
             const resumeFromChunks = Object.fromEntries(
@@ -3477,9 +3955,7 @@ export class WarpClient {
 
         const recvState: InternalReceiveState = {
           session: view,
-          fileChunks: payload.files.map((f) =>
-            Array.from({ length: f.totalChunks }, () => undefined)
-          ),
+          fileChunks: payload.files.map(() => []),
           receivedChunkCounts: payload.files.map(() => 0),
           nextContiguousChunks: payload.files.map(() => 0),
           lastAckedChunks: payload.files.map(() => -1),
@@ -3489,13 +3965,16 @@ export class WarpClient {
           fileCompletePayloads: new Map(),
           finalizedFiles: new Set(),
           peerPublicKey: peer?.device.publicKey,
+          peerIdentityKey: peer ? this.provenIdentity(peer) : undefined,
           transferCompleteReceived: false,
           finalizeChain: Promise.resolve(),
+          inFlightChunks: new Set(),
         };
 
         if (peer) this.receiveOfferBindings.set(view, {
           publicKey: peer.device.publicKey,
-          files: payload.files.map(({ previewDataUrl: _preview, ...file }) => ({ ...file })),
+          identityKey: this.provenIdentity(peer),
+          files: payload.files.map(stripPreviewDataUrl),
           totalBytes: payload.totalBytes,
         });
         this.incomingStates.set(payload.transferId, recvState);
@@ -3665,7 +4144,10 @@ export class WarpClient {
             (transfer) => transfer.transferId === payload.transferId && transfer.direction === 'incoming',
           );
           const binding = terminalReceive && this.receiveOfferBindings.get(terminalReceive);
-          const samePeer = binding && binding.publicKey === peer?.device.publicKey;
+          if (peer && binding && this.identityCacheKey(peer)) {
+            await this.checkPeerIdentity(peer);
+          }
+          const samePeer = binding && peer && this.matchesTransferPeerIdentity(peer, binding.publicKey, binding.identityKey);
           if (terminalReceive && samePeer && isTerminalTransferStatus(terminalReceive.status) &&
               terminalReceive.status !== 'declined' && terminalReceive.status !== 'cancelled') {
             await this.sendControlMessage(
@@ -3687,6 +4169,7 @@ export class WarpClient {
         recvState.transferCompleteReceived = true;
         if (!recvState.fallbackTimer) {
           recvState.fallbackTimer = setTimeout(() => {
+            this.fallbackTimerFires++;
             this.scheduleReceiveFinalization(payload.transferId, true).catch(() => {});
           }, 4_000);
         }
@@ -3796,7 +4279,14 @@ export class WarpClient {
     const recvState = this.incomingStates.get(transferId);
     if (!recvState) return;
 
+    if (recvState.inFlightChunks.size > 0) {
+      await Promise.allSettled([...recvState.inFlightChunks]);
+      if (this.incomingStates.get(transferId) !== recvState) return;
+    }
+
     const totalFiles = recvState.session.files.length;
+    const finalizeStartMs = Date.now();
+    let finalizedAnyFile = false;
     let hadDiskError = false;
     for (let fileIndex = 0; fileIndex < totalFiles; fileIndex++) {
       if (recvState.finalizedFiles.has(fileIndex)) continue;
@@ -3810,26 +4300,39 @@ export class WarpClient {
         if (forceFallback) {
           hadDiskError = true;
           recvState.session.errorMessage = `Missing SHA-256 digest for ${meta.name}. The file was not saved.`;
-        }
-        continue;
-      }
-
-      const allChunksArrived =
-        meta.size === 0 || recvState.receivedChunkCounts[fileIndex] >= meta.totalChunks;
-      if (!allChunksArrived) {
-        // A lost file-complete message may justify a fallback attempt, but
-        // never invent missing chunks: that used to save a truncated video.
-        if (forceFallback) {
-          hadDiskError = true;
-          recvState.session.errorMessage = `Transfer incomplete: ${meta.name} is missing chunks.`;
+          this.recordTransferError(transferId, 'finalize-missing-sha256', recvState.session.errorMessage);
         }
         continue;
       }
 
       const diskReceiver = recvState.diskReceivers?.get(fileIndex);
       const fsReceiver = recvState.fileSystemReceivers?.get(fileIndex);
-      if (diskReceiver || fsReceiver) {
-        const receiver = diskReceiver ?? fsReceiver!;
+      const streamReceiver = diskReceiver ?? fsReceiver;
+      if (streamReceiver) {
+        // Wait for any active or queued disk/FSA chunk writes to drain before
+        // deciding whether all chunks arrived or evaluating forceFallback.
+        await streamReceiver.waitIdle();
+        await Promise.resolve();
+        if (this.incomingStates.get(transferId) !== recvState) return;
+      }
+
+      const allChunksArrived =
+        meta.size === 0 ||
+        recvState.receivedChunkCounts[fileIndex] >= meta.totalChunks ||
+        (streamReceiver ? streamReceiver.getStoredCount() >= meta.totalChunks : false);
+      if (!allChunksArrived) {
+        // A lost file-complete message may justify a fallback attempt, but
+        // never invent missing chunks: that used to save a truncated video.
+        if (forceFallback) {
+          hadDiskError = true;
+          recvState.session.errorMessage = `Transfer incomplete: ${meta.name} is missing chunks.`;
+          this.recordTransferError(transferId, 'finalize-incomplete', recvState.session.errorMessage);
+        }
+        continue;
+      }
+
+      if (streamReceiver) {
+        const receiver = streamReceiver;
         // Daemon publication and ordered FSA writes verify before commit.
         // Out-of-order FSA writes use a bounded readback hash after close and
         // remove a mismatched file; existing files are never overwritten.
@@ -3847,6 +4350,7 @@ export class WarpClient {
             hadDiskError = true;
             recvState.session.errorMessage =
               receiverError || 'The receiver could not finalize this file.';
+            this.recordTransferError(transferId, 'finalize-disk', recvState.session.errorMessage);
           }
           continue;
         }
@@ -3859,6 +4363,7 @@ export class WarpClient {
           hadDiskError = true;
           recvState.session.errorMessage =
             `SHA-256 verification failed for ${meta.name}. The file was not saved.`;
+          this.recordTransferError(transferId, 'finalize-sha256', recvState.session.errorMessage);
           continue;
         }
         recvState.session.receivedFiles.push({
@@ -3876,6 +4381,7 @@ export class WarpClient {
         });
         recvState.session.receivedFiles.sort((a, b) => a.index - b.index);
         recvState.finalizedFiles.add(fileIndex);
+        finalizedAnyFile = true;
         this.emit();
         continue;
       }
@@ -3898,6 +4404,7 @@ export class WarpClient {
         hadDiskError = true;
         recvState.session.errorMessage =
           `SHA-256 verification failed for ${meta.name}. The file was not saved.`;
+        this.recordTransferError(transferId, 'finalize-sha256', recvState.session.errorMessage);
         continue;
       }
 
@@ -3956,7 +4463,11 @@ export class WarpClient {
       });
       recvState.session.receivedFiles.sort((a, b) => a.index - b.index);
       recvState.finalizedFiles.add(fileIndex);
+      finalizedAnyFile = true;
       this.emit();
+    }
+    if (finalizedAnyFile) {
+      this.lastFinalizeDurationMs = Math.max(0, Date.now() - finalizeStartMs);
     }
 
     if (recvState.transferCompleteReceived && this.incomingStates.get(transferId) === recvState) {
@@ -4025,7 +4536,8 @@ export class WarpClient {
     const decoded = decodeEncryptedChunkFrame(innerPayload);
     const recvState = this.incomingStates.get(decoded.transferId);
     if (!recvState || recvState.session.peerId !== fromPeerId ||
-        !this.peers.some((peer) => peer.peerId === fromPeerId && peer.device.publicKey === recvState.peerPublicKey)) return;
+        !this.peers.some((peer) => peer.peerId === fromPeerId &&
+          this.matchesTransferPeerIdentity(peer, recvState.peerPublicKey, recvState.peerIdentityKey))) return;
     // SECURITY: nothing is decrypted or stored before the user accepts the
     // transfer — a nearby stranger could otherwise fill device memory with
     // unsolicited "chunks" for an offer that is still awaiting consent.
@@ -4038,136 +4550,154 @@ export class WarpClient {
 
     const declaredSize = meta0.size === 0 ? 0 : Math.min(meta0.chunkSize, meta0.size - decoded.chunkIndex * meta0.chunkSize);
     if (decoded.ciphertext.byteLength !== declaredSize + 16) return;
-    const plainBytes = await decryptBinaryChunk(
-      cryptoSession.aesKey,
-      decoded.iv,
-      decoded.ciphertext
-    );
 
-    if (this.incomingStates.get(decoded.transferId) !== recvState || recvState.session.status !== 'transferring' ||
-        this.ws !== connection || !this.peers.some((peer) => peer.peerId === fromPeerId && peer.device.publicKey === recvState.peerPublicKey)) return;
-    // Each chunk must be exactly the size the manifest promises for its slot,
-    // sized by the sender's declared chunkSize (validated in the manifest).
-    const declaredChunkSize =
-      typeof meta0.chunkSize === 'number' && meta0.chunkSize > 0 ? meta0.chunkSize : CHUNK_SIZE;
-    const expectedSize =
-      meta0.size === 0
-        ? 0
-        : Math.min(declaredChunkSize, meta0.size - decoded.chunkIndex * declaredChunkSize);
-    if (plainBytes.byteLength !== expectedSize) return;
+    let shouldFinalize = false;
+    const task = (async () => {
+      const plainBytes = await decryptBinaryChunk(
+        cryptoSession.aesKey,
+        decoded.iv,
+        decoded.ciphertext
+      );
 
-    recvState.session.transport = transport;
+      if (this.incomingStates.get(decoded.transferId) !== recvState || recvState.session.status !== 'transferring' ||
+          this.ws !== connection || !this.peers.some((peer) => peer.peerId === fromPeerId &&
+            this.matchesTransferPeerIdentity(peer, recvState.peerPublicKey, recvState.peerIdentityKey))) return;
+      // Each chunk must be exactly the size the manifest promises for its slot,
+      // sized by the sender's declared chunkSize (validated in the manifest).
+      const declaredChunkSize =
+        typeof meta0.chunkSize === 'number' && meta0.chunkSize > 0 ? meta0.chunkSize : CHUNK_SIZE;
+      const expectedSize =
+        meta0.size === 0
+          ? 0
+          : Math.min(declaredChunkSize, meta0.size - decoded.chunkIndex * declaredChunkSize);
+      if (plainBytes.byteLength !== expectedSize) return;
 
-    const fileIndex = decoded.fileIndex;
-    const chunkIndex = decoded.chunkIndex;
-    const diskReceiver = recvState.diskReceivers?.get(fileIndex);
-    const fsReceiver = recvState.fileSystemReceivers?.get(fileIndex);
-    const streamReceiver = diskReceiver ?? fsReceiver;
-    if (streamReceiver) {
-      const alreadyQueued = streamReceiver.hasReceived(chunkIndex);
-      if (!alreadyQueued) streamReceiver.push(chunkIndex, plainBytes);
-      // Queueing is not receiving: only durable bytes may advance progress or
-      // release the sender's sliding window. This is the backpressure signal
-      // that keeps a slow disk from accumulating an unbounded invisible queue.
-      const stored = await streamReceiver.waitUntilStored(chunkIndex);
-      if (!stored || this.incomingStates.get(decoded.transferId) !== recvState) return;
-      if (!alreadyQueued) {
-        recvState.receivedChunkCounts[fileIndex]++;
-        recvState.bytesReceived += plainBytes.byteLength;
-      }
-    } else {
-      const fileArr = recvState.fileChunks[fileIndex];
-      if (!fileArr) return;
-      if (!fileArr[chunkIndex]) {
-        fileArr[chunkIndex] = plainBytes;
-        recvState.receivedChunkCounts[fileIndex]++;
-        recvState.bytesReceived += plainBytes.byteLength;
-      }
-    }
+      recvState.session.transport = transport;
 
-    const meta = recvState.session.files[fileIndex];
-    if (!meta) return;
-    recvState.session.transferredBytes = recvState.bytesReceived;
-
-    const isChunkStored = (index: number): boolean =>
-      streamReceiver
-        ? streamReceiver.hasStored(index)
-        : Boolean(recvState.fileChunks[fileIndex]?.[index]);
-    let nextContiguous = recvState.nextContiguousChunks[fileIndex];
-    while (nextContiguous < meta.totalChunks && isChunkStored(nextContiguous)) {
-      nextContiguous++;
-    }
-    recvState.nextContiguousChunks[fileIndex] = nextContiguous;
-    const contiguousAck = nextContiguous - 1;
-    const lastAck = recvState.lastAckedChunks[fileIndex];
-    const ackNow = Date.now();
-    const ackTimes = recvState.lastAckTimes ??= recvState.session.files.map(() => 0);
-    const ackInterval = ackIntervalFor(meta.chunkSize);
-    if (
-      contiguousAck > lastAck &&
-      (contiguousAck - lastAck >= ackInterval || nextContiguous === meta.totalChunks ||
-        ackNow - ackTimes[fileIndex] >= ACK_MAX_DELAY_MS)
-    ) {
-      recvState.lastAckedChunks[fileIndex] = contiguousAck;
-      ackTimes[fileIndex] = ackNow;
-      // ACK only a contiguous durable prefix. Decrypts and writes can finish
-      // out of order, so acknowledging an arbitrary completed chunk would
-      // incorrectly release earlier chunks that are still in flight.
-      const binaryAck =
-        transport === 'ws-relay' && this.ws?.readyState === WebSocket.OPEN
-          ? encodeBinarySackFrame({
-              transferId: decoded.transferId,
-              fileIndex,
-              chunkIndex: contiguousAck,
-            })
-          : null;
-      if (binaryAck && this.ws?.readyState === WebSocket.OPEN) {
-        try {
-          this.ws.send(wrapRoutedRelayFrame(fromPeerId, this.peerId, binaryAck));
-        } catch {
-          // Fall through cleanly if the socket closed concurrently
+      const fileIndex = decoded.fileIndex;
+      const chunkIndex = decoded.chunkIndex;
+      const diskReceiver = recvState.diskReceivers?.get(fileIndex);
+      const fsReceiver = recvState.fileSystemReceivers?.get(fileIndex);
+      const streamReceiver = diskReceiver ?? fsReceiver;
+      if (streamReceiver) {
+        const alreadyQueued = streamReceiver.hasReceived(chunkIndex);
+        if (!alreadyQueued) streamReceiver.push(chunkIndex, plainBytes);
+        // Queueing is not receiving: only durable bytes may advance progress or
+        // release the sender's sliding window. This is the backpressure signal
+        // that keeps a slow disk from accumulating an unbounded invisible queue.
+        const stored = await streamReceiver.waitUntilStored(chunkIndex);
+        if (!stored || this.incomingStates.get(decoded.transferId) !== recvState) return;
+        if (!alreadyQueued) {
+          recvState.receivedChunkCounts[fileIndex]++;
+          recvState.bytesReceived += plainBytes.byteLength;
         }
       } else {
-        void this.sendControlMessage(
-          fromPeerId,
-          {
-            kind: 'chunk-ack',
-            transferId: decoded.transferId,
-            fileIndex,
-            ackedChunkIndex: contiguousAck,
-            bytesReceivedTotal: recvState.bytesReceived,
-          },
-          true
-        ).catch(() => {});
+        let fileArr = recvState.fileChunks[fileIndex];
+        if (!fileArr) {
+          fileArr = [];
+          recvState.fileChunks[fileIndex] = fileArr;
+        }
+        if (!fileArr[chunkIndex]) {
+          fileArr[chunkIndex] = plainBytes;
+          recvState.receivedChunkCounts[fileIndex]++;
+          recvState.bytesReceived += plainBytes.byteLength;
+        }
       }
-    }
 
-    const fileStored = recvState.receivedChunkCounts[fileIndex] >= meta.totalChunks;
-    const now = Date.now();
-    const elapsed = (now - recvState.lastSpeedTs) / 1000;
-    // Include the last chunk so batches of small files do not finish while the
-    // receiver still displays 0 B/s merely because no 150 ms tick elapsed.
-    if (elapsed >= 0.15 || fileStored) {
-      const instant =
-        (recvState.bytesReceived - recvState.lastSpeedBytes) / Math.max(elapsed, 0.001);
-      recvState.session.speedBytesPerSec =
-        recvState.session.speedBytesPerSec === 0
-          ? instant
-          : recvState.session.speedBytesPerSec * 0.65 + instant * 0.35;
-      const remaining = Math.max(0, recvState.session.totalBytes - recvState.bytesReceived);
-      recvState.session.etaSeconds =
-        recvState.session.speedBytesPerSec > 1024
-          ? Math.ceil(remaining / recvState.session.speedBytesPerSec)
-          : null;
-      recvState.lastSpeedTs = now;
-      recvState.lastSpeedBytes = recvState.bytesReceived;
-      this.emit();
-    }
+      const meta = recvState.session.files[fileIndex];
+      if (!meta) return;
+      recvState.session.transferredBytes = recvState.bytesReceived;
 
-    if (
-      fileStored &&
-      (recvState.fileCompletePayloads.has(fileIndex) || recvState.transferCompleteReceived)
-    ) {
+      const isChunkStored = (index: number): boolean =>
+        streamReceiver
+          ? streamReceiver.hasStored(index)
+          : Boolean(recvState.fileChunks[fileIndex]?.[index]);
+      let nextContiguous = recvState.nextContiguousChunks[fileIndex];
+      while (nextContiguous < meta.totalChunks && isChunkStored(nextContiguous)) {
+        nextContiguous++;
+      }
+      recvState.nextContiguousChunks[fileIndex] = nextContiguous;
+      const contiguousAck = nextContiguous - 1;
+      const lastAck = recvState.lastAckedChunks[fileIndex];
+      const ackNow = Date.now();
+      const ackTimes = recvState.lastAckTimes ??= recvState.session.files.map(() => 0);
+      const ackInterval = ackIntervalFor(meta.chunkSize);
+      if (
+        contiguousAck > lastAck &&
+        (contiguousAck - lastAck >= ackInterval || nextContiguous === meta.totalChunks ||
+          ackNow - ackTimes[fileIndex] >= ACK_MAX_DELAY_MS)
+      ) {
+        recvState.lastAckedChunks[fileIndex] = contiguousAck;
+        ackTimes[fileIndex] = ackNow;
+        // ACK only a contiguous durable prefix. Decrypts and writes can finish
+        // out of order, so acknowledging an arbitrary completed chunk would
+        // incorrectly release earlier chunks that are still in flight.
+        const binaryAck =
+          transport === 'ws-relay' && this.ws?.readyState === WebSocket.OPEN
+            ? encodeBinarySackFrame({
+                transferId: decoded.transferId,
+                fileIndex,
+                chunkIndex: contiguousAck,
+              })
+            : null;
+        if (binaryAck && this.ws?.readyState === WebSocket.OPEN) {
+          try {
+            this.ws.send(wrapRoutedRelayFrame(fromPeerId, this.peerId, binaryAck));
+          } catch {
+            // Fall through cleanly if the socket closed concurrently
+          }
+        } else {
+          void this.sendControlMessage(
+            fromPeerId,
+            {
+              kind: 'chunk-ack',
+              transferId: decoded.transferId,
+              fileIndex,
+              ackedChunkIndex: contiguousAck,
+              bytesReceivedTotal: recvState.bytesReceived,
+            },
+            true
+          ).catch(() => {});
+        }
+      }
+
+      const fileStored = recvState.receivedChunkCounts[fileIndex] >= meta.totalChunks;
+      const now = Date.now();
+      const elapsed = (now - recvState.lastSpeedTs) / 1000;
+      // Include the last chunk so batches of small files do not finish while the
+      // receiver still displays 0 B/s merely because no 150 ms tick elapsed.
+      if (elapsed >= 0.15 || fileStored) {
+        const instant =
+          (recvState.bytesReceived - recvState.lastSpeedBytes) / Math.max(elapsed, 0.001);
+        recvState.session.speedBytesPerSec =
+          recvState.session.speedBytesPerSec === 0
+            ? instant
+            : recvState.session.speedBytesPerSec * 0.65 + instant * 0.35;
+        const remaining = Math.max(0, recvState.session.totalBytes - recvState.bytesReceived);
+        recvState.session.etaSeconds =
+          recvState.session.speedBytesPerSec > 1024
+            ? Math.ceil(remaining / recvState.session.speedBytesPerSec)
+            : null;
+        recvState.lastSpeedTs = now;
+        recvState.lastSpeedBytes = recvState.bytesReceived;
+        this.emit();
+      }
+
+      if (
+        fileStored &&
+        (recvState.fileCompletePayloads.has(fileIndex) || recvState.transferCompleteReceived)
+      ) {
+        shouldFinalize = true;
+      }
+    })();
+
+    recvState.inFlightChunks.add(task);
+    try {
+      await task;
+    } finally {
+      recvState.inFlightChunks.delete(task);
+    }
+    if (shouldFinalize) {
       await this.scheduleReceiveFinalization(decoded.transferId, false);
     }
   }
@@ -4192,7 +4722,7 @@ export class WarpClient {
     }
 
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      iceServers: this.opts.iceServers ?? [],
     });
 
     pc.onicecandidate = (ev) => {
@@ -4218,6 +4748,17 @@ export class WarpClient {
   }
 
   private attachDataChannel(peerId: string, dc: RTCDataChannel): void {
+    const existing = this.rtcChannels.get(peerId);
+    if (existing && existing !== dc) {
+      existing.onopen = null;
+      existing.onclose = null;
+      existing.onmessage = null;
+      try {
+        existing.close();
+      } catch {
+        // ignore close error on replaced DataChannel
+      }
+    }
     dc.binaryType = 'arraybuffer';
     dc.bufferedAmountLowThreshold = BUFFER_LOW_WATER;
     this.rtcChannels.set(peerId, dc);
@@ -4231,7 +4772,9 @@ export class WarpClient {
     dc.onmessage = (ev) => {
       if (ev.data instanceof ArrayBuffer) {
         this.handleIncomingEncryptedChunk(peerId, new Uint8Array(ev.data), 'webrtc').catch(
-          () => {}
+          (err: unknown) => {
+            this.recordClientError('rtc-chunk', err);
+          }
         );
       }
     };
@@ -4308,18 +4851,27 @@ export class WarpClient {
   }
 
   private waitForRtcChannel(peerId: string, timeoutMs: number): Promise<boolean> {
-    if (this.isRtcOpen(peerId)) return Promise.resolve(true);
+    if (this.isRtcOpen(peerId) || this.destroyed) return Promise.resolve(this.isRtcOpen(peerId));
     return new Promise<boolean>((resolve) => {
       const start = Date.now();
+      let settled = false;
+      const finish = (opened: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(timer);
+        this.rtcWaitTimers.delete(timer);
+        resolve(opened);
+      };
       const timer = setInterval(() => {
-        if (this.isRtcOpen(peerId)) {
-          clearInterval(timer);
-          resolve(true);
+        if (this.destroyed) {
+          finish(false);
+        } else if (this.isRtcOpen(peerId)) {
+          finish(true);
         } else if (Date.now() - start >= timeoutMs) {
-          clearInterval(timer);
-          resolve(false);
+          finish(false);
         }
       }, 40);
+      this.rtcWaitTimers.set(timer, () => finish(false));
     });
   }
 
@@ -4368,8 +4920,17 @@ export class WarpClient {
       if (this.ws.readyState !== WebSocket.OPEN) {
         throw new TransferConnectionInterruptedError('Signaling relay socket disconnected; resuming transfer.');
       }
-      const rawSocket = (this.ws as any)?._socket;
-      if (rawSocket && typeof rawSocket.once === 'function') {
+      const rawSocket = (
+        this.ws as unknown as {
+          _socket?: {
+            once?: (event: string, listener: () => void) => void;
+            removeListener?: (event: string, listener: () => void) => void;
+          };
+        }
+      )?._socket;
+      const sock = rawSocket;
+      const onceFn = sock?.once;
+      if (sock && typeof onceFn === 'function') {
         await new Promise<void>((resolve) => {
           let timer: ReturnType<typeof setTimeout> | null = null;
           const onDrain = () => {
@@ -4377,12 +4938,13 @@ export class WarpClient {
             resolve();
           };
           timer = setTimeout(() => {
-            if (typeof rawSocket.removeListener === 'function') {
-              rawSocket.removeListener('drain', onDrain);
+            const removeFn = sock.removeListener;
+            if (typeof removeFn === 'function') {
+              removeFn.call(sock, 'drain', onDrain);
             }
             resolve();
           }, 10);
-          rawSocket.once('drain', onDrain);
+          onceFn.call(sock, 'drain', onDrain);
         });
       } else {
         // Fast poll in browser environments where WebSocket exposes no drain event
@@ -4437,7 +4999,7 @@ export class WarpClient {
       direction: t.direction,
       status: t.status as HistoricalTransferSummary['status'],
       transport: t.transport,
-      files: t.files.map(({ previewDataUrl: _preview, ...rest }) => rest),
+      files: t.files.map(stripPreviewDataUrl),
       totalBytes: t.totalBytes,
       transferredBytes: t.transferredBytes,
       startedAt: t.startedAt,
@@ -4578,7 +5140,7 @@ export class WarpClient {
           .slice(0, 50)
           .map((t) => ({
             ...t,
-            files: t.files.map(({ previewDataUrl: _preview, ...rest }) => rest),
+            files: t.files.map(stripPreviewDataUrl),
             receivedFiles: [],
           }));
         storage.setItem(

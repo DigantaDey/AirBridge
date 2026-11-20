@@ -64,14 +64,14 @@ Install the signed Android release from the official release channel, then pair 
 * **Batch Operations**: Send up to 100 mixed-type files per transfer session. Image transfers automatically generate WebP previews for immediate inspection.
 
 ### 📋 Background Universal Clipboard Sync
-* **Bidirectional Text & Manual Images**: Text syncs with paired devices when the OS permits clipboard capture. Image beams are supported in the UI, and incoming images can be placed on Android’s system clipboard. Desktop OS clipboard automation currently handles text, not image capture.
+* **Bidirectional Text & Photos**: Text and images sync between paired devices over end-to-end encrypted sessions. On macOS, native `NSPasteboard` inspection captures copied photos cleanly with SHA-256 echo suppression instead of sending binary noise, and incoming images can be placed on both Android's and macOS's system clipboard.
 * **Headless Background Peer**: Desktop daemons maintain encrypted ECDH sessions in the background so clipboard syncing works even when browser tabs are closed.
 * **Native Android Foreground Service**: Owns Kotlin encryption, WebSockets, URI sources, disk writes, incoming clipboard delivery, and transfer notifications independently of the Activity/WebView. Active transfers hold CPU/Wi-Fi performance locks; no file payloads cross the JavaScript bridge.
-* **Honest Clipboard Fallback**: Android 10+ restricts background clipboard reads. Optional Accessibility capture is best-effort, **not** a permission bypass. Use **Share → AirBridge** or selected text → **AirBridge** to send from another app without reopening the AirBridge screen.
+* **Honest Clipboard Fallback**: Android 10+ restricts background clipboard reads. AirBridge does not use Accessibility Services; use **Share → AirBridge**, **Process Text → AirBridge**, the Quick Settings tile, or **Paste** in AirBridge to send from another app reliably.
 
 ### 🔒 Zero-Trust End-to-End Encryption (E2EE)
 * **Ephemeral ECDH P-256 Key Exchange**: Devices generate fresh keypairs per session to establish shared secrets.
-* **AES-256-GCM Payload Encryption**: Control messages and 256 KiB binary file frames are encrypted on the sender before leaving the device and decrypted only after consent on the receiver.
+* **AES-256-GCM Payload Encryption**: Control messages and 1 MiB binary file frames (default; 16 KiB–1 MiB supported) are encrypted on the sender before leaving the device and decrypted only after consent on the receiver.
 * **6-Digit Verification Codes**: SAS (Short Authentication String) derivation lets users visually verify key integrity and prevent man-in-the-middle attacks.
 
 ### 🛰️ Pairing & Connectivity Anywhere
@@ -83,8 +83,8 @@ Install the signed Android release from the official release channel, then pair 
 See [Pairing and connectivity](docs/pairing-and-connectivity.md) for the protocols, the threat model and the manual test plan.
 
 ### 📞 Your Phone on Your Computer
-* **Contacts**: Search and browse the phone's contacts from the computer, call or save any of them (vCard), and send contacts in either direction. Received contacts open Android's own editor, so AirBridge never needs permission to change your address book.
-* **Calls**: See who's calling, then answer, decline or hang up from the computer, or place calls with the dialer. Call audio stays on the phone or its headset: Android does not let apps carry call audio to a computer. Hanging up needs Android 9 or later.
+* **Contacts**: Search and browse the phone's contacts from the computer, call or save any of them (vCard), and send contacts in either direction. Contacts synced to the desktop stay saved locally across modal closes and reloads until you remove them or the paired device disconnects. Received contacts open Android's own editor, so AirBridge never needs permission to change your address book.
+* **Calls**: See who's calling, answer, decline or hang up from the computer, or place calls with the dialer. When you opt into **Use Mac Audio** (with microphone permission on Android and Mac), AirBridge bridges two-way end-to-end encrypted 16 kHz call audio between your computer and Android (speakerphone-assisted on standard Android builds); otherwise audio stays on your phone or headset. Hanging up needs Android 9 or later.
 * **Screen casting**: View the phone's screen live on the computer through a low-latency H.264 stream. Computers can also share a screen or window with each other through the browser's picker. Video and any permitted app audio are end-to-end encrypted and adapt to the link. App audio is off by default and must be enabled for each Android session; Android and the source app control availability, so protected/opted-out content is never bypassed. Every session must be approved on the device being shared and can be stopped from either side.
 * **Everywhere on the desktop**: Contacts, Calls and Screen buttons in the app's top bar, a **Phone** menu and menu-bar entries in the macOS app, and **Contacts / Calls / Screen Sharing** actions on the Linux app launcher (GNOME, KDE, …). The version is always visible: the top bar, the menu-bar menu, **About AirBridge**, and the launcher.
 * **You stay in control**: Each feature has its own switch and permission in the Android app (**Settings → Phone on your computer**). Only paired, verified devices can use them.
@@ -125,11 +125,11 @@ AirBridge operates over a dual-layer network pipeline:
 1. **Signaling & Relay**: WebSockets at `/ws` carry JSON control messages and binary payload frames (`0x01` encrypted chunk, `0x02` routed relay frame). WebRTC DataChannels are established whenever P2P ICE candidate gathering succeeds.
 2. **Native Android Ownership**: The APK bundles its own UI; a metadata-only bridge attaches it to the service-owned Kotlin engine. File bytes go from ContentResolver streams to encrypted sockets, or from verified private staging to Downloads/AirBridge. A bounded loopback proxy serves desktop API requests only. Android pins the desktop’s local TLS CA on first use, validates subsequent chains/hostnames, and never silently downgrades HTTPS to HTTP. Compare the E2EE verification code on first contact. Explicit `http://` links remain available for intentionally plaintext servers.
 3. **Chunked Pipeline Tuning**:
-   - **Chunk Size**: 256 KiB default (supports 16 KiB to 1 MiB bounds).
+   - **Chunk Size**: 1 MiB default (supports 16 KiB to 1 MiB bounds).
    - **Pipelining**: Browser senders pipeline up to 8 read/encrypt operations; Kotlin overlaps socket reads, ordered decryption/storage, and a separate network writer using bounded queues. Neither inserts a fixed-rate sleep between chunks.
-   - **Flow Control**: Browser socket watermarks are 4 MiB / 1 MiB; Kotlin’s incoming/outgoing queues are each byte-bounded at 4 MiB and 128 items (one oversized clipboard envelope may be admitted alone). Socket buffers are requested before connecting so TCP window scaling can use the available device/kernel capacity.
-   - **ACK Windows**: 64 in-flight chunks, ACK every 8 contiguous stored chunks or 200 ms on progress; a 60-second no-progress stall is timed only while the sender is waiting. The sender waits for receiver SHA-256/publication confirmation before declaring success.
-   - **Safety Limits**: Up to 100 files and 262,144 chunks in a manifest (64 GiB total at the default 256 KiB chunk size). These are allocation/validation limits, not a bandwidth cap. Frames/messages are bounded at 16 MiB; clipboard text at 256,000 characters and image data at about 5 MiB binary.
+   - **Flow Control**: Browser socket watermarks are 8 MiB / 2 MiB; Kotlin’s incoming queue is byte-bounded at 16 MiB and 128 items and outgoing queue at 8 MiB and 256 items (one oversized clipboard envelope may be admitted alone). Socket buffers are requested before connecting so TCP window scaling can use the available device/kernel capacity.
+   - **ACK Windows**: 32 MiB window byte budget (32–128 in-flight chunks; 32 at 1 MiB), ACK every 2 MiB (2–16 chunks; 2 at 1 MiB) or 150 ms on progress; a 60-second no-progress stall is timed only while the sender is waiting. The sender waits for receiver SHA-256/publication confirmation before declaring success.
+   - **Safety Limits**: Up to 100 files and 262,144 chunks in a manifest (256 GiB total at the default 1 MiB chunk size). These are allocation/validation limits, not a bandwidth cap. Frames/messages are bounded at 16 MiB; clipboard text at 256,000 characters and image data at about 5 MiB binary.
 
 ---
 
@@ -202,6 +202,9 @@ npm test
 
 # Run TypeScript typechecking
 npm run typecheck
+
+# Run JS/TS and shell linters
+npm run lint
 
 # Build client and server bundles
 npm run build

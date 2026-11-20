@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatBytes } from "../shared/protocol.js";
 import {
   loadOrCreateDeviceProfile,
@@ -136,11 +136,12 @@ export function App() {
       })
       .catch(() => {});
   }, []);
-  const openReceivedFolder = (savedPath?: string) => {
+  const [toast, setToast] = useState<ToastNotice | null>(null);
+  const openReceivedFolder = useCallback((savedPath?: string) => {
     clientRef.current?.openReceivedFolder(savedPath).catch((err: unknown) => {
-      showToast({ id: "open-folder", title: "Could not open folder", body: err instanceof Error ? err.message : "Opening folders is only available on the device running AirBridge." });
+      setToast({ id: "open-folder", title: "Could not open folder", body: err instanceof Error ? err.message : "Opening folders is only available on the device running AirBridge." });
     });
-  };
+  }, []);
   const saveReceivedFolder = async () => {
     const next = receivedFolderInput.trim();
     if (!next || !clientRef.current) return;
@@ -153,16 +154,109 @@ export function App() {
       showToast({ id: "folder-save-error", title: "Could not change folder", body: err instanceof Error ? err.message : "Invalid folder path." });
     } finally { setFolderSaving(false); }
   };
-  const [toast, setToast] = useState<ToastNotice | null>(null);
   // Contacts / Calls / Screen (top bar). The Android app has its own native UI for these.
   const [continuityTab, setContinuityTab] = useState<ContinuityTab | null>(null);
   const continuityEnabled = !hasNativeEngine();
+  const [pairingOpen, setPairingOpen] = useState(false);
+  const [downloadsOpen, setDownloadsOpen] = useState(false);
+  const [recentOpen, setRecentOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [connectionContinuity, setConnectionContinuity] = useState(getNativeConnectionContinuity);
+  const [clipboardOpen, setClipboardOpen] = useState(false);
+  const [clipboardPeerId, setClipboardPeerId] = useState<string | null>(null);
+  const [clipboardPrefill, setClipboardPrefill] = useState("");
+  const [dragging, setDragging] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  const continuityClient = useMemo(
+    () => ({
+      requestContacts: (peerId: string, options?: { query?: string; limit?: number }) => {
+        if (!clientRef.current) return Promise.reject(new Error("Transfer service is not connected yet."));
+        return clientRef.current.requestContacts(peerId, options);
+      },
+      shareContacts: (peerId: string, contacts: Parameters<AirBridgeClient["shareContacts"]>[1]) => {
+        if (!clientRef.current) return Promise.reject(new Error("Transfer service is not connected yet."));
+        return clientRef.current.shareContacts(peerId, contacts);
+      },
+      clearSharedContacts: () => {
+        clientRef.current?.clearSharedContacts();
+      },
+      removeSavedContact: (contactId: string) => {
+        return clientRef.current?.removeSavedContact(contactId) ?? false;
+      },
+      clearSavedContacts: (peerId?: string) => {
+        return clientRef.current?.clearSavedContacts(peerId) ?? 0;
+      },
+      answerCall: (peerId: string, callId: string) => {
+        if (!clientRef.current) return Promise.reject(new Error("Transfer service is not connected yet."));
+        return clientRef.current.answerCall(peerId, callId);
+      },
+      rejectCall: (peerId: string, callId: string) => {
+        if (!clientRef.current) return Promise.reject(new Error("Transfer service is not connected yet."));
+        return clientRef.current.rejectCall(peerId, callId);
+      },
+      hangUpCall: (peerId: string, callId: string) => {
+        if (!clientRef.current) return Promise.reject(new Error("Transfer service is not connected yet."));
+        return clientRef.current.hangUpCall(peerId, callId);
+      },
+      dialNumber: (peerId: string, number: string) => {
+        if (!clientRef.current) return Promise.reject(new Error("Transfer service is not connected yet."));
+        return clientRef.current.dialNumber(peerId, number);
+      },
+      startCallAudio: (peerId: string, callId: string) => {
+        if (!clientRef.current) return Promise.reject(new Error("Transfer service is not connected yet."));
+        return clientRef.current.startCallAudio(peerId, callId);
+      },
+      stopCallAudio: (peerId: string, callId: string) => {
+        return clientRef.current?.stopCallAudio(peerId, callId) ?? Promise.resolve();
+      },
+      setCallAudioMuted: (peerId: string, callId: string, muted: boolean) => {
+        return clientRef.current?.setCallAudioMuted(peerId, callId, muted) ?? Promise.resolve();
+      },
+      sendCallAudio: (peerId: string, callId: string, pcmS16le: Uint8Array, sampleRate: number, channels: number, frames: number, ptsMs: number) => {
+        return clientRef.current?.sendCallAudio(peerId, callId, pcmS16le, sampleRate, channels, frames, ptsMs) ?? Promise.resolve(false);
+      },
+      subscribeCallAudio: (callId: string, listener: Parameters<AirBridgeClient["subscribeCallAudio"]>[1]) => {
+        return clientRef.current?.subscribeCallAudio(callId, listener) ?? (() => {});
+      },
+      requestScreenShare: (peerId: string, options?: { maxWidth?: number; maxFps?: number }) => {
+        if (!clientRef.current) throw new Error("Transfer service is not connected yet.");
+        return clientRef.current.requestScreenShare(peerId, options);
+      },
+      acceptScreenShare: (sessionId: string, source: Parameters<AirBridgeClient["acceptScreenShare"]>[1]) => {
+        clientRef.current?.acceptScreenShare(sessionId, source);
+      },
+      declineScreenShare: (sessionId: string) => {
+        clientRef.current?.declineScreenShare(sessionId);
+      },
+      stopScreenShare: (sessionId: string) => {
+        clientRef.current?.stopScreenShare(sessionId);
+      },
+      requestScreenKeyframe: (sessionId: string, reason?: string) => {
+        clientRef.current?.requestScreenKeyframe(sessionId, reason);
+      },
+      recordScreenViewerStats: (stats: Parameters<AirBridgeClient["recordScreenViewerStats"]>[0]) => {
+        clientRef.current?.recordScreenViewerStats(stats);
+      },
+      subscribeScreenFrames: (sessionId: string, listener: Parameters<AirBridgeClient["subscribeScreenFrames"]>[1]) => {
+        return clientRef.current?.subscribeScreenFrames(sessionId, listener) ?? (() => {});
+      },
+      subscribeScreenVideo: (sessionId: string, listener: Parameters<AirBridgeClient["subscribeScreenVideo"]>[1]) => {
+        return clientRef.current?.subscribeScreenVideo(sessionId, listener) ?? (() => {});
+      },
+      subscribeScreenAudio: (sessionId: string, listener: Parameters<AirBridgeClient["subscribeScreenAudio"]>[1]) => {
+        return clientRef.current?.subscribeScreenAudio(sessionId, listener) ?? (() => {});
+      },
+    }),
+    [],
+  );
 
   useEffect(() => {
     // The Android shell reserves the real status/nav bar insets in a native
     // parent container and injects a shim; this class keeps CSS from doubling
     // them even before that shim runs.
     document.documentElement.classList.toggle("ab-native-shell", isNativeShell());
+    document.documentElement.classList.toggle("ab-mac-app", canRestartLocalService());
   }, []);
 
   useEffect(() => {
@@ -255,11 +349,18 @@ export function App() {
       });
     }
 
+    const canCaptureCallAudio =
+      !isNativeShell() &&
+      typeof navigator !== "undefined" &&
+      Boolean(navigator.mediaDevices?.getUserMedia) &&
+      typeof (window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext) === "function";
+
     const client = createAirBridgeClient({
       initialPairCode,
       // This computer can share its screen when the browser supports it; each
       // request still needs the user's approval and the browser's own picker.
       screenSourceAvailable: canCaptureScreen,
+      callAudioAvailable: canCaptureCallAudio,
       onIncomingContact: (item) => {
         const names = item.contacts.map((c) => c.name);
         showToast({
@@ -369,7 +470,11 @@ export function App() {
           if (canDownloadInBrowser) {
             // Small delay to let UI render then trigger download
             setTimeout(() => {
-              try { saveReceivedTransferFiles(tr); } catch {}
+              try {
+                saveReceivedTransferFiles(tr);
+              } catch {
+                // ignore auto-download error
+              }
             }, 200);
           }
           const savedPath =
@@ -415,7 +520,9 @@ export function App() {
                 icon: iconUrl,
                 tag: notification.notificationId,
               });
-            } catch (_e) {}
+            } catch {
+              // ignore notification error
+            }
           } else if (Notification.permission === "default") {
             Notification.requestPermission().catch(() => {});
           }
@@ -480,7 +587,7 @@ export function App() {
       client.stop();
       clientRef.current = null;
     };
-  }, [initialPairCode]);
+  }, [initialPairCode, openReceivedFolder]);
 
   // Browser-side automatic clipboard sync & deferred incoming clipboard flush
   useEffect(() => {
@@ -680,29 +787,34 @@ export function App() {
     clientRef.current?.updateDeviceName(newName);
   };
 
-
-
-  const [pairingOpen, setPairingOpen] = useState(false);
-  const [downloadsOpen, setDownloadsOpen] = useState(false);
-  const [recentOpen, setRecentOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const diagnosticsPage = useMemo(
     () => ({
+      uiVersion: UI_VERSION ?? "dev",
+      serverVersion: snap.serverVersion ?? null,
+      viewport: typeof window !== "undefined" ? { width: window.innerWidth, height: window.innerHeight } : { width: 0, height: 0 },
       connectionState: snap.connectionState,
       connectionError: snap.connectionError || null,
       peers: snap.peers.length,
       nativeShell: isNativeShell(),
       macApp: canRestartLocalService(),
+      wsCloseCode: snap.diagnostics?.wsCloseCode ?? null,
+      wsCloseReason: snap.diagnostics?.wsCloseReason ?? "",
+      reconnectAttempts: snap.diagnostics?.reconnectAttempts ?? 0,
+      rtcState: snap.diagnostics?.rtcState ?? {},
+      transferErrors: snap.diagnostics?.transferErrors ?? [],
+      fallbackTimerFires: snap.diagnostics?.fallbackTimerFires ?? 0,
+      transferResumes: snap.diagnostics?.transferResumes ?? 0,
+      transferChunkRetries: snap.diagnostics?.transferChunkRetries ?? 0,
+      lastFinalizeDurationMs: snap.diagnostics?.lastFinalizeDurationMs ?? null,
+      screenShare: snap.diagnostics?.screenShare,
+      contacts: snap.diagnostics?.contacts,
+      callAudio: snap.diagnostics?.callAudio,
+      clipboardBridge: snap.diagnostics?.clipboardBridge,
+      clientErrorRing: snap.diagnostics?.clientErrorRing ?? [],
     }),
-    [snap.connectionState, snap.connectionError, snap.peers.length],
+    [snap.connectionState, snap.connectionError, snap.peers.length, snap.serverVersion, snap.diagnostics],
   );
   const diagnostics = useDiagnosticsCopy(diagnosticsPage);
-  const [connectionContinuity, setConnectionContinuity] = useState(getNativeConnectionContinuity);
-  const [clipboardOpen, setClipboardOpen] = useState(false);
-  const [clipboardPeerId, setClipboardPeerId] = useState<string | null>(null);
-  const [clipboardPrefill, setClipboardPrefill] = useState("");
-  const [dragging, setDragging] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
 
   // Let Android's system Back button/gesture close the topmost in-page layer
   // before the shell falls back to WebView history or exits. The same handler
@@ -1055,14 +1167,14 @@ export function App() {
           ) : (
             <div className="settings-info"><strong>Received files folder</strong><p>{isNativeShell() ? "Verified files are saved automatically to Downloads/AirBridge by the native service, even when this screen is closed." : "Received files are saved by your browser (auto-download to Downloads folder). On the device running AirBridge you can set an exact folder."}</p>{!isNativeShell() && <div className="received-folder-controls"><input aria-label="Received files folder path" value={receivedFolderInput} onChange={(e) => setReceivedFolderInput(e.target.value)} placeholder="~/Downloads/AirBridge" /><button type="button" className="secondary-button" onClick={() => setFolderPickerOpen(true)}>Browse</button><button type="button" className="secondary-button" disabled={folderSaving || !receivedFolderInput.trim()} onClick={saveReceivedFolder}>{folderSaving ? "Saving…" : "Set folder"}</button></div>}</div>
           )}
-          {isNativeShell() && <div className="settings-info"><strong>Background battery access</strong><p>{batteryUnrestricted ? "Android battery optimization is disabled for AirBridge." : "Android battery optimization is enabled. For long screen-off transfers, choose AirBridge → Unrestricted or Don’t optimize in Android’s battery settings."} The native service keeps transfers independent of this screen; some manufacturers also require allowing background activity or auto-start. Force-stop and Android’s Stop action still end the service.</p><button type="button" className="secondary-button" onClick={() => openNativeBatterySettings()}>Open battery settings</button></div>}<div className="settings-info"><strong>About connection status</strong><p>“Running” means this app is connected to its transfer service. “Nearby” means another device was discovered; a secure session is only ready after pairing completes.</p></div><div className="settings-info"><strong>Privacy and consent</strong><p>Incoming transfers ask before saving. Auto-accept is off. Revoke trusted devices in advanced trust management.</p></div>{isNativeShell() && <div className="settings-info"><strong>Paired computer</strong><p>The UI is bundled with this app. The native service connects to your paired computer independently of this screen. Changing computers ends active transfers and starts a fresh pairing.</p><button type="button" className="secondary-button" onClick={() => forgetNativeComputer()}>Change computer</button></div>}<a className="text-button advanced-toggle" href="https://github.com/DigantaDey/AirBridge#android-background-behavior" target="_blank" rel="noreferrer">About this version</a></section></div>}
+          {isNativeShell() && <div className="settings-info"><strong>Background battery access</strong><p>{batteryUnrestricted ? "Android battery optimization is disabled for AirBridge." : "Android battery optimization is enabled. For long screen-off transfers, choose AirBridge → Unrestricted or Don’t optimize in Android’s battery settings."} The native service keeps transfers independent of this screen; some manufacturers also require allowing background activity or auto-start. Force-stop and Android’s Stop action still end the service.</p><button type="button" className="secondary-button" onClick={() => openNativeBatterySettings()}>Open battery settings</button></div>}<div className="settings-info"><strong>About connection status</strong><p>“Running” means this app is connected to its transfer service. “Nearby” means another device was discovered; a secure session is only ready after pairing completes.</p></div><div className="settings-info"><strong>Privacy and consent</strong><p>Incoming transfers ask before saving. Auto-accept is off. Revoke trusted devices in advanced trust management.</p></div>{isNativeShell() && <div className="settings-info"><strong>Paired computer</strong><p>The UI is bundled with this app. The native service connects to your paired computer independently of this screen. Changing computers ends active transfers and starts a fresh pairing.</p><button type="button" className="secondary-button" onClick={() => forgetNativeComputer()}>Change computer</button></div>}<div className="settings-info about-card"><div className="about-header"><strong>About AirBridge</strong><span className="about-version">{appVersion && appVersion !== "dev" ? `v${appVersion}` : UI_VERSION && UI_VERSION !== "dev" ? `v${UI_VERSION}` : "dev"}</span></div><p>Private, end-to-end encrypted multi-gigabyte file transfers, bidirectional text &amp; photo clipboard sync, persistent phone contacts, two-way Mac call audio, and smooth H.264 screen sharing between Android and your computer — with zero cloud accounts.</p><p className="about-meta">Created by Diganta Dey · ECDH P-256 + AES-256-GCM · SPAKE2 verified pairing</p><div className="about-links"><a className="text-button" href="https://airbridge.fyi/" target="_blank" rel="noreferrer">Website (airbridge.fyi)</a><a className="text-button" href="https://github.com/DigantaDey/AirBridge" target="_blank" rel="noreferrer">GitHub</a><a className="text-button" href="https://github.com/DigantaDey/AirBridge/releases/latest" target="_blank" rel="noreferrer">Releases</a><a className="text-button" href="https://airbridge.fyi/privacy.html" target="_blank" rel="noreferrer">Privacy Policy</a></div></div></section></div>}
       <TransferModal offer={activeIncomingOffer} senderPublicKey={incomingSenderPubKey} onAccept={(transferId, trustSender) => { if (trustSender && incomingSenderPubKey) clientRef.current?.toggleTrustedPeer(incomingSenderPubKey, true); clientRef.current?.acceptIncomingTransfer(transferId).catch((error: unknown) => showToast({ id: "accept-error", title: "Could not accept transfer", body: error instanceof Error ? error.message : "Try accepting the offer again." })); }} onDecline={(transferId) => { clientRef.current?.declineIncomingTransfer(transferId).catch(() => {}); }} />
       {clipboardOpen && <ClipboardCenter peers={snap.peers} items={snap.clipboardItems} autoSync={snap.autoClipboardSync} hostClipboardActive={Boolean(snap.localDaemon.clipboardBridge)} receiveEnabled={snap.clipboardReceiveEnabled} initialPeerId={clipboardPeerId} prefill={clipboardPrefill} onToggleAutoSync={(enabled) => clientRef.current?.setAutoClipboardSync(enabled)} onToggleReceive={(enabled) => clientRef.current?.setClipboardReceiveEnabled(enabled)} onMarkCopied={markLocalCopyHandled} onSend={handleSendClipboard} onSendImage={handleSendClipboardImage} onClose={() => setClipboardOpen(false)} />}
-      {continuityEnabled && continuityTab && clientRef.current && (
-        <ContinuityCenter client={clientRef.current} peers={snap.peers} continuity={snap.continuity} initialTab={continuityTab} onClose={() => setContinuityTab(null)} />
+      {continuityEnabled && continuityTab && (
+        <ContinuityCenter client={continuityClient} peers={snap.peers} continuity={snap.continuity} initialTab={continuityTab} onClose={() => setContinuityTab(null)} />
       )}
-      {continuityEnabled && clientRef.current && (
-        <ContinuityAlerts client={clientRef.current} continuity={snap.continuity} onOpenCalls={() => setContinuityTab("calls")} startCapture={startDisplayCapture} />
+      {continuityEnabled && (
+        <ContinuityAlerts client={continuityClient} continuity={snap.continuity} onOpenCalls={() => setContinuityTab("calls")} startCapture={startDisplayCapture} />
       )}
       {folderPickerOpen && <FolderPickerModal initialPath={receivedFolder || receivedFolderInput || ''} onSelect={(p) => { setReceivedFolderInput(p); setFolderPickerOpen(false); }} onClose={() => setFolderPickerOpen(false)} />}
       {toast && <div className="utility-toast" role="status"><strong>{toast.title}</strong><span>{toast.body}</span>{toast.actionLabel && <button type="button" className="toast-action" onClick={toast.onAction}>{toast.actionLabel}</button>}<button aria-label="Dismiss notification" onClick={() => setToast(null)}>×</button></div>}

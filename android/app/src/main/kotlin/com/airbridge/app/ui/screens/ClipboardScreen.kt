@@ -6,9 +6,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -42,6 +44,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.airbridge.app.PeerUiState
@@ -59,27 +62,36 @@ fun ClipboardScreen(
     onCopyClipboardItem: (ClipboardItem) -> Unit,
     onClearHistory: () -> Unit,
     modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(0.dp),
 ) {
     var draft by rememberSaveable { mutableStateOf("") }
     val selectedPeer = uiState.engine.peers.firstOrNull { it.peerId == uiState.selectedPeerId }
+    val layoutDirection = LocalLayoutDirection.current
+    val listState = rememberLazyListState()
 
     BoxWithConstraints(
-        modifier = modifier
-            .fillMaxSize()
-            .imePadding(),
+        modifier = modifier.fillMaxSize(),
     ) {
         val isWide = maxWidth >= 840.dp
         if (isWide) {
             Row(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 24.dp, vertical = 16.dp),
+                    .padding(
+                        start = contentPadding.calculateStartPadding(layoutDirection) + 24.dp,
+                        end = contentPadding.calculateEndPadding(layoutDirection) + 24.dp,
+                        top = contentPadding.calculateTopPadding(),
+                    ),
                 horizontalArrangement = Arrangement.spacedBy(20.dp),
             ) {
                 Column(
                     modifier = Modifier
                         .weight(0.45f)
-                        .verticalScroll(rememberScrollState()),
+                        .verticalScroll(rememberScrollState())
+                        .padding(
+                            top = 16.dp,
+                            bottom = contentPadding.calculateBottomPadding() + 24.dp,
+                        ),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     BeamComposeCard(
@@ -98,8 +110,12 @@ fun ClipboardScreen(
                 }
 
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.weight(0.55f),
-                    contentPadding = PaddingValues(bottom = 24.dp),
+                    contentPadding = PaddingValues(
+                        top = 16.dp,
+                        bottom = contentPadding.calculateBottomPadding() + 24.dp,
+                    ),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     clipboardFeedItems(
@@ -112,9 +128,15 @@ fun ClipboardScreen(
         } else {
             val mediumCardModifier = Modifier.widthIn(max = 760.dp)
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+                contentPadding = PaddingValues(
+                    start = contentPadding.calculateStartPadding(layoutDirection) + 16.dp,
+                    end = contentPadding.calculateEndPadding(layoutDirection) + 16.dp,
+                    top = contentPadding.calculateTopPadding() + 16.dp,
+                    bottom = contentPadding.calculateBottomPadding() + 16.dp,
+                ),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 item(key = "compose") {
@@ -224,7 +246,10 @@ private fun BeamComposeCard(
             )
 
             if (peers.size > 1) {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LazyRow(
+                    state = rememberLazyListState(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     items(peers, key = { it.peerId }) { peer ->
                         FilterChip(
                             selected = peer.peerId == selectedPeer?.peerId,

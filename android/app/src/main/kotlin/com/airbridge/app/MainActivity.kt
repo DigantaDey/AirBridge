@@ -27,7 +27,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.airbridge.app.ui.AirBridgeApp
 import com.airbridge.app.ui.theme.isResolvedDarkTheme
 import com.airbridge.app.ui.viewmodels.AirBridgeViewModel
-import com.airbridge.engine.PairingLink
 
 /**
  * Pure Jetpack Compose Material 3 Activity.
@@ -98,15 +97,27 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AndroidDiagnostics.installUncaughtExceptionHandler(this)
+        if (savedInstanceState != null) {
+            showCameraRationale = savedInstanceState.getBoolean(STATE_SHOW_CAMERA_RATIONALE, false)
+            showCameraSettingsDialog = savedInstanceState.getBoolean(STATE_SHOW_CAMERA_SETTINGS, false)
+            showNotificationRationale = savedInstanceState.getBoolean(STATE_SHOW_NOTIFICATION_RATIONALE, false)
+            showNotificationSettingsDialog = savedInstanceState.getBoolean(STATE_SHOW_NOTIFICATION_SETTINGS, false)
+            requestedNotificationsThisSession = savedInstanceState.getBoolean(STATE_REQUESTED_NOTIFICATIONS, false)
+        }
         val initialDark = Prefs(this).themeMode != "light"
         applyEdgeToEdge(initialDark)
-        handleIncomingIntent(intent)
+        if (savedInstanceState == null) {
+            handleIncomingIntent(intent)
+        }
 
         setContent {
             val state by viewModel.uiState.collectAsStateWithLifecycle()
-            val darkTheme = isResolvedDarkTheme(state.themeMode)
-            DisposableEffect(darkTheme) {
-                applyEdgeToEdge(darkTheme)
+            // Force dark system-bar style (light status/nav icons) whenever QrScannerScreen
+            // is open over its black camera surface, even in Light theme.
+            val useDarkBarStyle = isResolvedDarkTheme(state.themeMode) || state.scannerOpen
+            DisposableEffect(useDarkBarStyle) {
+                applyEdgeToEdge(useDarkBarStyle)
                 onDispose {}
             }
 
@@ -153,8 +164,19 @@ class MainActivity : ComponentActivity() {
                 onRequestBatteryExemption = ::requestBatteryExemption,
                 onOpenAppSettings = ::openAppSettings,
                 onOpenPrivacyPolicy = ::openPrivacyPolicy,
+                onOpenWebsite = { openExternalUrl("https://airbridge.fyi/", "the AirBridge website") },
+                onOpenGitHub = { openExternalUrl("https://github.com/DigantaDey/AirBridge", "GitHub") },
             )
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(STATE_SHOW_CAMERA_RATIONALE, showCameraRationale)
+        outState.putBoolean(STATE_SHOW_CAMERA_SETTINGS, showCameraSettingsDialog)
+        outState.putBoolean(STATE_SHOW_NOTIFICATION_RATIONALE, showNotificationRationale)
+        outState.putBoolean(STATE_SHOW_NOTIFICATION_SETTINGS, showNotificationSettingsDialog)
+        outState.putBoolean(STATE_REQUESTED_NOTIFICATIONS, requestedNotificationsThisSession)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -174,12 +196,11 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         viewModel.refreshSystemStatus()
         maybeRequestNotificationsPermission()
-        // Contacts/phone permissions may have changed in system Settings.
-        NativeEngineHost.instance?.refreshContinuity()
     }
 
     override fun onStop() {
-        viewModel.startConnectionService(ConnectionService.ACTION_UI_DETACH)
+        // AND-17: Detach UI in-process without calling startService(ACTION_UI_DETACH) when backgrounding.
+        ConnectionService.detachUi()
         super.onStop()
     }
 
@@ -201,9 +222,7 @@ class MainActivity : ComponentActivity() {
     private fun handleIncomingIntent(intent: Intent?) {
         if (intent?.action != Intent.ACTION_VIEW) return
         val data = intent.data ?: return
-        if (!data.scheme.equals("airbridge", ignoreCase = true)) return
-        val link = PairingLink.parse(data.toString()) ?: return
-        viewModel.connectWithLink(link)
+        viewModel.handleIncomingDeepLink(data.scheme, data.toString())
     }
 
     private fun openScannerWithPermission() {
@@ -224,7 +243,7 @@ class MainActivity : ComponentActivity() {
 
     private fun maybeRequestNotificationsPermission() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-        if (requestedNotificationsThisSession) return
+        if (requestedNotificationsThisSession || showNotificationRationale || showNotificationSettingsDialog) return
         if (Prefs(this).target.isEmpty()) return
         val permission = Manifest.permission.POST_NOTIFICATIONS
         when {
@@ -281,8 +300,20 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openPrivacyPolicy() {
-        val policy = Intent(Intent.ACTION_VIEW, Uri.parse("https://airbridge.fyi/privacy.html"))
-        val opened = runCatching { startActivity(policy); true }.getOrDefault(false)
-        if (!opened) viewModel.notifyMessage("Could not open the privacy policy")
+        openExternalUrl("https://airbridge.fyi/privacy.html", "the privacy policy")
+    }
+
+    private fun openExternalUrl(url: String, label: String) {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        val opened = runCatching { startActivity(intent); true }.getOrDefault(false)
+        if (!opened) viewModel.notifyMessage("Could not open $label")
+    }
+
+    private companion object {
+        const val STATE_SHOW_CAMERA_RATIONALE = "show_camera_rationale"
+        const val STATE_SHOW_CAMERA_SETTINGS = "show_camera_settings"
+        const val STATE_SHOW_NOTIFICATION_RATIONALE = "show_notification_rationale"
+        const val STATE_SHOW_NOTIFICATION_SETTINGS = "show_notification_settings"
+        const val STATE_REQUESTED_NOTIFICATIONS = "requested_notifications_this_session"
     }
 }

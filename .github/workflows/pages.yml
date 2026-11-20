@@ -34,15 +34,19 @@ jobs:
         run: |
           set -euo pipefail
           test -f website/index.html || { echo "::error title=missing website::website/index.html not found"; exit 1; }
+          test -f website/privacy.html || { echo "::error title=missing privacy::website/privacy.html not found"; exit 1; }
+          test -f website/404.html || { echo "::error title=missing 404::website/404.html not found"; exit 1; }
           test -f website/styles.css || { echo "::error title=missing styles::website/styles.css not found"; exit 1; }
-          if grep -q 'src/client/main.tsx' website/index.html; then
-            echo "::error title=dev shell published::website/index.html references the Vite dev entry"
-            exit 1
-          fi
-          if grep -q 'src="/' website/index.html; then
-            echo "::error title=absolute asset path::website/index.html must use relative paths for Pages subpaths"
-            exit 1
-          fi
+          for page in website/index.html website/privacy.html website/404.html; do
+            if grep -q 'src/client/main.tsx' "$page"; then
+              echo "::error title=dev shell published::$page references the Vite dev entry"
+              exit 1
+            fi
+            if grep -Eq '(src|href)="/' "$page"; then
+              echo "::error title=absolute asset path::$page must use relative paths for Pages subpaths"
+              exit 1
+            fi
+          done
       - uses: actions/upload-pages-artifact@v3
         with:
           path: website

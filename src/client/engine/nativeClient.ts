@@ -1,8 +1,7 @@
 import type { DeviceProfile, VisibilityMode } from '../../shared/protocol.js';
-import { WarpClient, type ClipboardBeamItem, type SendableFileInput, type TransferSessionView, type WarpClientOptions, type WarpClientSnapshot } from './warpClient.js';
+import { WarpClient, type ClipboardBeamItem, type SendableFileInput, type TransferSessionView, type WarpClientDiagnostics, type WarpClientOptions, type WarpClientSnapshot } from './warpClient.js';
 import type { AirBridgeNativeBridge } from './nativeShell.js';
-import type { CallCommandResult, ContactShareItem, ContactsQueryResult, ContinuityOptions, ScreenAudioFrame, ScreenFrame, ScreenFrameSource, ScreenVideoFrame } from './continuity.js';
-import type { CallInfo, ContactCard } from '../../shared/continuity.js';
+import type { CallAudioFrame, CallCommandResult, ContactShareItem, ContactsQueryResult, ScreenFrameSource } from './continuity.js';
 
 /** Public client contract shared by the browser peer and Android's metadata UI. */
 export type AirBridgeClient = Pick<WarpClient, keyof WarpClient>;
@@ -36,7 +35,8 @@ export class NativeClient implements AirBridgeClient {
 
   constructor(private readonly bridge: AirBridgeNativeBridge, private readonly options: WarpClientOptions = {}) {}
 
-  async start(_deviceFactory?: (publicKeyB64: string) => DeviceProfile): Promise<void> {
+  async start(deviceFactory?: (publicKeyB64: string) => DeviceProfile): Promise<void> {
+    void deviceFactory;
     this.stopped = false;
     if (!this.bridge.engineAttach?.()) throw new Error('Pair with a computer to start the native connection.');
     const deadline = Date.now() + 10_000;
@@ -123,11 +123,57 @@ export class NativeClient implements AirBridgeClient {
     return () => { this.listeners.delete(listener); };
   }
   getSnapshot(): WarpClientSnapshot { return this.snapshot; }
+  getDiagnostics(): WarpClientDiagnostics {
+    return {
+      wsCloseCode: null,
+      wsCloseReason: '',
+      reconnectAttempts: 0,
+      rtcState: {},
+      transferErrors: [],
+      fallbackTimerFires: 0,
+      clientErrorRing: [],
+      transferResumes: 0,
+      transferChunkRetries: 0,
+      lastFinalizeDurationMs: null,
+      screenShare: {
+        activeSessions: 0,
+        decoderMode: null,
+        codec: null,
+        framesDecoded: 0,
+        decodeErrors: 0,
+        keyframesReceived: 0,
+        pliSent: 0,
+        pliReceived: 0,
+      },
+      contacts: {
+        savedCount: this.snapshot.continuity?.savedContacts?.length ?? 0,
+        removedByUser: 0,
+        clearedOnDisconnect: 0,
+      },
+      callAudio: {
+        active: false,
+        route: 'phone',
+        muted: false,
+        framesSent: 0,
+        framesReceived: 0,
+        packetsDropped: 0,
+        lastError: null,
+      },
+      clipboardBridge: {
+        imagesSent: 0,
+        imagesReceived: 0,
+        autoSyncEnabled: this.snapshot.autoClipboardSync,
+        receiveEnabled: this.snapshot.clipboardReceiveEnabled,
+      },
+    };
+  }
+  recordTransferError(): void {}
+  recordClientError(): void {}
   updateDeviceName(name: string): void { this.command('rename', { name }); }
   setVisibility(value: VisibilityMode): void { this.command('visibility', { value }); }
   setNotificationSharing(value: boolean): void { this.snapshot.notificationSharing = value; }
   getNotificationSharing(): boolean { return this.snapshot.notificationSharing; }
-  async sendNotification(_targetPeerId: string, _title: string, _body: string): Promise<boolean> { return false; }
+  async sendNotification(): Promise<boolean> { return false; }
   joinPairCode(value: string): void { this.command('pair', { value }); }
   rotatePairCode(): void { this.command('rotatePair'); }
   toggleTrustedPeer(key: string, value: boolean): void { this.command('trust', { key, value }); }
@@ -136,10 +182,13 @@ export class NativeClient implements AirBridgeClient {
   markClipboardSynced(text: string): void { this.lastSynced = text; this.command('markClipboard', { text }); }
   getLastSyncedClipboardText(): string { return this.lastSynced; }
   async handleDetectedLocalClipboard(text: string): Promise<ClipboardBeamItem[]> { return this.command('detectedClipboard', { text }); }
-  async sendClipboard(peerId: string, text: string, _options?: { isAuto?: boolean }): Promise<ClipboardBeamItem> {
+  async handleDetectedLocalClipboardImage(imageDataUrl: string, imageName?: string): Promise<ClipboardBeamItem[]> {
+    return this.command('detectedClipboardImage', { imageDataUrl, imageName });
+  }
+  async sendClipboard(peerId: string, text: string): Promise<ClipboardBeamItem> {
     return this.command('clipboard', { peerId, text });
   }
-  async sendClipboardImage(peerId: string, dataUrl: string, _name?: string): Promise<ClipboardBeamItem> {
+  async sendClipboardImage(peerId: string, dataUrl: string): Promise<ClipboardBeamItem> {
     return this.command('clipboardImage', { peerId, dataUrl });
   }
   async sendFiles(peerId: string, inputs: SendableFileInput[]): Promise<TransferSessionView> {
@@ -151,26 +200,38 @@ export class NativeClient implements AirBridgeClient {
   async acceptIncomingTransfer(transferId: string): Promise<void> { this.command('accept', { transferId }); }
   async declineIncomingTransfer(transferId: string): Promise<void> { this.command('decline', { transferId }); }
   async cancelTransfer(transferId: string): Promise<void> { this.command('cancel', { transferId }); }
-  async updateReceivedFolder(_downloadDir: string): Promise<string> { throw new Error('Android saves verified files to Downloads/AirBridge.'); }
-  async openReceivedFolder(_savedPath?: string): Promise<void> { throw new Error('Open Downloads/AirBridge in your Android Files app.'); }
+  async updateReceivedFolder(): Promise<string> { throw new Error('Android saves verified files to Downloads/AirBridge.'); }
+  async openReceivedFolder(): Promise<void> { throw new Error('Open Downloads/AirBridge in your Android Files app.'); }
   // Phone continuity lives in the native Compose app (the phone is the
   // provider there); this legacy WebView bridge does not drive it.
-  async requestContacts(_peerId: string): Promise<ContactsQueryResult> { throw new Error(CONTINUITY_NATIVE); }
-  async shareContacts(_peerId: string, _contacts: ContactCard[]): Promise<ContactShareItem> { throw new Error(CONTINUITY_NATIVE); }
+  async requestContacts(): Promise<ContactsQueryResult> { throw new Error(CONTINUITY_NATIVE); }
+  async shareContacts(): Promise<ContactShareItem> { throw new Error(CONTINUITY_NATIVE); }
   clearSharedContacts(): void {}
-  async answerCall(_peerId: string, _callId: string): Promise<CallCommandResult> { throw new Error(CONTINUITY_NATIVE); }
-  async rejectCall(_peerId: string, _callId: string): Promise<CallCommandResult> { throw new Error(CONTINUITY_NATIVE); }
-  async hangUpCall(_peerId: string, _callId: string): Promise<CallCommandResult> { throw new Error(CONTINUITY_NATIVE); }
-  async dialNumber(_peerId: string, _number: string): Promise<CallCommandResult> { throw new Error(CONTINUITY_NATIVE); }
-  publishCallState(_call: CallInfo): void {}
-  requestScreenShare(_peerId: string): string { throw new Error(CONTINUITY_NATIVE); }
-  acceptScreenShare(_sessionId: string, source: ScreenFrameSource): void { source.stop(); throw new Error(CONTINUITY_NATIVE); }
-  declineScreenShare(_sessionId: string): void {}
-  stopScreenShare(_sessionId: string): void {}
-  subscribeScreenFrames(_sessionId: string, _listener: (frame: ScreenFrame) => void): () => void { return () => {}; }
-  subscribeScreenVideo(_sessionId: string, _listener: (frame: ScreenVideoFrame) => void): () => void { return () => {}; }
-  subscribeScreenAudio(_sessionId: string, _listener: (frame: ScreenAudioFrame) => void): () => void { return () => {}; }
-  configureContinuity(_options: Partial<ContinuityOptions>): void {}
+  removeSavedContact(): boolean { return false; }
+  clearSavedContacts(): number { return 0; }
+  async startCallAudio(): Promise<void> { throw new Error(CONTINUITY_NATIVE); }
+  async stopCallAudio(): Promise<void> {}
+  async setCallAudioMuted(): Promise<void> {}
+  async sendCallAudio(): Promise<boolean> { return false; }
+  subscribeCallAudio(_callId: string, _listener: (frame: CallAudioFrame) => void): () => void {
+    void _callId; void _listener;
+    return () => {};
+  }
+  async answerCall(): Promise<CallCommandResult> { throw new Error(CONTINUITY_NATIVE); }
+  async rejectCall(): Promise<CallCommandResult> { throw new Error(CONTINUITY_NATIVE); }
+  async hangUpCall(): Promise<CallCommandResult> { throw new Error(CONTINUITY_NATIVE); }
+  async dialNumber(): Promise<CallCommandResult> { throw new Error(CONTINUITY_NATIVE); }
+  publishCallState(): void {}
+  requestScreenShare(): string { throw new Error(CONTINUITY_NATIVE); }
+  acceptScreenShare(_sessionId: string, source: ScreenFrameSource): void { void _sessionId; source.stop(); throw new Error(CONTINUITY_NATIVE); }
+  declineScreenShare(): void {}
+  stopScreenShare(): void {}
+  requestScreenKeyframe(): void {}
+  recordScreenViewerStats(): void {}
+  subscribeScreenFrames(): () => void { return () => {}; }
+  subscribeScreenVideo(): () => void { return () => {}; }
+  subscribeScreenAudio(): () => void { return () => {}; }
+  configureContinuity(): void {}
 }
 
 const CONTINUITY_NATIVE = 'Contacts, calls and screen sharing are handled by the AirBridge app on this phone.';

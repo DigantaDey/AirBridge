@@ -22,6 +22,7 @@ export type ContinuityFeature =
   | 'contacts.provide' // answers contacts-request (phone with READ_CONTACTS + toggle on)
   | 'contacts.receive' // accepts contact-share cards
   | 'calls.control' // reports call-state and executes call-command
+  | 'calls.audio' // two-way encrypted call audio bridge between phone and computer
   | 'screen.source' // can share its screen (MediaProjection / getDisplayMedia)
   | 'screen.view' // can view a shared screen
   | 'screen.audio.capture' // can capture only Android-permitted playback audio
@@ -31,6 +32,7 @@ export const CONTINUITY_FEATURES: readonly ContinuityFeature[] = [
   'contacts.provide',
   'contacts.receive',
   'calls.control',
+  'calls.audio',
   'screen.source',
   'screen.view',
   'screen.audio.capture',
@@ -74,6 +76,17 @@ export interface ContactCard {
   starred?: boolean;
 }
 
+export interface SavedContactRecord {
+  id: string;
+  peerId: string;
+  peerDeviceId?: string;
+  peerKey: string;
+  peerName: string;
+  contact: ContactCard;
+  source: 'synced' | 'shared';
+  savedAt: number;
+}
+
 export const MAX_CONTACTS_PER_RESPONSE = 5000;
 export const DEFAULT_CONTACTS_LIMIT = 2000;
 export const MAX_CONTACT_FIELD = 256;
@@ -83,11 +96,28 @@ export const MAX_VCARD_LENGTH = 64 * 1024;
 export const MAX_CONTACT_QUERY = 100;
 
 const PHONE_ALLOWED = /^[+0-9*#()\-.,;/ pwPW]{1,64}$/;
-const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+
+function stripControlChars(value: string): string {
+  let out = '';
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (
+      (code >= 0x00 && code <= 0x08) ||
+      code === 0x0b ||
+      code === 0x0c ||
+      (code >= 0x0e && code <= 0x1f) ||
+      code === 0x7f
+    ) {
+      continue;
+    }
+    out += value[i];
+  }
+  return out;
+}
 
 function cleanText(value: unknown, max: number): string | undefined {
   if (typeof value !== 'string') return undefined;
-  const cleaned = value.replace(CONTROL_CHARS, '').trim();
+  const cleaned = stripControlChars(value).trim();
   if (!cleaned) return undefined;
   return cleaned.length > max ? cleaned.slice(0, max) : cleaned;
 }
@@ -475,6 +505,7 @@ export const SCREEN_DEFAULT_FPS = 15;
 export const SCREEN_MAX_FPS = 30;
 /** Frames in flight before the sender waits for an ack (latest-frame-wins). */
 export const SCREEN_MAX_INFLIGHT = 2;
+export const SCREEN_VIDEO_MAX_INFLIGHT = 6;
 export const SCREEN_MAX_FRAME_BYTES = 3 * 1024 * 1024;
 /** No consent within this window = declined. */
 export const SCREEN_CONSENT_TIMEOUT_MS = 2 * 60_000;
@@ -483,12 +514,22 @@ export const FRAME_SCREEN = 0x04;
 /** Encrypted, app-permitted PCM playback audio. It is a distinct media frame so
  * audio can be dropped independently of video rather than delaying the screen. */
 export const FRAME_SCREEN_AUDIO = 0x05;
+/** Full-duplex encrypted Continuity phone-call audio PCM packet (20 ms mono 16 kHz). */
+export const FRAME_CALL_AUDIO = 0x06;
 /** type(1) ‖ sessionId(16 ASCII hex) ‖ seq(u32) ‖ codec(u8) ‖ width(u16) ‖ height(u16) */
 export const SCREEN_FRAME_AAD_LENGTH = 1 + 16 + 4 + 1 + 2 + 2; // 26
 export const SCREEN_FRAME_HEADER_LENGTH = SCREEN_FRAME_AAD_LENGTH + 12; // + IV = 38
 /** type(1) ‖ sessionId(16) ‖ seq(u32) ‖ sampleRate(u16) ‖ channels(u8) ‖ frames(u16) ‖ ptsMs(u32) */
 export const SCREEN_AUDIO_AAD_LENGTH = 1 + 16 + 4 + 2 + 1 + 2 + 4; // 30
 export const SCREEN_AUDIO_FRAME_HEADER_LENGTH = SCREEN_AUDIO_AAD_LENGTH + 12; // + IV = 42
+/** type(1) ‖ callId(16) ‖ seq(u32) ‖ sampleRate(u16) ‖ channels(u8) ‖ frames(u16) ‖ ptsMs(u32) */
+export const CALL_AUDIO_AAD_LENGTH = 1 + 16 + 4 + 2 + 1 + 2 + 4; // 30
+export const CALL_AUDIO_FRAME_HEADER_LENGTH = CALL_AUDIO_AAD_LENGTH + 12; // + IV = 42
+export const CALL_AUDIO_SAMPLE_RATE = 16_000;
+export const CALL_AUDIO_CHANNELS = 1;
+export const CALL_AUDIO_FRAME_SAMPLES = 320;
+export const CALL_AUDIO_MAX_FRAMES = 960;
+export const CALL_AUDIO_MAX_FRAME_BYTES = CALL_AUDIO_MAX_FRAMES * 2 * 2; // 3840
 export const SCREEN_AUDIO_PCM_S16LE = 1;
 export const SCREEN_AUDIO_MAX_FRAME_BYTES = 64 * 1024;
 /** plaintext H.264 packet: flags(u8) ‖ presentation timestamp milliseconds(u32) ‖ access unit */
@@ -661,6 +702,81 @@ export function decodeScreenAudioFrame(bytes: Uint8Array): DecodedScreenAudioFra
     ptsMs: view.getUint32(26, false),
     aad: bytes.subarray(0, SCREEN_AUDIO_AAD_LENGTH),
     iv: bytes.slice(SCREEN_AUDIO_AAD_LENGTH, SCREEN_AUDIO_FRAME_HEADER_LENGTH),
+    ciphertext,
+  };
+}
+
+export interface CallAudioFrameHeader {
+  callId: string;
+  seq: number;
+  sampleRate: number;
+  channels: number;
+  frames: number;
+  ptsMs: number;
+}
+
+export interface DecodedCallAudioFrame extends CallAudioFrameHeader {
+  aad: Uint8Array;
+  iv: Uint8Array;
+  ciphertext: Uint8Array;
+}
+
+/** Authenticated header for an encrypted full-duplex call-audio PCM packet. */
+export function encodeCallAudioAad(header: CallAudioFrameHeader): Uint8Array {
+  if (!isContinuityId(header.callId)) throw new Error('Invalid call id');
+  if (!Number.isInteger(header.seq) || header.seq < 0 || header.seq > 0xffffffff) throw new Error('Invalid call audio sequence');
+  if (!Number.isInteger(header.sampleRate) || header.sampleRate < 8_000 || header.sampleRate > 48_000) throw new Error('Invalid call audio sample rate');
+  if (header.channels !== 1 && header.channels !== 2) throw new Error('Invalid call audio channel count');
+  if (!Number.isInteger(header.frames) || header.frames < 1 || header.frames > CALL_AUDIO_MAX_FRAMES) throw new Error('Invalid call audio frame count');
+  if (!Number.isInteger(header.ptsMs) || header.ptsMs < 0 || header.ptsMs > 0xffffffff) throw new Error('Invalid call audio timestamp');
+  const out = new Uint8Array(CALL_AUDIO_AAD_LENGTH);
+  const view = new DataView(out.buffer);
+  out[0] = FRAME_CALL_AUDIO;
+  for (let i = 0; i < 16; i++) out[1 + i] = header.callId.charCodeAt(i);
+  view.setUint32(17, header.seq >>> 0, false);
+  view.setUint16(21, header.sampleRate, false);
+  out[23] = header.channels;
+  view.setUint16(24, header.frames, false);
+  view.setUint32(26, header.ptsMs >>> 0, false);
+  return out;
+}
+
+export function encodeCallAudioFrame(aad: Uint8Array, iv: Uint8Array, ciphertext: Uint8Array): Uint8Array {
+  if (aad.byteLength !== CALL_AUDIO_AAD_LENGTH || aad[0] !== FRAME_CALL_AUDIO) throw new Error('Invalid call audio header');
+  if (iv.byteLength !== 12) throw new Error('Invalid IV length');
+  if (ciphertext.byteLength > CALL_AUDIO_MAX_FRAME_BYTES + 16) throw new Error('Call audio frame too large');
+  const out = new Uint8Array(CALL_AUDIO_FRAME_HEADER_LENGTH + ciphertext.byteLength);
+  out.set(aad, 0);
+  out.set(iv, CALL_AUDIO_AAD_LENGTH);
+  out.set(ciphertext, CALL_AUDIO_FRAME_HEADER_LENGTH);
+  return out;
+}
+
+export function decodeCallAudioFrame(bytes: Uint8Array): DecodedCallAudioFrame {
+  if (bytes.byteLength < CALL_AUDIO_FRAME_HEADER_LENGTH + 16) throw new Error('Call audio frame too short');
+  if (bytes[0] !== FRAME_CALL_AUDIO) throw new Error('Not a call audio frame');
+  if (bytes.byteLength > CALL_AUDIO_FRAME_HEADER_LENGTH + CALL_AUDIO_MAX_FRAME_BYTES + 16) throw new Error('Call audio frame too large');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let callId = '';
+  for (let i = 0; i < 16; i++) callId += String.fromCharCode(bytes[1 + i]);
+  if (!isContinuityId(callId)) throw new Error('Invalid call id');
+  const sampleRate = view.getUint16(21, false);
+  const channels = bytes[23];
+  const frames = view.getUint16(24, false);
+  if (sampleRate < 8_000 || sampleRate > 48_000 || (channels !== 1 && channels !== 2) || frames < 1 || frames > CALL_AUDIO_MAX_FRAMES) {
+    throw new Error('Invalid call audio format');
+  }
+  const ciphertext = bytes.subarray(CALL_AUDIO_FRAME_HEADER_LENGTH);
+  if (ciphertext.byteLength !== frames * channels * 2 + 16) throw new Error('Invalid call audio payload length');
+  return {
+    callId,
+    seq: view.getUint32(17, false),
+    sampleRate,
+    channels,
+    frames,
+    ptsMs: view.getUint32(26, false),
+    aad: bytes.subarray(0, CALL_AUDIO_AAD_LENGTH),
+    iv: bytes.slice(CALL_AUDIO_AAD_LENGTH, CALL_AUDIO_FRAME_HEADER_LENGTH),
     ciphertext,
   };
 }

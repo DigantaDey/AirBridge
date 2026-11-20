@@ -81,7 +81,8 @@ describe('service-owned Android client', () => {
     f.setState({ ...initial(), revision: 2, clipboardRevision: 1, clipboardItems: [item] });
     await vi.advanceTimersByTimeAsync(250);
     expect(onClipboard).toHaveBeenCalledExactlyOnceWith(item);
-    const { clipboardItems: _items, ...delta } = { ...initial(), revision: 3, clipboardRevision: 1 };
+    const delta = { ...initial(), revision: 3, clipboardRevision: 1 };
+    delete (delta as { clipboardItems?: unknown }).clipboardItems;
     f.setState(delta);
     await vi.advanceTimersByTimeAsync(250);
     expect(client.getSnapshot().clipboardItems).toEqual([item]);

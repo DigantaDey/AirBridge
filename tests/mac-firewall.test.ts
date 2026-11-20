@@ -136,8 +136,8 @@ describe('server reports the firewall state to clients', () => {
 
   it('includes it in welcome and pushes a network update when it changes', async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`);
-    const messages: Array<Record<string, any>> = [];
-    ws.on('message', (raw) => messages.push(JSON.parse(String(raw))));
+    const messages: Array<Record<string, unknown>> = [];
+    ws.on('message', (raw) => messages.push(JSON.parse(String(raw)) as Record<string, unknown>));
     await new Promise<void>((resolve, reject) => { ws.once('open', () => resolve()); ws.once('error', reject); });
     const ecdh = crypto.createECDH('prime256v1');
     ecdh.generateKeys();

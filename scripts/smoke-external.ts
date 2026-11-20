@@ -9,12 +9,11 @@
  * Exit code 0 = all checks passed.
  */
 import fs from 'node:fs';
-import path from 'node:path';
 import crypto from 'node:crypto';
 import {
   WarpClient,
   type ClipboardBeamItem,
-  type TransferSessionView,
+  type SendableFileInput,
 } from '../src/client/engine/warpClient.js';
 
 const wsUrl = process.argv[2] || 'ws://127.0.0.1:3000/ws';
@@ -35,7 +34,7 @@ function waitFor(predicate: () => boolean, label: string, timeoutMs = 30_000): P
   });
 }
 
-function makeFile(name: string, size: number): { raw: Uint8Array; input: any } {
+function makeFile(name: string, size: number): { raw: Uint8Array; input: SendableFileInput } {
   const raw = new Uint8Array(size);
   for (let i = 0; i < size; i++) raw[i] = (i * 31 + 17) & 0xff;
   return {
@@ -78,10 +77,6 @@ async function main(): Promise<void> {
     },
   });
 
-  let macIncoming: TransferSessionView | null = null;
-  let macOutDone: TransferSessionView | null = null;
-  let androidOutDone: TransferSessionView | null = null;
-  let androidIncoming: TransferSessionView | null = null;
   mac.subscribe(() => {});
   android.subscribe(() => {});
 
@@ -106,7 +101,6 @@ async function main(): Promise<void> {
   // 2. Mac → Android multi-chunk file transfer (Android saves via daemon path)
   const big = makeFile('smoke-big.bin', 3 * 1024 * 1024 + 12345); // 3 MiB+ → 13 chunks at 256 KiB
   const small = makeFile('smoke-small.txt', 7);
-  const origSha = crypto.createHash('sha256').update(Buffer.from(big.raw)).digest('hex');
 
   const idOfAndroid = android.getSnapshot().peerId;
   const idOfMac = mac.getSnapshot().peerId;
@@ -160,18 +154,6 @@ async function main(): Promise<void> {
   // 4. Android → Mac reverse transfer. The Mac client is a loopback desktop
   // peer, so the binary's daemon streams these chunks straight to disk —
   // this is the packaged direct-to-disk assertion.
-  void mac.subscribe((snap) => {
-    const incoming = snap.transfers.find((x) => x.direction === 'incoming');
-    if (incoming) macIncoming = incoming;
-    const out = snap.transfers.find((x) => x.direction === 'outgoing' && x.status === 'completed');
-    if (out) macOutDone = out;
-  });
-  void android.subscribe((snap) => {
-    const out = snap.transfers.find((x) => x.direction === 'outgoing' && x.status === 'completed');
-    if (out) androidOutDone = out;
-    const inc = snap.transfers.find((x) => x.direction === 'incoming');
-    if (inc) androidIncoming = inc;
-  });
   const revDone = new Promise<void>((resolve, reject) => {
     const t = setInterval(() => {
       const s = mac.getSnapshot();

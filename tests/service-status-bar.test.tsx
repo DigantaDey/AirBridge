@@ -14,6 +14,7 @@ afterEach(async () => {
   if (root) await act(async () => root!.unmount());
   container?.remove();
   root = undefined;
+  delete (window as { webkit?: unknown }).webkit;
   vi.unstubAllGlobals();
 });
 
@@ -53,7 +54,7 @@ describe("ServiceStatusBar", () => {
   });
 
   it("copies a diagnostics report", async () => {
-    const writeText = vi.fn((_t: string) => Promise.resolve());
+    const writeText = vi.fn<(_text: string) => Promise<void>>(() => Promise.resolve());
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     const el = await render((url) => (url === "/api/diagnostics" ? json({ app: { version: "0.0.6" } }) : json({ supported: false })));
     const button = [...el.querySelectorAll("button")].find((b) => b.textContent === "Copy diagnostics")!;

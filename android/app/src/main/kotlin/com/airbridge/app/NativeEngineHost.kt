@@ -1,5 +1,6 @@
 package com.airbridge.app
 
+import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -7,6 +8,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
+import androidx.compose.runtime.Immutable
 import com.airbridge.engine.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -14,6 +16,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
+@Immutable
 data class PeerUiState(
     val peerId: String,
     val device: DeviceProfile,
@@ -29,6 +32,7 @@ data class PeerUiState(
     val verified: Boolean = false,
 )
 
+@Immutable
 data class NativeEngineUiState(
     val ready: Boolean = false,
     val targetUrl: String = "",
@@ -64,31 +68,40 @@ data class NativeEngineUiState(
  * commands directly to Jetpack Compose without WebView or JSON snapshotting.
  */
 class NativeEngineHost(
-    private val context: Context,
+    context: Context,
     private val onTransfers: (List<TransferView>) -> Unit,
     private val onOffer: (TransferView) -> Unit,
     private val onConnection: (ConnectionState) -> Unit,
     private val onState: (NativeEngineUiState) -> Unit = {},
 ) : AutoCloseable {
-    private val prefs = Prefs(context)
-    private val reverseAdvertiser = ReverseAdvertiser(context)
+    private val appContext: Context = context.applicationContext
+    private val prefs = Prefs(appContext)
+    private val reverseAdvertiser = ReverseAdvertiser(appContext)
     // AirBridge computers on the current networks (serviceName -> host:port).
     // Lets a paired computer be found again after its address changed — e.g.
     // a hotspot restart picks a new subnet. Dialled only with a pinned identity.
     private val discovered = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Int>>()
     private val serverDiscovery = ServerDiscovery(
-        context,
+        appContext,
         onFound = { url, name ->
             runCatching { java.net.URI(url) }.getOrNull()?.let { uri ->
                 val host = uri.host?.removePrefix("[")?.removeSuffix("]")
                 if (!host.isNullOrBlank() && uri.port > 0) discovered[name] = host to uri.port
+                AndroidDiagnostics.recordNsdDiscovered(discovered.size)
             }
         },
-        onLost = { name -> discovered.remove(name) },
+        onLost = { name ->
+            discovered.remove(name)
+            AndroidDiagnostics.recordNsdDiscovered(discovered.size)
+        },
     )
     private val configuredTarget = prefs.target
     private val worker = Executors.newSingleThreadExecutor { r ->
         Thread(r, "airbridge-native-commands").apply { isDaemon = true }
+    }
+    /** Dedicated I/O executor for URI inspection/stream opening and async socket closes off [worker] & main thread. */
+    private val ioExecutor = Executors.newCachedThreadPool { r ->
+        Thread(r, "airbridge-native-io").apply { isDaemon = true }
     }
     private val stateLock = Any()
     @Volatile private var engine: AirBridgeEngine? = null
@@ -116,7 +129,7 @@ class NativeEngineHost(
 
     /** Hotspot handoff: starts a local-only hotspot and hands it to the paired computer. */
     val handoff = HotspotHandoff(
-        context = context,
+        context = appContext,
         info = { engine?.handoffInfo ?: prefs.handoffInfo },
         pairCode = { engine?.myPairCode ?: prefs.pairCode },
         reversePort = { engine?.reversePort },
@@ -131,7 +144,7 @@ class NativeEngineHost(
     )
 
     /** Contacts, calls and screen sharing for the paired computer. */
-    private val phoneContinuity = PhoneContinuity(context, prefs)
+    private val phoneContinuity = PhoneContinuity(appContext, prefs)
 
     private var lanUrls = emptyList<String>()
     private val clips = ArrayDeque<ClipboardItem>()
@@ -167,10 +180,12 @@ class NativeEngineHost(
             try {
                 val image = item.imageDataUrl
                 if (image != null) {
-                    ClipboardImageProvider.copyImage(context, image)
+                    ConnectionService.markOwnClipboardImageWrite()
+                    ClipboardImageProvider.copyImage(appContext, image)
+                    AndroidDiagnostics.recordClipboardImageReceived()
                 } else {
                     ConnectionService.markOwnClipboardWrite(item.text)
-                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                    (appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
                         .setPrimaryClip(ClipData.newPlainText("AirBridge", item.text))
                 }
                 synchronized(stateLock) {
@@ -225,10 +240,10 @@ class NativeEngineHost(
                         tlsTrustManager = prefs.tlsTrust(link),
                         // Long-term identity in the Android Keystore: computers
                         // pin this phone, not a per-launch session key.
-                        deviceIdentity = KeystoreDeviceIdentity.load(context),
+                        deviceIdentity = KeystoreDeviceIdentity.load(appContext),
                         initialRelay = com.airbridge.engine.RelayRoute.deserialize(prefs.relayRoute),
                         initialHandoff = prefs.handoffInfo,
-                        defaultSinkFactory = AndroidFileSinkFactory(context),
+                        defaultSinkFactory = AndroidFileSinkFactory(appContext),
                         // Primary + QR alternates + addresses the computer
                         // reported last time; ranked on-link-first per attempt.
                         endpointHosts = { prefs.invitations.candidateHosts() },
@@ -245,6 +260,7 @@ class NativeEngineHost(
                 created.addListener(
                     object : EngineListener {
                         override fun onConnectionState(state: ConnectionState) {
+                            AndroidDiagnostics.recordEvent("connection", "State -> ${state.name}")
                             refresh()
                             onConnection(state)
                         }
@@ -265,6 +281,7 @@ class NativeEngineHost(
                             }
                             synchronized(stateLock) { lanUrls = info.lanUrls }
                             prefs.invitations.learn(info.lanUrls)
+                            AndroidDiagnostics.recordEvent("connection", "Welcome received (admission=${info.admission ?: "host"})")
                             refresh()
                         }
 
@@ -272,6 +289,7 @@ class NativeEngineHost(
                             if (closed) return
                             connectionProgress = "Trying " + hosts.take(3).joinToString(", ") + "…"
                             Log.i(TAG, "Connecting to ${hosts.joinToString()}")
+                            AndroidDiagnostics.recordEvent("connect", "Dialing candidates: ${hosts.take(4).joinToString()}")
                             refresh()
                         }
 
@@ -286,6 +304,7 @@ class NativeEngineHost(
                             }
                             prefs.invitations.markConnected(host)
                             Log.i(TAG, "Connected via $host" + if (viaReverse) " (computer dialled in)" else "")
+                            AndroidDiagnostics.recordEvent("connect", "Endpoint connected: $host (viaReverse=$viaReverse)")
                             refresh()
                         }
 
@@ -293,6 +312,7 @@ class NativeEngineHost(
                             if (closed) return
                             connectionProgress = "No direct path to the computer. Connecting through the relay ($relayHost), still end-to-end encrypted…"
                             Log.i(TAG, "Connected via relay $relayHost")
+                            AndroidDiagnostics.recordEvent("connect", "Connected via relay: $relayHost")
                             refresh()
                         }
 
@@ -308,6 +328,7 @@ class NativeEngineHost(
                             connectionError = diagnosis.userMessage
                             connectionGuidance = diagnosis
                             Log.w(TAG, "${diagnosis.kind}: ${diagnosis.detail}")
+                            AndroidDiagnostics.recordEvent("connection", "${diagnosis.kind}: ${diagnosis.detail}", "WARN")
                             refresh()
                         }
 
@@ -358,6 +379,7 @@ class NativeEngineHost(
                         override fun onError(code: String, message: String) {
                             // Classified failures arrive via onConnectionFailure.
                             Log.w(TAG, "$code: $message")
+                            AndroidDiagnostics.recordEvent("engine", "$code: $message", "WARN")
                             refresh()
                         }
                     },
@@ -378,6 +400,7 @@ class NativeEngineHost(
             } catch (e: Exception) {
                 connectionError = e.message ?: "Native engine startup failed"
                 Log.e(TAG, "Native engine startup failed", e)
+                AndroidDiagnostics.recordEvent("engine", "Startup failed: ${e.message}", "ERROR")
                 refresh()
             }
         }
@@ -576,22 +599,66 @@ class NativeEngineHost(
         current.sendClipboardText(peerId, text)
     }
 
-    fun sendClipboardImageUri(peerId: String, uri: Uri): Result<ClipboardItem> = submitSync { current ->
-        val dataUrl = NativeFiles.clipboardImageDataUrlFromUri(context, uri)
-        current.sendClipboardImageDataUrl(peerId, dataUrl)
+    /**
+     * AND-18: Reads and encodes the selected image URI on [ioExecutor] (or caller's IO thread)
+     * BEFORE submitting the lightweight data URL to single-threaded [worker].
+     */
+    fun sendClipboardImageUri(peerId: String, uri: Uri): Result<ClipboardItem> {
+        if (closed) return Result.failure(IllegalStateException("Native connection unavailable"))
+        val dataUrlResult = runCatching {
+            val future = ioExecutor.submit<String> {
+                NativeFiles.clipboardImageDataUrlFromUri(appContext, uri)
+            }
+            future.get(15, TimeUnit.SECONDS)
+        }
+        val dataUrl = dataUrlResult.getOrElse { err ->
+            val cause = err.cause ?: err
+            return Result.failure(IllegalStateException(cause.message ?: "Could not open selected image", cause))
+        }
+        return submitSync { current ->
+            current.sendClipboardImageDataUrl(peerId, dataUrl)
+        }
     }
 
-    fun sendFiles(peerId: String, uris: List<Uri>): Result<TransferView> = submitSync { current ->
-        require(uris.size in 1..Limits.MAX_FILES_PER_TRANSFER) { "Select 1–100 files" }
-        val sources = uris.map { NativeFiles.openUriSource(context, it) }
-        val transferId = current.sendFiles(peerId, sources)
-        current.transferView(transferId)
-            ?: throw IllegalStateException("Transfer failed to start")
+    /**
+     * AND-18: Inspects and opens URI sources on [ioExecutor] BEFORE submitting
+     * the lightweight [FileSource] handles to single-threaded [worker].
+     */
+    fun sendFiles(peerId: String, uris: List<Uri>): Result<TransferView> {
+        if (closed) return Result.failure(IllegalStateException("Native connection unavailable"))
+        if (uris.size !in 1..Limits.MAX_FILES_PER_TRANSFER) {
+            return Result.failure(IllegalArgumentException("Select 1–100 files"))
+        }
+        val sourcesResult = runCatching {
+            val future = ioExecutor.submit<List<FileSource>> {
+                uris.map { NativeFiles.openUriSource(appContext, it) }
+            }
+            future.get(15, TimeUnit.SECONDS)
+        }
+        val sources = sourcesResult.getOrElse { err ->
+            val cause = err.cause ?: err
+            return Result.failure(IllegalStateException(cause.message ?: "Could not open selected files", cause))
+        }
+        return submitSync { current ->
+            val transferId = current.sendFiles(peerId, sources)
+            current.transferView(transferId)
+                ?: throw IllegalStateException("Transfer failed to start")
+        }
     }
 
+    /**
+     * AND-16: Always closes the active WebSocket off `mainHandler` / UI thread.
+     */
     fun reconnect() {
-        engine?.reconnect()
+        if (closed) return
+        runCatching {
+            ioExecutor.execute {
+                runCatching { engine?.reconnect() }
+            }
+        }
     }
+
+    fun diagnosticsSnapshot(): EngineDiagnosticsSnapshot? = engine?.diagnosticsSnapshot()
 
     /** The engine's continuity channel (null until the engine started). */
     fun continuityChannel(): ContinuityChannel? = engine?.continuity
@@ -626,10 +693,12 @@ class NativeEngineHost(
         if (instance === this) instance = null
         engine?.stop()
         worker.shutdownNow()
+        ioExecutor.shutdownNow()
     }
 
     companion object {
         private const val TAG = "AirBridgeNative"
+        @SuppressLint("StaticFieldLeak")
         @Volatile var instance: NativeEngineHost? = null
             private set
     }

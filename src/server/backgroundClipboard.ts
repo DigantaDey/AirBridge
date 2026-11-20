@@ -98,6 +98,8 @@ export interface BackgroundClipboardOptions {
   defaultPairCode: string;
   /** Writes an incoming beam to the host OS clipboard. */
   writeClipboard: (text: string) => Promise<boolean>;
+  /** Writes an incoming image beam to the host OS clipboard. */
+  writeClipboardImage?: (imageDataUrl: string) => Promise<boolean>;
   /** Optional override for tests / portable installs. */
   storagePath?: string | null;
 }
@@ -115,7 +117,7 @@ export class BackgroundClipboardPeer {
   private readonly storage: Storage;
   private client: WarpClient | null = null;
   private stopped = false;
-  private pendingWrite: string | null = null;
+  private pendingWrite: { kind: 'text'; text: string } | { kind: 'image'; imageDataUrl: string } | null = null;
   private writing = false;
 
   constructor(private readonly opts: BackgroundClipboardOptions) {
@@ -163,10 +165,16 @@ export class BackgroundClipboardPeer {
       ),
       writeHostClipboard: false,
       onIncomingClipboard: (item: ClipboardBeamItem) => {
+        if (item.contentType === 'image' && item.imageDataUrl) {
+          if (!this.opts.writeClipboardImage) return;
+          this.pendingWrite = { kind: 'image', imageDataUrl: item.imageDataUrl };
+          void this.flushClipboardWrites();
+          return;
+        }
         if (item.contentType === 'image' || !item.text) return;
         const text = item.text;
         if (!text.trim()) return;
-        this.pendingWrite = text;
+        this.pendingWrite = { kind: 'text', text };
         void this.flushClipboardWrites();
       },
       onIncomingNotification: (notification: NotificationBeamItem) => {
@@ -203,10 +211,16 @@ export class BackgroundClipboardPeer {
     this.writing = true;
     try {
       while (this.pendingWrite !== null && !this.stopped) {
-        const text = this.pendingWrite;
+        const entry = this.pendingWrite;
         this.pendingWrite = null;
         if (!this.client?.getSnapshot().clipboardReceiveEnabled) continue;
-        if (await this.opts.writeClipboard(text).catch(() => false)) this.client?.markClipboardSynced(text);
+        if (entry.kind === 'image') {
+          await this.opts.writeClipboardImage?.(entry.imageDataUrl).catch(() => false);
+        } else {
+          if (await this.opts.writeClipboard(entry.text).catch(() => false)) {
+            this.client?.markClipboardSynced(entry.text);
+          }
+        }
       }
     } finally { this.writing = false; }
   }
@@ -214,6 +228,10 @@ export class BackgroundClipboardPeer {
   /** The daemon owns OS capture even when a newer browser tab is suspended. */
   handleHostClipboard(text: string): void {
     if (!this.stopped) void this.client?.handleDetectedLocalClipboard(text).catch(() => {});
+  }
+
+  handleHostClipboardImage(imageDataUrl: string, imageName?: string): void {
+    if (!this.stopped) void this.client?.handleDetectedLocalClipboardImage(imageDataUrl, imageName).catch(() => {});
   }
 
   /** Called by the local browser when the user joins or rotates a pair code. */

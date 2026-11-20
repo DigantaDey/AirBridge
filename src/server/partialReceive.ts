@@ -69,6 +69,12 @@ const JOURNAL_ENTRY_BYTES = 4;
 // and the amount that may need to be re-sent after a process crash. The final
 // chunk of every file is always checkpointed.
 const JOURNAL_FLUSH_CHUNKS = 32;
+export const DEFAULT_PARTIAL_TTL_MS = 24 * 60 * 60 * 1000;
+
+export interface PartialReceiveStoreOptions {
+  ttlMs?: number;
+  now?: () => number;
+}
 
 function isValidMeta(meta: PartialReceiveMeta): boolean {
   return (
@@ -92,8 +98,73 @@ export class PartialReceiveStore {
   // Serialises chunk writes per file so concurrent requests cannot interleave
   // on the shared file descriptor.
   private readonly chains = new Map<string, Promise<unknown>>();
+  private readonly ttlMs: number;
+  private readonly now: () => number;
+  private orphanedPartialsCleaned = 0;
+  private finalizeCount = 0;
+  private finalizeRehashCount = 0;
+  private lastFinalizeDurationMs: number | null = null;
 
-  constructor(private readonly config: MacDaemonConfig) {}
+  constructor(private readonly config: MacDaemonConfig, opts: PartialReceiveStoreOptions = {}) {
+    this.ttlMs = opts.ttlMs ?? DEFAULT_PARTIAL_TTL_MS;
+    this.now = opts.now ?? Date.now;
+  }
+
+  public getStats(): {
+    activePartials: number;
+    orphanedPartialsCleaned: number;
+    finalizeCount: number;
+    finalizeRehashCount: number;
+    lastFinalizeDurationMs: number | null;
+  } {
+    return {
+      activePartials: this.states.size,
+      orphanedPartialsCleaned: this.orphanedPartialsCleaned,
+      finalizeCount: this.finalizeCount,
+      finalizeRehashCount: this.finalizeRehashCount,
+      lastFinalizeDurationMs: this.lastFinalizeDurationMs,
+    };
+  }
+
+  /**
+   * Sweep `.airbridge-partial/` and remove expired `.part`/`.json`/`.journal`/`.tmp`
+   * entries older than `maxAgeMs` (default 24h) that are not currently active in memory.
+   */
+  public async cleanupExpiredPartials(maxAgeMs = this.ttlMs): Promise<number> {
+    let entries: string[];
+    try {
+      entries = await fs.promises.readdir(this.partialDir);
+    } catch {
+      return 0;
+    }
+    const cutoff = this.now() - maxAgeMs;
+    const prefixGroups = new Map<string, { files: string[]; newestMtime: number }>();
+    for (const entry of entries) {
+      const m = /^([0-9a-f]{16}-\d+)\.(part|json|journal)(?:\..*\.tmp|\.tmp)?$/.exec(entry);
+      const groupKey = m ? m[1]! : entry;
+      const fullPath = path.join(this.partialDir, entry);
+      const st = await fs.promises.stat(fullPath).catch(() => null);
+      if (!st) continue;
+      const g = prefixGroups.get(groupKey) ?? { files: [], newestMtime: 0 };
+      g.files.push(fullPath);
+      if (st.mtimeMs > g.newestMtime) g.newestMtime = st.mtimeMs;
+      prefixGroups.set(groupKey, g);
+    }
+
+    let cleaned = 0;
+    for (const [groupKey, group] of prefixGroups.entries()) {
+      const stateKey = groupKey.replace('-', ':');
+      if (this.states.has(stateKey)) continue;
+      if (group.newestMtime <= cutoff) {
+        for (const f of group.files) {
+          await fs.promises.rm(f, { force: true }).catch(() => {});
+        }
+        cleaned++;
+      }
+    }
+    this.orphanedPartialsCleaned += cleaned;
+    return cleaned;
+  }
 
   private get partialDir(): string {
     return path.join(this.config.downloadDir, '.airbridge-partial');
@@ -154,7 +225,7 @@ export class PartialReceiveStore {
     const { tempPath, metaPath, journalPath } = this.pathsFor(meta.transferId, meta.fileIndex);
     await fs.promises.mkdir(this.partialDir, { recursive: true });
 
-    let receivedChunks: boolean[] = new Array(meta.totalChunks).fill(false);
+    const receivedChunks: boolean[] = new Array(meta.totalChunks).fill(false);
     let receivedCount = 0;
     let hasSnapshot = false;
     let parsedManifest:
@@ -318,16 +389,19 @@ export class PartialReceiveStore {
 
   private async ensureFd(state: PartialReceiveState): Promise<fs.promises.FileHandle> {
     if (state.fd) return state.fd;
-    const flag = await fs.promises
-      .access(state.tempPath)
-      .then(() => 'r+')
-      .catch(() => 'w+');
-    state.fd = await fs.promises.open(state.tempPath, flag);
-    // A stale .part from an earlier receive with the same ID must not leave
-    // trailing bytes past the declared size. Truncating to the exact size also
-    // pre-fills zero holes for out-of-order chunk writes; all holes are
-    // overwritten before receivedCount can equal totalChunks.
-    await state.fd.truncate(state.size);
+    let fh: fs.promises.FileHandle;
+    try {
+      fh = await fs.promises.open(state.tempPath, 'r+');
+    } catch {
+      fh = await fs.promises.open(state.tempPath, 'w+');
+    }
+    state.fd = fh;
+    // Only truncate when initializing or resizing when the on-disk size differs
+    // from the declared size (avoiding redundant ftruncate on every open).
+    const st = await fh.stat();
+    if (st.size !== state.size) {
+      await fh.truncate(state.size);
+    }
     return state.fd;
   }
 
@@ -338,7 +412,10 @@ export class PartialReceiveStore {
     state.fd = undefined;
   }
 
-  private async persist(state: PartialReceiveState): Promise<void> {
+  private async persist(
+    state: PartialReceiveState,
+    overrides?: { receivedChunks: boolean[]; receivedBytes: number },
+  ): Promise<void> {
     const payload = {
       transferId: state.transferId,
       fileIndex: state.fileIndex,
@@ -347,18 +424,21 @@ export class PartialReceiveStore {
       size: state.size,
       chunkSize: state.chunkSize,
       totalChunks: state.totalChunks,
-      receivedChunks: state.receivedChunks,
-      receivedBytes: state.receivedBytes,
+      receivedChunks: overrides ? overrides.receivedChunks : state.receivedChunks,
+      receivedBytes: overrides ? overrides.receivedBytes : state.receivedBytes,
     };
-    const tmp = `${state.metaPath}.tmp`;
+    const tmp = `${state.metaPath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
     await fs.promises.writeFile(tmp, JSON.stringify(payload), { mode: 0o600 });
     await fs.promises.rename(tmp, state.metaPath);
     state.hasSnapshot = true;
   }
 
   /** Append a batch in O(number of new chunks), never rewriting prior history. */
-  private async flushJournal(state: PartialReceiveState): Promise<void> {
-    if (state.pendingJournal.length === 0) return;
+  private async flushJournal(state: PartialReceiveState, extraChunkIndex?: number): Promise<void> {
+    const entries = extraChunkIndex !== undefined
+      ? [...state.pendingJournal, extraChunkIndex]
+      : state.pendingJournal;
+    if (entries.length === 0) return;
     // If a previous append was interrupted, discard its partial entry before
     // adding more so every later index stays four-byte aligned.
     const stat = await fs.promises.stat(state.journalPath).catch(() => null);
@@ -368,9 +448,9 @@ export class PartialReceiveStore {
         stat.size - (stat.size % JOURNAL_ENTRY_BYTES),
       );
     }
-    const batch = Buffer.allocUnsafe(state.pendingJournal.length * JOURNAL_ENTRY_BYTES);
-    for (let i = 0; i < state.pendingJournal.length; i++) {
-      batch.writeUInt32BE(state.pendingJournal[i], i * JOURNAL_ENTRY_BYTES);
+    const batch = Buffer.allocUnsafe(entries.length * JOURNAL_ENTRY_BYTES);
+    for (let i = 0; i < entries.length; i++) {
+      batch.writeUInt32BE(entries[i]!, i * JOURNAL_ENTRY_BYTES);
     }
     await fs.promises.appendFile(state.journalPath, batch, { mode: 0o600 });
     state.pendingJournal = [];
@@ -396,27 +476,37 @@ export class PartialReceiveStore {
         if (result.bytesWritten <= 0) throw new Error('Disk write made no progress.');
         written += result.bytesWritten;
       }
-      state.receivedChunks[chunkIndex] = true;
-      state.receivedCount++;
-      state.receivedBytes += data.byteLength;
-      state.pendingJournal.push(chunkIndex);
-      if (state.runningHash && state.hashedContiguousChunks === chunkIndex) {
-        state.runningHash.update(data);
-        state.hashedContiguousChunks++;
-      } else {
-        state.runningHash = null;
-      }
 
       if (!state.hasSnapshot) {
         // One small atomic manifest per file anchors the append-only journal
         // and preserves compatibility with existing .json partial receives.
-        await this.persist(state);
+        const nextChunks = state.receivedChunks.slice();
+        nextChunks[chunkIndex] = true;
+        await this.persist(state, {
+          receivedChunks: nextChunks,
+          receivedBytes: state.receivedBytes + data.byteLength,
+        });
         state.pendingJournal = [];
       } else if (
-        state.pendingJournal.length >= JOURNAL_FLUSH_CHUNKS ||
+        state.pendingJournal.length + 1 >= JOURNAL_FLUSH_CHUNKS ||
         chunkIndex === state.totalChunks - 1
       ) {
-        await this.flushJournal(state);
+        await this.flushJournal(state, chunkIndex);
+      } else {
+        state.pendingJournal.push(chunkIndex);
+      }
+
+      // Update in-memory receivedChunks only after disk & snapshot/journal write succeeds.
+      state.receivedChunks[chunkIndex] = true;
+      state.receivedCount++;
+      state.receivedBytes += data.byteLength;
+      if (state.runningHash) {
+        if (state.hashedContiguousChunks === chunkIndex) {
+          state.runningHash.update(data);
+          state.hashedContiguousChunks++;
+        } else {
+          state.runningHash = null;
+        }
       }
     });
   }
@@ -481,10 +571,16 @@ export class PartialReceiveStore {
         throw new Error('Received byte count does not match the declared file size.');
       }
       await this.flushJournal(state);
-      const sha256 =
-        state.runningHash && state.hashedContiguousChunks === state.totalChunks
-          ? state.runningHash.digest('hex')
-          : await this.hashFile(state.tempPath);
+      const finalizeStartedAt = Date.now();
+      let sha256: string;
+      if (state.runningHash && state.hashedContiguousChunks === state.totalChunks) {
+        sha256 = state.runningHash.digest('hex');
+      } else {
+        this.finalizeRehashCount += 1;
+        sha256 = await this.hashFile(state.tempPath);
+      }
+      this.finalizeCount += 1;
+      this.lastFinalizeDurationMs = Math.max(0, Date.now() - finalizeStartedAt);
       state.runningHash = null;
       // Reject before the .part file is renamed: a hash mismatch must never
       // become a "completed" file in Downloads. Remove the partial so a retry
