@@ -3,7 +3,7 @@
  *
  * Every claim in these pages is taken from the repository itself (README,
  * docs/, SECURITY.md and the source in src/ and android/). When a limit is
- * real — no iOS app, ad-hoc signing, Android clipboard restrictions — it is
+ * real — no native iOS app, ad-hoc signing, Android clipboard restrictions — it is
  * stated plainly on the page instead of being hidden.
  */
 import { MAC, WINDOWS, LINUX, AIRDROP } from './guides-desktop.mjs';

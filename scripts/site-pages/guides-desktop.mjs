@@ -86,7 +86,7 @@ export const MAC = {
       id: 'limits',
       h2: 'Limits worth knowing before you install',
       html: `        <ul>
-          <li><strong>No iOS app.</strong> AirBridge connects Android to macOS, Windows and Linux. iPhone-to-Android is not supported.</li>
+          <li><strong>iPhone and iPad use the browser.</strong> Open your running AirBridge instance in Safari for file transfer and clipboard sharing, subject to browser permissions. There is no native iOS app; screen sharing, contacts and calls are not promised on iOS.</li>
           <li><strong>Both apps are required</strong> for the full experience. A browser tab can receive files, but a browser-only receiver is memory-capped (128 MiB) — use the native app or the daemon for large files.</li>
           <li><strong>Resume is per running session.</strong> Android force-stop, reboot or a revoked file permission ends it; the next attempt is a normal, freshly verified transfer.</li>
           <li><strong>No remote control.</strong> Screen sharing is viewing only; AirBridge does not inject taps or keystrokes into your phone.</li>
@@ -188,7 +188,7 @@ export const WINDOWS = {
           <li><strong>Unsigned binaries</strong> mean SmartScreen friction for browser downloads, as described above.</li>
           <li><strong>Clipboard images are macOS-only.</strong> On Windows the desktop clipboard bridge is text, powered by the built-in PowerShell clipboard cmdlets.</li>
           <li><strong>View-only screen sharing.</strong> You can watch the phone screen; you cannot drive the phone from the PC.</li>
-          <li><strong>No iPhone or iPad support</strong> anywhere in the product.</li>
+          <li><strong>iPhone and iPad have browser support</strong> for file transfer and clipboard sharing, subject to browser permissions, rather than a native iOS app.</li>
         </ul>`,
     },
   ],
@@ -280,7 +280,7 @@ export const LINUX = {
           <li><strong>Desktop integration is XDG-based.</strong> Menu actions and the launcher entry work on freedesktop-compliant desktops; exotic setups may need to launch the binary directly.</li>
           <li><strong>Text-only desktop clipboard</strong> outside macOS, as described above.</li>
           <li><strong>Screen sharing is viewing only</strong>, and computer-to-computer sharing uses the browser’s own screen picker.</li>
-          <li><strong>No iOS client.</strong> Android, macOS, Windows and Linux are the supported endpoints.</li>
+          <li><strong>No native iOS app.</strong> iPhone and iPad can use Safari for file transfer and clipboard sharing, subject to browser permissions; other native integrations are not promised.</li>
         </ul>`,
     },
   ],
@@ -364,7 +364,7 @@ export const AIRDROP = {
             <tr><td><strong>Setup</strong></td><td>Nothing to install, built into the OS</td><td class="airbridge-col">Install two apps; pair once with a QR code</td></tr>
             <tr><td><strong>Encryption</strong></td><td>Apple-proprietary, opaque</td><td class="airbridge-col">SPAKE2 pairing, ECDH P-256, AES-256-GCM, verifiable SAS</td></tr>
             <tr><td><strong>Large files</strong></td><td>Handled by the OS</td><td class="airbridge-col">Direct-to-disk, resumable in-session, SHA-256 verified</td></tr>
-            <tr><td><strong>iPhone support</strong></td><td>Yes</td><td class="airbridge-col">No</td></tr>
+            <tr><td><strong>iPhone support</strong></td><td>Yes</td><td class="airbridge-col">Browser: files and clipboard, subject to permissions</td></tr>
             <tr><td><strong>Polish</strong></td><td>Deep OS integration no third party can match</td><td class="airbridge-col">Native Android app plus desktop companion/CLI</td></tr>
           </tbody>
         </table>
@@ -385,7 +385,7 @@ export const AIRDROP = {
       id: 'not',
       h2: 'What AirBridge is not',
       html: `        <ul>
-          <li><strong>Not Apple AirDrop.</strong> It does not implement AirDrop, AWDL or any Apple protocol, and it cannot exchange files with an iPhone or iPad.</li>
+          <li><strong>Not Apple AirDrop.</strong> It does not implement AirDrop, AWDL or any Apple protocol. iPhone and iPad can exchange files through the AirBridge browser UI, not through Apple AirDrop.</li>
           <li><strong>Not affiliated with Apple or Google.</strong> AirDrop, Continuity and iPhone Mirroring are Apple trademarks; Android, Quick Share and Google Play are Google trademarks. AirBridge is an independent project by Diganta Dey.</li>
           <li><strong>Not a cloud service.</strong> There is no AirBridge account and no server that stores your files. The optional relay forwards ciphertext and is self-hostable.</li>
           <li><strong>Not commercially licensed.</strong> The source is public and free for personal use under the AirBridge Fair-Use &amp; Non-Commercial License; commercial use needs written consent. Read <a href="${SITE.repoUrl}/blob/main/LICENSE">LICENSE</a> before you ship it anywhere.</li>
@@ -399,7 +399,7 @@ export const AIRDROP = {
     },
     {
       q: 'Can I send a file from Android to an iPhone with AirBridge?',
-      a: 'No. AirBridge supports Android with macOS, Windows and Linux. There is no iOS app, so Android-to-iPhone transfer is out of scope.',
+      a: 'Yes, using the AirBridge browser UI on the iPhone with a running AirBridge computer instance. Safari supports file transfer and clipboard sharing subject to browser permissions, not the native Android integrations. The local HTTPS certificate may show a trust warning because its CA is not trusted by default; verify that the address belongs to your own instance before continuing.',
     },
     {
       q: 'Do I need Bluetooth to pair?',

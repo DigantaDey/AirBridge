@@ -123,9 +123,14 @@ AirBridge connects **Android** with **macOS, Windows and Linux**. Send files, sh
 | macOS (Apple silicon, Intel) | Menu-bar app + service | Ad-hoc signed; Launchpad/Finder install into `~/Applications`. |
 | Windows 10/11 (x64, ARM64) | Portable executable | No installer, no admin rights, per-user PATH. |
 | Linux (x64, arm64; glibc, musl) | Static binary + XDG launcher | No root; optional systemd **user** service for autostart. |
+| iPhone / iPad | Browser UI (Safari) | File transfer and clipboard sharing, subject to browser permissions; no native iOS app. |
 | Any OS with Node.js 20+ | CLI, daemon, relay | `npx airbridge`, browser UI on port 3000. |
 
-Not supported: iOS/iPadOS (there is no iOS client), and remote control of the phone from the desktop.
+**iPhone and iPad:** open the AirBridge address shown by your running computer in Safari. File transfer and clipboard sharing work through the browser; clipboard access may require a tap or manual copy/paste. Screen sharing, contacts, calls and other native integrations are not promised on iOS. Keep the page open while using it.
+
+The local HTTPS certificate is issued by AirBridge’s own certificate authority (CA), which Safari may not trust by default. Only continue after checking that the address belongs to your own AirBridge instance; do not dismiss certificate warnings on unfamiliar sites. This warning concerns the local instance, not the public airbridge.fyi website.
+
+Remote control of the phone from the desktop is not supported.
 
 ---
 
@@ -207,9 +212,9 @@ See [Pairing and connectivity](docs/pairing-and-connectivity.md) for the protoco
 | **No cloud / offline LAN** | **Yes** | ⚠️ Needs Apple ID | **Yes** | **Yes** | ⚠️ Needs WebRTC STUN | ⚠️ Needs Google account |
 | **Contacts, calls and screen from the computer** | **Yes (E2EE, per-feature consent)** | ⚠️ Apple devices only | ❌ No | ⚠️ Partial | ❌ No | ❌ No |
 | **CLI / daemon execution mode** | **Yes (`npx airbridge` / binary)** | ❌ No | ❌ No | ⚠️ Partial | ❌ No | ❌ No |
-| **iOS client** | ❌ No | ✅ Yes | ✅ Yes | ⚠️ Limited | ✅ Browser | ⚠️ Varies |
+| **iOS access** | ✅ Browser; files + clipboard | ✅ Yes | ✅ Yes | ⚠️ Limited | ✅ Browser | ⚠️ Varies |
 
-**Where another tool is the better choice:** LocalSend if you need a permissively licensed project or iOS in the mix; KDE Connect if you live in KDE Plasma and want notification mirroring and remote input; AirDroid if you need remote management over the internet; Quick Share if you only move files between Windows and Android and want zero setup; AirDrop if everything you own is Apple. AirBridge targets the mixed **Android + desktop** case with one verified session for files, clipboard, screen, contacts and calls. The full, deliberately unflattering comparison is at [airbridge.fyi/compare.html](https://airbridge.fyi/compare.html).
+**Where another tool is the better choice:** LocalSend if you need a permissively licensed project or a native iOS app; KDE Connect if you live in KDE Plasma and want notification mirroring and remote input; AirDroid if you need remote management over the internet; Quick Share if you only move files between Windows and Android and want zero setup; AirDrop if everything you own is Apple. AirBridge targets the mixed **Android + desktop** case with one verified session for files, clipboard, screen, contacts and calls. The full, deliberately unflattering comparison is at [airbridge.fyi/compare.html](https://airbridge.fyi/compare.html).
 
 ---
 

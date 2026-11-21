@@ -31,7 +31,7 @@
   {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"AirBridge","item":"https://airbridge.fyi/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://airbridge.fyi/guides.html"},{"@type":"ListItem","position":3,"name":"Android AirDrop alternative","item":"https://airbridge.fyi/android-airdrop-alternative.html"}]}
   </script>
   <script type="application/ld+json">
-  {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Does AirBridge use Apple AirDrop under the hood?","acceptedAnswer":{"@type":"Answer","text":"No. AirBridge implements its own encrypted protocol over WebSockets and WebRTC data channels. It does not use AirDrop, AWDL or any Apple-licensed technology, and it does not claim Apple interoperability."}},{"@type":"Question","name":"Can I send a file from Android to an iPhone with AirBridge?","acceptedAnswer":{"@type":"Answer","text":"No. AirBridge supports Android with macOS, Windows and Linux. There is no iOS app, so Android-to-iPhone transfer is out of scope."}},{"@type":"Question","name":"Do I need Bluetooth to pair?","acceptedAnswer":{"@type":"Answer","text":"No. Pairing uses a QR code or a six-character code and an encrypted network session. Bluetooth LE is used only for one optional convenience: handing phone-hotspot credentials to a Mac when there is no network connection yet."}},{"@type":"Question","name":"Is AirBridge free to use?","acceptedAnswer":{"@type":"Answer","text":"It is free for personal, non-commercial use on your own devices. Commercial or organisational use requires prior written consent from the author, as described in LICENSE."}}]}
+  {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Does AirBridge use Apple AirDrop under the hood?","acceptedAnswer":{"@type":"Answer","text":"No. AirBridge implements its own encrypted protocol over WebSockets and WebRTC data channels. It does not use AirDrop, AWDL or any Apple-licensed technology, and it does not claim Apple interoperability."}},{"@type":"Question","name":"Can I send a file from Android to an iPhone with AirBridge?","acceptedAnswer":{"@type":"Answer","text":"Yes, using the AirBridge browser UI on the iPhone with a running AirBridge computer instance. Safari supports file transfer and clipboard sharing subject to browser permissions, not the native Android integrations. The local HTTPS certificate may show a trust warning because its CA is not trusted by default; verify that the address belongs to your own instance before continuing."}},{"@type":"Question","name":"Do I need Bluetooth to pair?","acceptedAnswer":{"@type":"Answer","text":"No. Pairing uses a QR code or a six-character code and an encrypted network session. Bluetooth LE is used only for one optional convenience: handing phone-hotspot credentials to a Mac when there is no network connection yet."}},{"@type":"Question","name":"Is AirBridge free to use?","acceptedAnswer":{"@type":"Answer","text":"It is free for personal, non-commercial use on your own devices. Commercial or organisational use requires prior written consent from the author, as described in LICENSE."}}]}
   </script>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
@@ -112,7 +112,7 @@
             <tr><td><strong>Setup</strong></td><td>Nothing to install, built into the OS</td><td class="airbridge-col">Install two apps; pair once with a QR code</td></tr>
             <tr><td><strong>Encryption</strong></td><td>Apple-proprietary, opaque</td><td class="airbridge-col">SPAKE2 pairing, ECDH P-256, AES-256-GCM, verifiable SAS</td></tr>
             <tr><td><strong>Large files</strong></td><td>Handled by the OS</td><td class="airbridge-col">Direct-to-disk, resumable in-session, SHA-256 verified</td></tr>
-            <tr><td><strong>iPhone support</strong></td><td>Yes</td><td class="airbridge-col">No</td></tr>
+            <tr><td><strong>iPhone support</strong></td><td>Yes</td><td class="airbridge-col">Browser: files and clipboard, subject to permissions</td></tr>
             <tr><td><strong>Polish</strong></td><td>Deep OS integration no third party can match</td><td class="airbridge-col">Native Android app plus desktop companion/CLI</td></tr>
           </tbody>
         </table>
@@ -130,7 +130,7 @@
 
       <h2 id="not">What AirBridge is not</h2>
         <ul>
-          <li><strong>Not Apple AirDrop.</strong> It does not implement AirDrop, AWDL or any Apple protocol, and it cannot exchange files with an iPhone or iPad.</li>
+          <li><strong>Not Apple AirDrop.</strong> It does not implement AirDrop, AWDL or any Apple protocol. iPhone and iPad can exchange files through the AirBridge browser UI, not through Apple AirDrop.</li>
           <li><strong>Not affiliated with Apple or Google.</strong> AirDrop, Continuity and iPhone Mirroring are Apple trademarks; Android, Quick Share and Google Play are Google trademarks. AirBridge is an independent project by Diganta Dey.</li>
           <li><strong>Not a cloud service.</strong> There is no AirBridge account and no server that stores your files. The optional relay forwards ciphertext and is self-hostable.</li>
           <li><strong>Not commercially licensed.</strong> The source is public and free for personal use under the AirBridge Fair-Use &amp; Non-Commercial License; commercial use needs written consent. Read <a href="https://github.com/DigantaDey/AirBridge/blob/main/LICENSE">LICENSE</a> before you ship it anywhere.</li>
@@ -145,7 +145,7 @@
       </details>
       <details>
         <summary>Can I send a file from Android to an iPhone with AirBridge?<span aria-hidden="true">＋</span></summary>
-        <p>No. AirBridge supports Android with macOS, Windows and Linux. There is no iOS app, so Android-to-iPhone transfer is out of scope.</p>
+        <p>Yes, using the AirBridge browser UI on the iPhone with a running AirBridge computer instance. Safari supports file transfer and clipboard sharing subject to browser permissions, not the native Android integrations. The local HTTPS certificate may show a trust warning because its CA is not trusted by default; verify that the address belongs to your own instance before continuing.</p>
       </details>
       <details>
         <summary>Do I need Bluetooth to pair?<span aria-hidden="true">＋</span></summary>
