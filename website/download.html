@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="theme-color" content="#f7f8f7">
+  <meta name="description" content="Download AirBridge: prebuilt macOS app, portable Windows EXE, static Linux binaries, the Android APK and the CLI. Verify every file with SHA256SUMS.txt or Sigstore.">
+  <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://airbridge.fyi/download.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="AirBridge">
+  <meta property="og:locale" content="en">
+  <meta property="og:title" content="Download AirBridge — Android, macOS, Windows &amp; Linux">
+  <meta property="og:description" content="Download AirBridge: prebuilt macOS app, portable Windows EXE, static Linux binaries, the Android APK and the CLI. Verify every file with SHA256SUMS.txt or Sigstore.">
+  <meta property="og:url" content="https://airbridge.fyi/download.html">
+  <meta property="og:image" content="https://airbridge.fyi/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Download AirBridge — Android, macOS, Windows &amp; Linux">
+  <meta name="twitter:description" content="Download AirBridge: prebuilt macOS app, portable Windows EXE, static Linux binaries, the Android APK and the CLI. Verify every file with SHA256SUMS.txt or Sigstore.">
+  <meta name="twitter:image" content="https://airbridge.fyi/og.png">
+  <meta name="twitter:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebPage","name":"Download AirBridge — Android, macOS, Windows & Linux","description":"Download AirBridge: prebuilt macOS app, portable Windows EXE, static Linux binaries, the Android APK and the CLI. Verify every file with SHA256SUMS.txt or Sigstore.","url":"https://airbridge.fyi/download.html","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"AirBridge","url":"https://airbridge.fyi/"},"about":{"@type":"SoftwareApplication","name":"AirBridge","applicationCategory":"UtilitiesApplication","operatingSystem":"Android, macOS, Windows, Linux","url":"https://airbridge.fyi/","downloadUrl":"https://github.com/DigantaDey/AirBridge/releases/latest"}}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"AirBridge","item":"https://airbridge.fyi/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://airbridge.fyi/guides.html"},{"@type":"ListItem","position":3,"name":"Download & install","item":"https://airbridge.fyi/download.html"}]}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Which macOS file should I download on an Apple silicon Mac?","acceptedAnswer":{"@type":"Answer","text":"AirBridge-macOS-arm64.zip (or AirBridge-darwin-arm64 for the bare binary). Use the x64 files on Intel Macs. The install.sh script picks the right build automatically."}},{"@type":"Question","name":"Do I need Node.js to run AirBridge?","acceptedAnswer":{"@type":"Answer","text":"No. The macOS app, Windows EXE and Linux binaries embed everything. Node.js 20+ is only needed to build from source or to use npx airbridge."}},{"@type":"Question","name":"Why is AirBridge not on the App Store or the Microsoft Store?","acceptedAnswer":{"@type":"Answer","text":"Store distribution needs paid developer accounts. AirBridge distributes ad-hoc signed macOS builds and unsigned Windows executables from GitHub instead, and publishes checksums plus Sigstore attestations so you can verify them."}},{"@type":"Question","name":"Is the Android APK a Play Store build?","acceptedAnswer":{"@type":"Answer","text":"It is an installable testing/sideload build produced by the release workflow. The Play-ready App Bundle is built separately and fails closed unless a private upload key is configured, as documented in docs/PLAY_STORE_RELEASE.md."}}]}
+  </script>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <title>Download AirBridge — Android, macOS, Windows &amp; Linux</title>
+</head>
+<body id="top">
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2"/></symbol>
+  <symbol id="devices" viewBox="0 0 24 24"><rect x="3" y="4" width="13" height="11" rx="1.5"/><path d="M2 18h15"/><rect x="17" y="9" width="5" height="10" rx="1"/></symbol>
+</svg>
+<header class="header">
+  <nav class="nav wrap" aria-label="Main navigation">
+    <div class="brand-group">
+      <a class="brand" href="index.html" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a>
+      <span class="version-pill">v2.5.2</span>
+    </div>
+    <div class="nav-links">
+      <a href="index.html#features">Capabilities</a>
+      <a href="guides.html">Guides</a>
+      <a href="compare.html">Compare</a>
+      <a href="index.html#security">Security</a>
+      <a href="download.html">Download</a>
+      <a href="index.html#faq">FAQ</a>
+    </div>
+    <a class="nav-cta" href="https://github.com/DigantaDey/AirBridge">GitHub <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+  </nav>
+</header>
+
+<main class="legal wrap guide" id="main">
+    <article class="legal-card">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li><a href="index.html">AirBridge</a></li>
+      <li><a href="guides.html">Guides</a></li>
+      <li><span aria-current="page">Download &amp; install</span></li>
+    </ol>
+  </nav>
+      <p class="section-label"><span>GUIDE</span> INSTALL</p>
+      <h1>Download AirBridge</h1>
+      <p class="guide-lede">Every official build comes from the same public GitHub release: a macOS app, a portable Windows executable, static Linux binaries for x64 and arm64, an Android APK and the CLI. There is no store account, no purchase and no trial to activate — and every artefact ships with a checksum you can verify.</p>
+
+      <div class="guide-body">
+      <h2 id="platforms">Pick your platform</h2>
+        <div class="table-wrap">
+          <table class="compare-table">
+            <thead>
+              <tr><th>Platform</th><th>Artifact</th><th>Install</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>macOS</strong><br>Apple silicon &amp; Intel</td>
+                <td><code>AirBridge-macOS-arm64.zip</code><br><code>AirBridge-macOS-x64.zip</code><br><code>AirBridge-darwin-arm64</code> / <code>-x64</code></td>
+                <td>One-line <code>install.sh</code>, or unzip the app bundle. Ad-hoc signed.</td>
+              </tr>
+              <tr>
+                <td><strong>Windows</strong><br>x64 &amp; ARM64</td>
+                <td><code>AirBridge-windows-x64.exe</code><br><code>AirBridge-windows-arm64.exe</code></td>
+                <td>One-line <code>install.ps1</code>, or run the portable EXE anywhere. No admin rights.</td>
+              </tr>
+              <tr>
+                <td><strong>Linux</strong><br>x64 &amp; arm64, glibc or musl</td>
+                <td><code>AirBridge-linux-x64</code><br><code>AirBridge-linux-arm64</code><br><code>AirBridge-linux-x64-musl</code><br><code>AirBridge-linux-arm64-musl</code></td>
+                <td>One-line <code>install.sh</code> (no root), or run the static binary. Adds an XDG launcher entry.</td>
+              </tr>
+              <tr>
+                <td><strong>Android</strong><br>8.0 (API 26)+</td>
+                <td><code>AirBridge-android-debug.apk</code></td>
+                <td>Google Play Store app — coming soon. For now, sideload the APK, then pair with the desktop QR code.</td>
+              </tr>
+              <tr>
+                <td><strong>Any OS with Node 20+</strong></td>
+                <td><code>npx airbridge</code> / source checkout</td>
+                <td>Run the CLI, daemon, relay and browser UI without a prebuilt binary.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="guide-actions">
+          <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Open the latest release <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+          <a class="button button-secondary" href="https://github.com/DigantaDey/AirBridge/releases/latest/download/AirBridge-android-debug.apk">Android APK</a>
+        </p>
+
+      <h2 id="commands">Install with one command</h2>
+        <p><strong>macOS &amp; Linux</strong> — installs the app and the <code>AirBridge</code> command, no sudo:</p>
+        <pre><code>curl -fsSL https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.sh | bash</code></pre>
+        <p><strong>Windows PowerShell</strong> — user-scope install into <code>%LOCALAPPDATA%\AirBridge</code>:</p>
+        <pre><code>powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.ps1 -UseBasicParsing | iex"</code></pre>
+        <p>Both installers download over HTTPS and check the file against the release’s <code>SHA256SUMS.txt</code> before anything runs. Add <code>--autostart</code> (or <code>-Autostart</code> on Windows) to start AirBridge at login.</p>
+
+      <h2 id="stable-vs-dev">Stable releases vs development builds</h2>
+        <ul>
+          <li><strong>Stable:</strong> the latest <a href="https://github.com/DigantaDey/AirBridge/releases/latest">GitHub release</a> (tagged <code>v2.5.2</code> today). This is what the installers and the desktop self-updater use. Updates reach computers gradually — 10%, 50%, then 100% — and a bad release can be paused.</li>
+          <li><strong>Development:</strong> builds from <code>main</code> and CI workflow artefacts. Useful for testing a fix, not for a machine you rely on. Build one yourself with <code>npm ci &amp;&amp; npm run build:desktop</code>.</li>
+          <li><strong>Android:</strong> the published APK is an installable testing/sideload build produced by the release workflow. The Play-ready App Bundle is a separate, signed upload path gated on a private key — see <a href="https://github.com/DigantaDey/AirBridge/blob/main/docs/PLAY_STORE_RELEASE.md">docs/PLAY_STORE_RELEASE.md</a>. No unsigned substitute is ever published as a “release”.</li>
+        </ul>
+
+      <h2 id="verify">Verify what you downloaded</h2>
+        <p>Every release includes <code>SHA256SUMS.txt</code> and keyless Sigstore build-provenance attestations:</p>
+        <pre><code>sha256sum --check SHA256SUMS.txt
+gh attestation verify AirBridge-linux-x64 -R DigantaDey/AirBridge</code></pre>
+        <p>The macOS and Windows binaries are not signed with paid vendor certificates: the macOS app is ad-hoc signed (so Apple silicon will run it) and the Windows EXE is unsigned. Checksums, attestations and the self-updater’s own verification are the integrity story, and they are documented in <a href="https://github.com/DigantaDey/AirBridge/blob/main/docs/DISTRIBUTION.md">docs/DISTRIBUTION.md</a>.</p>
+
+      <h2 id="requirements">Requirements and ports</h2>
+        <ul>
+          <li><strong>Android 8.0 (API 26) or newer</strong> for the phone app.</li>
+          <li><strong>macOS</strong> with Apple silicon or Intel, <strong>Windows</strong> x64 or ARM64, or <strong>Linux</strong> x64/arm64 on glibc or musl. Prebuilt binaries need no Node.js.</li>
+          <li><strong>Building from source</strong> needs Node.js 20+, npm and Git; Android builds need JDK 17, Gradle and Android SDK 35.</li>
+          <li><strong>Network:</strong> phone and computer on the same Wi-Fi (or the phone’s hotspot). The service listens on port 3000 by default — set <code>PORT</code> to change it, and allow the app through the Windows firewall for private networks.</li>
+        </ul>
+
+      <h2 id="docs">Documentation and source</h2>
+        <ul>
+          <li><a href="https://github.com/DigantaDey/AirBridge#readme">README</a> — capabilities, architecture, environment variables and CLI examples.</li>
+          <li><a href="https://github.com/DigantaDey/AirBridge/blob/main/docs/pairing-and-connectivity.md">Pairing and connectivity</a> — protocols, threat model and the manual test plan.</li>
+          <li><a href="https://github.com/DigantaDey/AirBridge/blob/main/docs/desktop-runtime.md">Desktop runtime</a> — the self-updater, rollout and rollback behaviour.</li>
+          <li><a href="https://github.com/DigantaDey/AirBridge/blob/main/docs/ANDROID_VALIDATION.md">Android validation checklist</a> — background behaviour, OEM battery rules and real-device testing.</li>
+          <li><a href="https://github.com/DigantaDey/AirBridge/blob/main/SECURITY.md">Security notes</a> and <a href="privacy.html">privacy policy</a>.</li>
+        </ul>
+        <p>Reading the code before installing is encouraged: <a href="https://github.com/DigantaDey/AirBridge">github.com/DigantaDey/AirBridge</a>.</p>
+      </div>
+<section class="faq-block" aria-labelledby="questions">
+      <h2 id="questions">Questions about this guide</h2>
+      <div class="faq-list">
+      <details>
+        <summary>Which macOS file should I download on an Apple silicon Mac?<span aria-hidden="true">＋</span></summary>
+        <p>AirBridge-macOS-arm64.zip (or AirBridge-darwin-arm64 for the bare binary). Use the x64 files on Intel Macs. The install.sh script picks the right build automatically.</p>
+      </details>
+      <details>
+        <summary>Do I need Node.js to run AirBridge?<span aria-hidden="true">＋</span></summary>
+        <p>No. The macOS app, Windows EXE and Linux binaries embed everything. Node.js 20+ is only needed to build from source or to use npx airbridge.</p>
+      </details>
+      <details>
+        <summary>Why is AirBridge not on the App Store or the Microsoft Store?<span aria-hidden="true">＋</span></summary>
+        <p>Store distribution needs paid developer accounts. AirBridge distributes ad-hoc signed macOS builds and unsigned Windows executables from GitHub instead, and publishes checksums plus Sigstore attestations so you can verify them.</p>
+      </details>
+      <details>
+        <summary>Is the Android APK a Play Store build?<span aria-hidden="true">＋</span></summary>
+        <p>It is an installable testing/sideload build produced by the release workflow. The Play-ready App Bundle is built separately and fails closed unless a private upload key is configured, as documented in docs/PLAY_STORE_RELEASE.md.</p>
+      </details>
+      </div>
+    </section>
+<aside class="guide-cta" aria-label="Download AirBridge">
+      <div>
+        <p class="section-label"><span>GET AIRBRIDGE</span> FREE FOR PERSONAL USE</p>
+        <h2>Install on your computer, then pair your phone.</h2>
+        <p>Official builds for macOS, Windows and Linux live on the GitHub releases page, next to the Android APK and the <code>SHA256SUMS.txt</code> checksums. Nothing needs an account.</p>
+      </div>
+      <div class="guide-cta-actions">
+        <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.2 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+        <a class="button button-secondary" href="download.html">All platforms</a>
+      </div>
+    </aside>
+<section class="related-block" aria-labelledby="related">
+      <h2 id="related">Related AirBridge guides</h2>
+      <ul class="related-list">
+        <li><a href="android-to-mac-file-transfer.html"><strong>Android to Mac file transfer</strong><span>Wi-Fi file transfer from Android to macOS with resume, SHA-256 checks and no cloud upload.</span></a></li>
+        <li><a href="android-to-windows-file-transfer.html"><strong>Android to Windows file transfer</strong><span>Portable Windows app, no admin rights, encrypted Wi-Fi transfers from Android.</span></a></li>
+        <li><a href="android-to-linux-file-transfer.html"><strong>Android to Linux file transfer</strong><span>No root, XDG launcher entry, static glibc/musl builds for x64 and arm64.</span></a></li>
+        <li><a href="compare.html"><strong>Honest comparison</strong><span>AirBridge next to LocalSend, KDE Connect, AirDroid, LinkMyMac, Quick Share and AirDrop.</span></a></li>
+      </ul>
+    </section>
+    </article>
+</main>
+<footer class="legal-footer"><div class="wrap">
+    <p class="footer-guide-links"><strong>Guides</strong></p>
+    <div class="footer-guide-grid">
+      <a href="android-to-mac-file-transfer.html">Android to Mac file transfer</a>
+      <a href="android-to-windows-file-transfer.html">Android to Windows file transfer</a>
+      <a href="android-to-linux-file-transfer.html">Android to Linux file transfer</a>
+      <a href="android-airdrop-alternative.html">Android AirDrop alternative</a>
+      <a href="android-clipboard-sync.html">Android clipboard sync</a>
+      <a href="android-screen-sharing.html">Android screen sharing</a>
+      <a href="download.html">Download &amp; install</a>
+      <a href="compare.html">Honest comparison</a>
+      <a href="privacy.html">Privacy policy</a>
+    </div>
+    <p>© AirBridge · <a href="index.html">Home</a> · <a href="https://github.com/DigantaDey/AirBridge">Source code on GitHub</a> · <a href="https://github.com/DigantaDey/AirBridge#readme">README</a></p>
+  </div></footer>
+</body>
+</html>

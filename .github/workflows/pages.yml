@@ -11,6 +11,8 @@ on:
     branches: [main]
     paths:
       - 'website/**'
+      - 'scripts/build-site-pages.mjs'
+      - 'scripts/site-pages/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -47,6 +49,30 @@ jobs:
               exit 1
             fi
           done
+          # Guide pages are generated from scripts/site-pages/ and must obey the
+          # same rules: relative assets, a canonical URL, and a page description.
+          for page in website/*.html; do
+            if grep -Eq '(src|href)="/' "$page"; then
+              echo "::error title=absolute asset path::$page must use relative paths for Pages subpaths"
+              exit 1
+            fi
+            if [ "$page" != "website/404.html" ]; then
+              grep -q 'rel="canonical"' "$page" || { echo "::error title=missing canonical::$page has no canonical URL"; exit 1; }
+              grep -q 'name="description"' "$page" || { echo "::error title=missing description::$page has no meta description"; exit 1; }
+            fi
+          done
+          for asset in website/og.png website/sitemap.xml website/robots.txt website/styles.css website/screenshots/desktop-file-transfer.jpg; do
+            test -f "$asset" || { echo "::error title=missing asset::$asset not found"; exit 1; }
+          done
+      - name: Verify generated pages are up to date
+        run: |
+          set -euo pipefail
+          node scripts/build-site-pages.mjs > /dev/null
+          if ! git diff --quiet -- website; then
+            git --no-pager diff --stat -- website
+            echo "::error title=stale generated pages::website/ is out of date — run 'npm run website:pages' and commit the result"
+            exit 1
+          fi
       - uses: actions/upload-pages-artifact@v3
         with:
           path: website

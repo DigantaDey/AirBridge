@@ -1,4 +1,9 @@
 import type { PlatformType, FormFactor } from '../../shared/protocol.js';
+import {
+  AIRBRIDGE_MARK_GRADIENT_STOPS,
+  AIRBRIDGE_MARK_PATH,
+  AIRBRIDGE_MARK_VIEWBOX,
+} from './brandMarkPath.js';
 
 interface DeviceIconProps {
   platform: PlatformType;
@@ -72,40 +77,15 @@ export function DeviceHardwareIcon({ platform, formFactor, className = 'w-6 h-6'
 
 export function AirBridgeLogo({ className = 'w-8 h-8' }: { className?: string }) {
   return (
-    <svg viewBox="0 0 40 40" fill="none" className={className} aria-hidden="true">
-      <rect
-        x="1"
-        y="1"
-        width="38"
-        height="38"
-        rx="10"
-        className="fill-slate-900 dark:fill-slate-900/90"
-        stroke="rgba(56,189,248,0.35)"
-        strokeWidth="1.2"
-      />
-      <circle
-        cx="20"
-        cy="20"
-        r="13.5"
-        stroke="rgba(52,211,153,0.28)"
-        strokeWidth="1.2"
-        strokeDasharray="2.5 2.5"
-      />
-      <circle cx="20" cy="20" r="8.8" stroke="rgba(56,189,248,0.5)" strokeWidth="1.2" />
-      <path
-        d="M11.5 17.8H27.5L24.3 14.6"
-        stroke="#34D399"
-        strokeWidth="2.1"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M28.5 22.2H12.5L15.7 25.4"
-        stroke="#38BDF8"
-        strokeWidth="2.1"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
+    <svg viewBox={AIRBRIDGE_MARK_VIEWBOX} className={className} aria-hidden="true">
+      <defs>
+        <linearGradient id="airbridge-mark-gradient" x1="0" y1="0" x2="1" y2="1">
+          {AIRBRIDGE_MARK_GRADIENT_STOPS.map((stop) => (
+            <stop key={stop.offset} offset={stop.offset} stopColor={stop.color} />
+          ))}
+        </linearGradient>
+      </defs>
+      <path d={AIRBRIDGE_MARK_PATH} fill="url(#airbridge-mark-gradient)" fillRule="evenodd" />
     </svg>
   );
 }

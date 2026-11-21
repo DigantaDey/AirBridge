@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="theme-color" content="#f7f8f7">
+  <meta name="description" content="View your Android screen on a computer with consent-based H.264 streaming: end-to-end encrypted, approved per session, protected content stays blank, no account needed.">
+  <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://airbridge.fyi/android-screen-sharing.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="AirBridge">
+  <meta property="og:locale" content="en">
+  <meta property="og:title" content="Android Screen Sharing to Mac, Windows &amp; Linux — AirBridge">
+  <meta property="og:description" content="View your Android screen on a computer with consent-based H.264 streaming: end-to-end encrypted, approved per session, protected content stays blank, no account needed.">
+  <meta property="og:url" content="https://airbridge.fyi/android-screen-sharing.html">
+  <meta property="og:image" content="https://airbridge.fyi/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Android Screen Sharing to Mac, Windows &amp; Linux — AirBridge">
+  <meta name="twitter:description" content="View your Android screen on a computer with consent-based H.264 streaming: end-to-end encrypted, approved per session, protected content stays blank, no account needed.">
+  <meta name="twitter:image" content="https://airbridge.fyi/og.png">
+  <meta name="twitter:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebPage","name":"Android Screen Sharing to Mac, Windows & Linux — AirBridge","description":"View your Android screen on a computer with consent-based H.264 streaming: end-to-end encrypted, approved per session, protected content stays blank, no account needed.","url":"https://airbridge.fyi/android-screen-sharing.html","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"AirBridge","url":"https://airbridge.fyi/"},"about":{"@type":"SoftwareApplication","name":"AirBridge","applicationCategory":"UtilitiesApplication","operatingSystem":"Android, macOS, Windows, Linux","url":"https://airbridge.fyi/","downloadUrl":"https://github.com/DigantaDey/AirBridge/releases/latest"},"primaryImageOfPage":{"@type":"ImageObject","url":"https://airbridge.fyi/screenshots/desktop-calls.png"}}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"AirBridge","item":"https://airbridge.fyi/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://airbridge.fyi/guides.html"},{"@type":"ListItem","position":3,"name":"Android screen sharing","item":"https://airbridge.fyi/android-screen-sharing.html"}]}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Can I watch my Android screen on a Mac without a Chromecast?","acceptedAnswer":{"@type":"Answer","text":"Yes. The macOS companion receives a consent-based H.264 stream over the paired connection; no casting device or account is involved. Windows and Linux companions receive the same stream."}},{"@type":"Question","name":"Does screen sharing include audio?","acceptedAnswer":{"@type":"Answer","text":"Only if you enable it for that session. Playback audio is off by default and depends on Android and the source app allowing capture. Microphone audio is never captured."}},{"@type":"Question","name":"Can I control the phone from the computer?","acceptedAnswer":{"@type":"Answer","text":"No. AirBridge shares a view of the screen and does not inject input. Tools that do that require different permissions and a different threat model."}},{"@type":"Question","name":"Why is my banking or streaming app showing a black screen?","acceptedAnswer":{"@type":"Answer","text":"Those apps set FLAG_SECURE, which tells Android the content must not be captured. AirBridge respects it and shows blank frames rather than attempting to bypass DRM or protected surfaces."}},{"@type":"Question","name":"Is the stream recorded anywhere?","acceptedAnswer":{"@type":"Answer","text":"No. AirBridge has no recording feature; the frames are decoded for a live view and are not written to disk."}}]}
+  </script>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <title>Android Screen Sharing to Mac, Windows &amp; Linux — AirBridge</title>
+</head>
+<body id="top">
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2"/></symbol>
+  <symbol id="devices" viewBox="0 0 24 24"><rect x="3" y="4" width="13" height="11" rx="1.5"/><path d="M2 18h15"/><rect x="17" y="9" width="5" height="10" rx="1"/></symbol>
+</svg>
+<header class="header">
+  <nav class="nav wrap" aria-label="Main navigation">
+    <div class="brand-group">
+      <a class="brand" href="index.html" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a>
+      <span class="version-pill">v2.5.2</span>
+    </div>
+    <div class="nav-links">
+      <a href="index.html#features">Capabilities</a>
+      <a href="guides.html">Guides</a>
+      <a href="compare.html">Compare</a>
+      <a href="index.html#security">Security</a>
+      <a href="download.html">Download</a>
+      <a href="index.html#faq">FAQ</a>
+    </div>
+    <a class="nav-cta" href="https://github.com/DigantaDey/AirBridge">GitHub <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+  </nav>
+</header>
+
+<main class="legal wrap guide" id="main">
+    <article class="legal-card">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li><a href="index.html">AirBridge</a></li>
+      <li><a href="guides.html">Guides</a></li>
+      <li><span aria-current="page">Android screen sharing</span></li>
+    </ol>
+  </nav>
+      <p class="section-label"><span>GUIDE</span> SCREEN SHARING</p>
+      <h1>View your Android screen on your computer</h1>
+      <p class="guide-lede">Showing a phone screen on a laptop usually means a Chromecast, a commercial remote-support tool, or a screenshot thread. AirBridge streams the display as low-latency H.264 over the paired, encrypted session — and only after you approve that specific session on the phone.</p>
+      <figure class="guide-figure">
+        <img src="screenshots/desktop-calls.png" width="1600" height="916" alt="AirBridge desktop panel with Contacts, Calls and Screen tabs, a paired device selector, phone battery status and a dialler" loading="lazy" decoding="async">
+        <figcaption>The desktop shell that hosts Contacts, Calls and Screen: the phone stays the source of the session, and every panel acts on the paired device.</figcaption>
+      </figure>
+      <div class="guide-body">
+      <h2 id="problem">What people usually do instead</h2>
+        <ul>
+          <li><strong>Cast to a TV</strong> with a Chromecast or a smart display, then photograph the screen — fine for a slide, useless for debugging an app.</li>
+          <li><strong>Remote-support suites</strong> require accounts, install agents with broad permissions, and often route through a vendor cloud.</li>
+          <li><strong>Screenshots in chat</strong> lose motion and timing, and leave copies behind.</li>
+          <li><strong>Developer tools</strong> such as <code>adb screenrecord</code> are excellent for engineers and not a realistic option for everyone else.</li>
+        </ul>
+
+      <h2 id="how-it-works">How the stream is built</h2>
+        <p>Android encodes the approved display with hardware <code>MediaCodec</code> H.264, caching SPS/PPS codec headers onto every keyframe and avoiding B-frames so decoding stays simple. The desktop decodes with WebCodecs using ISO 14496-15 <code>avcC</code> configuration, paces canvas draws through <code>requestAnimationFrame</code>, and asks for an instant PLI keyframe when a delta frame is lost — which keeps the picture usable on a real Wi-Fi link instead of freezing until the next scheduled keyframe.</p>
+        <ul>
+          <li><strong>Frame rate:</strong> about 30 fps on a healthy local network, adapting to the link.</li>
+          <li><strong>Path:</strong> the same encrypted peer session as file transfers, over your network.</li>
+          <li><strong>Computer ↔ computer:</strong> desktops can also share a screen or window with each other through the browser’s own screen picker, encrypted end to end.</li>
+          <li><strong>Audio:</strong> optional per-session playback audio is off by default; microphone audio is never captured.</li>
+        </ul>
+
+      <h2 id="consent">Consent, DRM and what AirBridge will not do</h2>
+        <ul>
+          <li><strong>Two approvals per session:</strong> an in-app confirmation on Android plus Android’s own MediaProjection prompt. The device being shared can stop the stream, and so can the viewer.</li>
+          <li><strong>Protected content stays blank.</strong> Apps that set <code>FLAG_SECURE</code> — banking, Netflix, DRM video — appear black by design. AirBridge does not classify apps, bypass protected surfaces, or extract protected audio.</li>
+          <li><strong>Viewing only.</strong> There is no tap, swipe or keyboard injection. AirBridge is not a remote-control tool.</li>
+          <li><strong>Not a recorder.</strong> A share is a live view; there is no recording feature in AirBridge.</li>
+        </ul>
+
+      <h2 id="install">Try it</h2>
+        <p>macOS and Linux:</p>
+        <pre><code>curl -fsSL https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.sh | bash</code></pre>
+        <p>Windows PowerShell:</p>
+        <pre><code>powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.ps1 -UseBasicParsing | iex"</code></pre>
+        <p>Pair the phone, open <em>Screen</em> on the computer, and approve the request on Android. The phone battery level is shown in the panel so you know when to plug in during a long demo.</p>
+
+      <h2 id="limits">Screen sharing limits</h2>
+        <ul>
+          <li><strong>Latency is your network’s latency.</strong> A congested 2.4 GHz link or a battery-saver throttle shows up as fewer frames; AirBridge does not claim a fixed millisecond budget.</li>
+          <li><strong>No audio unless you opt in per session</strong>, and only where Android permits playback capture.</li>
+          <li><strong>Some apps opt out</strong> of capture entirely and will be blank or silent; that is the platform working as designed.</li>
+          <li><strong>Screen-off is not a supported mode</strong> for watching a display; the phone screen drives the stream.</li>
+        </ul>
+      </div>
+<section class="faq-block" aria-labelledby="questions">
+      <h2 id="questions">Questions about this guide</h2>
+      <div class="faq-list">
+      <details>
+        <summary>Can I watch my Android screen on a Mac without a Chromecast?<span aria-hidden="true">＋</span></summary>
+        <p>Yes. The macOS companion receives a consent-based H.264 stream over the paired connection; no casting device or account is involved. Windows and Linux companions receive the same stream.</p>
+      </details>
+      <details>
+        <summary>Does screen sharing include audio?<span aria-hidden="true">＋</span></summary>
+        <p>Only if you enable it for that session. Playback audio is off by default and depends on Android and the source app allowing capture. Microphone audio is never captured.</p>
+      </details>
+      <details>
+        <summary>Can I control the phone from the computer?<span aria-hidden="true">＋</span></summary>
+        <p>No. AirBridge shares a view of the screen and does not inject input. Tools that do that require different permissions and a different threat model.</p>
+      </details>
+      <details>
+        <summary>Why is my banking or streaming app showing a black screen?<span aria-hidden="true">＋</span></summary>
+        <p>Those apps set FLAG_SECURE, which tells Android the content must not be captured. AirBridge respects it and shows blank frames rather than attempting to bypass DRM or protected surfaces.</p>
+      </details>
+      <details>
+        <summary>Is the stream recorded anywhere?<span aria-hidden="true">＋</span></summary>
+        <p>No. AirBridge has no recording feature; the frames are decoded for a live view and are not written to disk.</p>
+      </details>
+      </div>
+    </section>
+<aside class="guide-cta" aria-label="Download AirBridge">
+      <div>
+        <p class="section-label"><span>GET AIRBRIDGE</span> FREE FOR PERSONAL USE</p>
+        <h2>Install on your computer, then pair your phone.</h2>
+        <p>Official builds for macOS, Windows and Linux live on the GitHub releases page, next to the Android APK and the <code>SHA256SUMS.txt</code> checksums. Nothing needs an account.</p>
+      </div>
+      <div class="guide-cta-actions">
+        <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.2 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+        <a class="button button-secondary" href="download.html">All platforms</a>
+      </div>
+    </aside>
+<section class="related-block" aria-labelledby="related">
+      <h2 id="related">Related AirBridge guides</h2>
+      <ul class="related-list">
+        <li><a href="android-clipboard-sync.html"><strong>Android clipboard sync</strong><span>Text both ways, photos on macOS — without Accessibility access.</span></a></li>
+        <li><a href="android-to-mac-file-transfer.html"><strong>Android to Mac file transfer</strong><span>Wi-Fi file transfer from Android to macOS with resume, SHA-256 checks and no cloud upload.</span></a></li>
+        <li><a href="private-file-transfer.html"><strong>Private file transfer</strong><span>No account, no cloud copy — and an honest list of what can still be observed.</span></a></li>
+        <li><a href="compare.html"><strong>Honest comparison</strong><span>AirBridge next to LocalSend, KDE Connect, AirDroid, LinkMyMac, Quick Share and AirDrop.</span></a></li>
+      </ul>
+    </section>
+    </article>
+</main>
+<footer class="legal-footer"><div class="wrap">
+    <p class="footer-guide-links"><strong>Guides</strong></p>
+    <div class="footer-guide-grid">
+      <a href="android-to-mac-file-transfer.html">Android to Mac file transfer</a>
+      <a href="android-to-windows-file-transfer.html">Android to Windows file transfer</a>
+      <a href="android-to-linux-file-transfer.html">Android to Linux file transfer</a>
+      <a href="android-airdrop-alternative.html">Android AirDrop alternative</a>
+      <a href="android-clipboard-sync.html">Android clipboard sync</a>
+      <a href="android-screen-sharing.html">Android screen sharing</a>
+      <a href="download.html">Download &amp; install</a>
+      <a href="compare.html">Honest comparison</a>
+      <a href="privacy.html">Privacy policy</a>
+    </div>
+    <p>© AirBridge · <a href="index.html">Home</a> · <a href="https://github.com/DigantaDey/AirBridge">Source code on GitHub</a> · <a href="https://github.com/DigantaDey/AirBridge#readme">README</a></p>
+  </div></footer>
+</body>
+</html>

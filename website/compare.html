@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="theme-color" content="#f7f8f7">
+  <meta name="description" content="An honest comparison of AirBridge with LocalSend, KDE Connect, AirDroid, LinkMyMac, Quick Share and Apple AirDrop — including where another tool is the better choice.">
+  <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://airbridge.fyi/compare.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="AirBridge">
+  <meta property="og:locale" content="en">
+  <meta property="og:title" content="AirBridge vs LocalSend, KDE Connect, AirDroid, LinkMyMac &amp; Quick Share">
+  <meta property="og:description" content="An honest comparison of AirBridge with LocalSend, KDE Connect, AirDroid, LinkMyMac, Quick Share and Apple AirDrop — including where another tool is the better choice.">
+  <meta property="og:url" content="https://airbridge.fyi/compare.html">
+  <meta property="og:image" content="https://airbridge.fyi/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="AirBridge vs LocalSend, KDE Connect, AirDroid, LinkMyMac &amp; Quick Share">
+  <meta name="twitter:description" content="An honest comparison of AirBridge with LocalSend, KDE Connect, AirDroid, LinkMyMac, Quick Share and Apple AirDrop — including where another tool is the better choice.">
+  <meta name="twitter:image" content="https://airbridge.fyi/og.png">
+  <meta name="twitter:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebPage","name":"AirBridge vs LocalSend, KDE Connect, AirDroid, LinkMyMac & Quick Share","description":"An honest comparison of AirBridge with LocalSend, KDE Connect, AirDroid, LinkMyMac, Quick Share and Apple AirDrop — including where another tool is the better choice.","url":"https://airbridge.fyi/compare.html","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"AirBridge","url":"https://airbridge.fyi/"},"about":{"@type":"SoftwareApplication","name":"AirBridge","applicationCategory":"UtilitiesApplication","operatingSystem":"Android, macOS, Windows, Linux","url":"https://airbridge.fyi/","downloadUrl":"https://github.com/DigantaDey/AirBridge/releases/latest"}}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"AirBridge","item":"https://airbridge.fyi/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://airbridge.fyi/guides.html"},{"@type":"ListItem","position":3,"name":"Honest comparison","item":"https://airbridge.fyi/compare.html"}]}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is AirBridge better than LocalSend?","acceptedAnswer":{"@type":"Answer","text":"Not universally. LocalSend is permissively licensed, supports iOS, and is very simple to use. AirBridge adds an Android-focused desktop companion with clipboard sync, screen viewing, contacts and calls inside one verified session — at the cost of a non-commercial licence and no iOS app."}},{"@type":"Question","name":"Does AirBridge replace KDE Connect?","acceptedAnswer":{"@type":"Answer","text":"Only partly. KDE Connect is deeper inside KDE Plasma (notification mirroring, remote input, applets). AirBridge focuses on Android ↔ macOS/Windows/Linux with its own encrypted pairing, resumable transfers and screen streaming."}},{"@type":"Question","name":"Can AirBridge replace AirDroid?","acceptedAnswer":{"@type":"Answer","text":"For nearby files, clipboard and screen viewing, often yes. If you need remote management over the internet, web dashboards or SMS tools from a browser, AirDroid’s cloud model covers more of that workflow."}},{"@type":"Question","name":"Why is Quick Share not enough?","acceptedAnswer":{"@type":"Answer","text":"Quick Share is excellent for nearby file transfer on the devices that support it, but it does not give you clipboard sync, screen viewing, contacts or calls on a Mac or Linux machine. Use both: Quick Share when it is already there, AirBridge when you need the rest."}}]}
+  </script>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <title>AirBridge vs LocalSend, KDE Connect, AirDroid, LinkMyMac &amp; Quick Share</title>
+</head>
+<body id="top">
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2"/></symbol>
+  <symbol id="devices" viewBox="0 0 24 24"><rect x="3" y="4" width="13" height="11" rx="1.5"/><path d="M2 18h15"/><rect x="17" y="9" width="5" height="10" rx="1"/></symbol>
+</svg>
+<header class="header">
+  <nav class="nav wrap" aria-label="Main navigation">
+    <div class="brand-group">
+      <a class="brand" href="index.html" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a>
+      <span class="version-pill">v2.5.2</span>
+    </div>
+    <div class="nav-links">
+      <a href="index.html#features">Capabilities</a>
+      <a href="guides.html">Guides</a>
+      <a href="compare.html">Compare</a>
+      <a href="index.html#security">Security</a>
+      <a href="download.html">Download</a>
+      <a href="index.html#faq">FAQ</a>
+    </div>
+    <a class="nav-cta" href="https://github.com/DigantaDey/AirBridge">GitHub <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+  </nav>
+</header>
+
+<main class="legal wrap guide" id="main">
+    <article class="legal-card">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li><a href="index.html">AirBridge</a></li>
+      <li><a href="guides.html">Guides</a></li>
+      <li><span aria-current="page">Honest comparison</span></li>
+    </ol>
+  </nav>
+      <p class="section-label"><span>GUIDE</span> COMPARISON</p>
+      <h1>Compare AirBridge with other transfer apps</h1>
+      <p class="guide-lede">Every tool on this page is good at something. This comparison is written to help you pick, not to win a table: it separates what AirBridge does from what other projects do better, and it says where AirBridge is the wrong answer.</p>
+
+      <div class="guide-body">
+      <h2 id="how-to-read">How to read this comparison</h2>
+        <p>Features and licences in this space change often, so treat the table as a starting point and confirm details with each project’s own documentation. AirBridge rows describe the current release (v2.5.2) and come from this repository; competitor rows describe the general shape of each product, not a specific version.</p>
+        <p>None of these tools is invulnerable, and none is a substitute for device security. AirBridge makes no claim to be audited by a third party; it publishes its own threat model in <a href="https://github.com/DigantaDey/AirBridge/blob/main/SECURITY.md">SECURITY.md</a>.</p>
+
+      <h2 id="table">Capability comparison</h2>
+        <div class="table-wrap">
+          <table class="compare-table">
+            <thead>
+              <tr>
+                <th>Capability</th>
+                <th class="airbridge-col">AirBridge</th>
+                <th>LocalSend</th>
+                <th>KDE Connect</th>
+                <th>AirDroid</th>
+                <th>LinkMyMac</th>
+                <th>Quick Share</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Primary platforms</strong></td>
+                <td class="airbridge-col">Android ↔ macOS, Windows, Linux (+ CLI)</td>
+                <td>Desktop + mobile apps for many OSes</td>
+                <td>Linux/KDE first, Android; other desktops unofficial</td>
+                <td>Android + web dashboard + desktop apps</td>
+                <td>macOS ↔ Android</td>
+                <td>Android, Windows, ChromeOS and some others</td>
+              </tr>
+              <tr>
+                <td><strong>Licence</strong></td>
+                <td class="airbridge-col">Source public; non-commercial fair-use licence</td>
+                <td>Permissive open-source licence</td>
+                <td>GPL-family open source</td>
+                <td>Proprietary</td>
+                <td>Proprietary, commercial</td>
+                <td>Proprietary</td>
+              </tr>
+              <tr>
+                <td><strong>Account required</strong></td>
+                <td class="airbridge-col">No</td>
+                <td>No</td>
+                <td>No</td>
+                <td>Yes (for most features)</td>
+                <td>Licence, not an account, typically</td>
+                <td>Google account for some features</td>
+              </tr>
+              <tr>
+                <td><strong>File transport</strong></td>
+                <td class="airbridge-col">Direct LAN; optional self-hostable relay</td>
+                <td>Direct LAN</td>
+                <td>Direct LAN</td>
+                <td>Vendor cloud/relay, LAN where possible</td>
+                <td>Direct/local connection</td>
+                <td>Direct nearby connection</td>
+              </tr>
+              <tr>
+                <td><strong>Encryption model</strong></td>
+                <td class="airbridge-col">SPAKE2 pairing, ECDH P-256, AES-256-GCM, SAS verification</td>
+                <td>Encrypted transport between apps</td>
+                <td>Encrypted transport between apps</td>
+                <td>Vendor-managed accounts and encryption</td>
+                <td>Vendor-managed</td>
+                <td>Vendor-managed</td>
+              </tr>
+              <tr>
+                <td><strong>Resume large transfers</strong></td>
+                <td class="airbridge-col">In-session resume with <code>.part</code> journal and SHA-256 check</td>
+                <td>Varies; restart is common</td>
+                <td>Varies; restart is common</td>
+                <td>Varies</td>
+                <td>Varies</td>
+                <td>Varies</td>
+              </tr>
+              <tr>
+                <td><strong>Clipboard sync</strong></td>
+                <td class="airbridge-col">Text both ways; photos from macOS</td>
+                <td>Manual text/file send</td>
+                <td>Text sync between paired devices</td>
+                <td>Clipboard features on paid tiers</td>
+                <td>Yes</td>
+                <td>Not a general clipboard sync</td>
+              </tr>
+              <tr>
+                <td><strong>View the phone screen</strong></td>
+                <td class="airbridge-col">Yes — consent-based H.264, view only</td>
+                <td>No</td>
+                <td>Limited/experimental depending on build</td>
+                <td>Yes, including remote control on paid tiers</td>
+                <td>Yes, mirroring</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td><strong>Contacts &amp; calls from the computer</strong></td>
+                <td class="airbridge-col">Contacts, dialler, call notifications, optional call audio</td>
+                <td>No</td>
+                <td>Call notifications, no audio bridge</td>
+                <td>Notifications and SMS on paid tiers</td>
+                <td>Notifications and calls</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td><strong>CLI / daemon / automation</strong></td>
+                <td class="airbridge-col">Yes — <code>npx airbridge</code>, daemon, self-hosted relay</td>
+                <td>No official CLI</td>
+                <td>CLI helpers</td>
+                <td>No</td>
+                <td>No</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td><strong>iOS support</strong></td>
+                <td class="airbridge-col">No</td>
+                <td>Yes</td>
+                <td>Limited</td>
+                <td>Yes</td>
+                <td>No (Android side)</td>
+                <td>Varies</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="guide-note">Rows for other products are deliberately general. Verify the current feature list, licence and pricing with each vendor or project before you commit.</p>
+
+      <h2 id="airbridge-strengths">When to use AirBridge</h2>
+        <ul>
+          <li><strong>Android plus a Mac, without an account.</strong> That combination is the gap AirBridge was built for: Apple’s tools exclude Android, and most Android-first tools treat macOS as a second-class client.</li>
+          <li><strong>One verified session for several jobs.</strong> Files, clipboard, screen view, contacts and calls share the same pairing and the same encryption, instead of five different tools and three accounts.</li>
+          <li><strong>Large, boring transfers that finish.</strong> Direct-to-disk writes, in-session resume, SHA-256 verification before the file appears, and up to 100 files per batch.</li>
+          <li><strong>Inspectable and self-hostable.</strong> The protocol is readable in the repository, and the relay that handles awkward networks is a command you can run yourself.</li>
+          <li><strong>Automation.</strong> A CLI, a daemon and a relay make it usable on headless machines and in scripts, which GUI-only tools cannot offer.</li>
+          <li><strong>Honest permission surface.</strong> No Accessibility service, no notification listener, no call-log permission, no Android backup of pairing state.</li>
+        </ul>
+
+      <h2 id="choose-something-else">Where another tool is the better choice</h2>
+        <ul>
+          <li><strong>You need a permissive licence for work.</strong> LocalSend’s permissively licensed codebase is the safer choice for company devices and redistribution; AirBridge’s Fair-Use licence requires written consent for commercial use.</li>
+          <li><strong>You live in KDE Plasma.</strong> KDE Connect’s desktop integration — notification mirroring, remote input, Plasma applets — goes further than AirBridge on a Linux desktop, and it is GPL.</li>
+          <li><strong>You need remote management over the internet.</strong> AirDroid’s web dashboard, remote control and SMS tools exist precisely for “my phone is somewhere else”. AirBridge is for devices near each other or reachable through your own relay.</li>
+          <li><strong>You want a commercial product with support.</strong> LinkMyMac and similar paid apps offer vendor support and a financed roadmap; AirBridge is a one-person open project.</li>
+          <li><strong>You just need Windows ↔ Android nearby sharing.</strong> Quick Share is already installed and needs no setup at all — if files are the only requirement, use what is on the device.</li>
+          <li><strong>Everything you own is Apple.</strong> AirDrop and Continuity are deeply integrated in ways no third-party app can match. AirBridge exists for the mixed Android + desktop case.</li>
+          <li><strong>You need iOS in the mix.</strong> AirBridge has no iOS client; choose a tool that does.</li>
+        </ul>
+
+      <h2 id="disclosure">AirBridge’s limitations</h2>
+        <ul>
+          <li><strong>No iOS, no browser-based account, no cloud.</strong> That is the design, and it is also a real limitation for some workflows.</li>
+          <li><strong>The licence is not OSI-approved.</strong> Source is public, but commercial use needs written consent. See <a href="https://github.com/DigantaDey/AirBridge/blob/main/LICENSE">LICENSE</a>.</li>
+          <li><strong>Binaries are not covered by paid signing certificates</strong> — ad-hoc signed on macOS, unsigned on Windows — so macOS may need a right-click → Open for browser downloads and Windows may show SmartScreen. Checksums and Sigstore attestations are published instead.</li>
+          <li><strong>Android restricts background clipboard reads</strong>, and AirBridge refuses the Accessibility workarounds other tools use. Explicit Share/Process text/Paste actions are the reliable path.</li>
+          <li><strong>No third-party security audit is claimed.</strong> The maintainer’s own review is public in <a href="https://github.com/DigantaDey/AirBridge/blob/main/SECURITY.md">SECURITY.md</a>.</li>
+        </ul>
+        <p>If those trade-offs work for you, <a href="download.html">install AirBridge</a> and read the <a href="private-file-transfer.html">privacy guide</a>. If they do not, one of the alternatives above will serve you better — and that is a perfectly good outcome.</p>
+      </div>
+<section class="faq-block" aria-labelledby="questions">
+      <h2 id="questions">Questions about this guide</h2>
+      <div class="faq-list">
+      <details>
+        <summary>Is AirBridge better than LocalSend?<span aria-hidden="true">＋</span></summary>
+        <p>Not universally. LocalSend is permissively licensed, supports iOS, and is very simple to use. AirBridge adds an Android-focused desktop companion with clipboard sync, screen viewing, contacts and calls inside one verified session — at the cost of a non-commercial licence and no iOS app.</p>
+      </details>
+      <details>
+        <summary>Does AirBridge replace KDE Connect?<span aria-hidden="true">＋</span></summary>
+        <p>Only partly. KDE Connect is deeper inside KDE Plasma (notification mirroring, remote input, applets). AirBridge focuses on Android ↔ macOS/Windows/Linux with its own encrypted pairing, resumable transfers and screen streaming.</p>
+      </details>
+      <details>
+        <summary>Can AirBridge replace AirDroid?<span aria-hidden="true">＋</span></summary>
+        <p>For nearby files, clipboard and screen viewing, often yes. If you need remote management over the internet, web dashboards or SMS tools from a browser, AirDroid’s cloud model covers more of that workflow.</p>
+      </details>
+      <details>
+        <summary>Why is Quick Share not enough?<span aria-hidden="true">＋</span></summary>
+        <p>Quick Share is excellent for nearby file transfer on the devices that support it, but it does not give you clipboard sync, screen viewing, contacts or calls on a Mac or Linux machine. Use both: Quick Share when it is already there, AirBridge when you need the rest.</p>
+      </details>
+      </div>
+    </section>
+<aside class="guide-cta" aria-label="Download AirBridge">
+      <div>
+        <p class="section-label"><span>GET AIRBRIDGE</span> FREE FOR PERSONAL USE</p>
+        <h2>Install on your computer, then pair your phone.</h2>
+        <p>Official builds for macOS, Windows and Linux live on the GitHub releases page, next to the Android APK and the <code>SHA256SUMS.txt</code> checksums. Nothing needs an account.</p>
+      </div>
+      <div class="guide-cta-actions">
+        <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.2 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+        <a class="button button-secondary" href="download.html">All platforms</a>
+      </div>
+    </aside>
+<section class="related-block" aria-labelledby="related">
+      <h2 id="related">Related AirBridge guides</h2>
+      <ul class="related-list">
+        <li><a href="android-airdrop-alternative.html"><strong>Android AirDrop alternative</strong><span>What an AirDrop replacement for Android actually needs, and where AirBridge fits.</span></a></li>
+        <li><a href="open-source-airdrop-alternative.html"><strong>Open-source AirDrop alternative</strong><span>Auditable code, a self-hostable relay and an honest note about the licence.</span></a></li>
+        <li><a href="private-file-transfer.html"><strong>Private file transfer</strong><span>No account, no cloud copy — and an honest list of what can still be observed.</span></a></li>
+        <li><a href="download.html"><strong>Download &amp; install</strong><span>Official builds for macOS, Windows, Linux and Android, plus checksums.</span></a></li>
+      </ul>
+    </section>
+    </article>
+</main>
+<footer class="legal-footer"><div class="wrap">
+    <p class="footer-guide-links"><strong>Guides</strong></p>
+    <div class="footer-guide-grid">
+      <a href="android-to-mac-file-transfer.html">Android to Mac file transfer</a>
+      <a href="android-to-windows-file-transfer.html">Android to Windows file transfer</a>
+      <a href="android-to-linux-file-transfer.html">Android to Linux file transfer</a>
+      <a href="android-airdrop-alternative.html">Android AirDrop alternative</a>
+      <a href="android-clipboard-sync.html">Android clipboard sync</a>
+      <a href="android-screen-sharing.html">Android screen sharing</a>
+      <a href="download.html">Download &amp; install</a>
+      <a href="compare.html">Honest comparison</a>
+      <a href="privacy.html">Privacy policy</a>
+    </div>
+    <p>© AirBridge · <a href="index.html">Home</a> · <a href="https://github.com/DigantaDey/AirBridge">Source code on GitHub</a> · <a href="https://github.com/DigantaDey/AirBridge#readme">README</a></p>
+  </div></footer>
+</body>
+</html>

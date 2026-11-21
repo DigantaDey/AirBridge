@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="theme-color" content="#f7f8f7">
+  <meta name="description" content="Move files between Android and Linux over your network: a per-user install with no root, static glibc and musl builds, XDG launcher integration and end-to-end encryption.">
+  <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://airbridge.fyi/android-to-linux-file-transfer.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="AirBridge">
+  <meta property="og:locale" content="en">
+  <meta property="og:title" content="Android to Linux File Transfer (No Root, No Cloud) — AirBridge">
+  <meta property="og:description" content="Move files between Android and Linux over your network: a per-user install with no root, static glibc and musl builds, XDG launcher integration and end-to-end encryption.">
+  <meta property="og:url" content="https://airbridge.fyi/android-to-linux-file-transfer.html">
+  <meta property="og:image" content="https://airbridge.fyi/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Android to Linux File Transfer (No Root, No Cloud) — AirBridge">
+  <meta name="twitter:description" content="Move files between Android and Linux over your network: a per-user install with no root, static glibc and musl builds, XDG launcher integration and end-to-end encryption.">
+  <meta name="twitter:image" content="https://airbridge.fyi/og.png">
+  <meta name="twitter:image:alt" content="AirBridge — Android to Mac, Windows and Linux file transfer, clipboard sync and screen sharing">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebPage","name":"Android to Linux File Transfer (No Root, No Cloud) — AirBridge","description":"Move files between Android and Linux over your network: a per-user install with no root, static glibc and musl builds, XDG launcher integration and end-to-end encryption.","url":"https://airbridge.fyi/android-to-linux-file-transfer.html","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"AirBridge","url":"https://airbridge.fyi/"},"about":{"@type":"SoftwareApplication","name":"AirBridge","applicationCategory":"UtilitiesApplication","operatingSystem":"Android, macOS, Windows, Linux","url":"https://airbridge.fyi/","downloadUrl":"https://github.com/DigantaDey/AirBridge/releases/latest"},"primaryImageOfPage":{"@type":"ImageObject","url":"https://airbridge.fyi/screenshots/desktop-clipboard.png"}}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"AirBridge","item":"https://airbridge.fyi/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://airbridge.fyi/guides.html"},{"@type":"ListItem","position":3,"name":"Android to Linux file transfer","item":"https://airbridge.fyi/android-to-linux-file-transfer.html"}]}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Do I need root or sudo to install AirBridge on Linux?","acceptedAnswer":{"@type":"Answer","text":"No. The installer writes into your home directory (~/.local/bin, ~/Applications where relevant, and your XDG data directory) and writes a per-user launcher entry."}},{"@type":"Question","name":"Which distributions are supported?","acceptedAnswer":{"@type":"Answer","text":"Releases include glibc and static musl builds for x64 and arm64, which covers mainstream distributions and older systems. Anything that can run a static arm64/x64 binary should work; the musl build is the most portable choice."}},{"@type":"Question","name":"Why is the clipboard not syncing on my Linux desktop?","acceptedAnswer":{"@type":"Answer","text":"The desktop clipboard bridge needs a clipboard tool for your session: wl-clipboard on Wayland, or xclip/xsel on X11. Install one of those and AirBridge will report the bridge as supported."}},{"@type":"Question","name":"Does AirBridge need systemd?","acceptedAnswer":{"@type":"Answer","text":"No. systemd is only used for the optional per-user autostart service. Without it, the installer falls back to a ~/.config/autostart entry, and you can always start AirBridge from the launcher or the CLI."}}]}
+  </script>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <title>Android to Linux File Transfer (No Root, No Cloud) — AirBridge</title>
+</head>
+<body id="top">
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2"/></symbol>
+  <symbol id="devices" viewBox="0 0 24 24"><rect x="3" y="4" width="13" height="11" rx="1.5"/><path d="M2 18h15"/><rect x="17" y="9" width="5" height="10" rx="1"/></symbol>
+</svg>
+<header class="header">
+  <nav class="nav wrap" aria-label="Main navigation">
+    <div class="brand-group">
+      <a class="brand" href="index.html" aria-label="AirBridge home"><img src="icon.svg" alt=""><span>AirBridge<span class="brand-dot">.</span></span></a>
+      <span class="version-pill">v2.5.2</span>
+    </div>
+    <div class="nav-links">
+      <a href="index.html#features">Capabilities</a>
+      <a href="guides.html">Guides</a>
+      <a href="compare.html">Compare</a>
+      <a href="index.html#security">Security</a>
+      <a href="download.html">Download</a>
+      <a href="index.html#faq">FAQ</a>
+    </div>
+    <a class="nav-cta" href="https://github.com/DigantaDey/AirBridge">GitHub <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+  </nav>
+</header>
+
+<main class="legal wrap guide" id="main">
+    <article class="legal-card">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li><a href="index.html">AirBridge</a></li>
+      <li><a href="guides.html">Guides</a></li>
+      <li><span aria-current="page">Android to Linux file transfer</span></li>
+    </ol>
+  </nav>
+      <p class="section-label"><span>GUIDE</span> ANDROID → LINUX</p>
+      <h1>Android to Linux file transfer that respects your desktop and your permissions</h1>
+      <p class="guide-lede">Linux already has good device-connectivity projects, but Android-to-Linux file transfer often ends up as an MTP mount, an adb push, or a cloud upload. AirBridge installs per user, speaks the same encrypted protocol as its macOS and Windows builds, and stays out of root’s way.</p>
+      <figure class="guide-figure">
+        <img src="screenshots/desktop-clipboard.png" width="1600" height="905" alt="AirBridge desktop clipboard panel on Linux and macOS showing auto-beam settings, a text box for sending a link or 2FA code, and a list of recent clipboard beams" loading="lazy" decoding="async">
+        <figcaption>The same desktop companion on every platform, here showing the clipboard panel: text, links and 2FA codes beam between the paired phone and the computer.</figcaption>
+      </figure>
+      <div class="guide-body">
+      <h2 id="problem">The usual ways to get a file from Android to Linux</h2>
+        <ul>
+          <li><strong>MTP mounts (gvfs / jmtpfs)</strong> work until a folder has thousands of files or a video is large; indexes time out and the phone re-enumerates.</li>
+          <li><strong>adb push</strong> is fast for developers and hostile for everyone else — platform-tools, USB debugging, authorisation prompts, cable.</li>
+          <li><strong>scp/rsync</strong> needs an SSH server on the phone, which most Android builds do not ship.</li>
+          <li><strong>Cloud drives</strong> route your file through a third party and need an account.</li>
+          <li><strong>KDE Connect</strong> is excellent inside KDE Plasma, but its macOS client is unofficial and its feature set is desktop-environment specific.</li>
+        </ul>
+
+      <h2 id="how-it-works">How AirBridge installs and runs on Linux</h2>
+        <p>The same <code>install.sh</code> used for macOS detects Linux, installs the matching static binary into <code>~/.local/bin</code>, and writes an XDG launcher entry — <code>~/.local/share/applications/airbridge.desktop</code> — so AirBridge appears in GNOME, KDE and other application menus with <em>Contacts</em>, <em>Calls</em> and <em>Screen Sharing</em> actions. Nothing requires root, and there is no system-wide package to remove later.</p>
+        <ul>
+          <li><strong>Builds for both worlds:</strong> glibc and fully static musl binaries for x64 and arm64, so a headless server or an older distro works too.</li>
+          <li><strong>Optional autostart:</strong> <code>--autostart</code> registers a systemd <em>user</em> service when available (<code>systemctl --user status airbridge</code>), otherwise a plain <code>~/.config/autostart</code> entry.</li>
+          <li><strong>CLI-first when you want it:</strong> <code>airbridge daemon --dir ~/Inbox --reveal</code> for a headless receiver, or <code>AirBridge --open calls</code> to jump straight to a panel in a running instance.</li>
+          <li><strong>Relay on an always-on box:</strong> <code>airbridge relay --listen 0.0.0.0:47391</code>, then point a computer at it with <code>airbridge --relay relay.example.com:47391</code>.</li>
+        </ul>
+
+      <h2 id="clipboard">Clipboard sync on Wayland and X11</h2>
+        <p>Desktop clipboard bridging uses the tools your session already provides: <code>wl-paste</code>/<code>wl-copy</code> on Wayland, or <code>xclip</code>/<code>xsel</code> on X11. If none of them is installed, AirBridge reports the clipboard bridge as unsupported instead of failing silently — install <code>wl-clipboard</code> (Wayland) or <code>xclip</code> and the text bridge starts working.</p>
+        <p>Photo clipboard capture is a macOS-only capability because it reads native pasteboard image types. On Linux the clipboard bridge carries text: links, commands, 2FA codes, snippets.</p>
+
+      <h2 id="install">Install in one command</h2>
+        <pre><code>curl -fsSL https://raw.githubusercontent.com/DigantaDey/AirBridge/main/install.sh | bash</code></pre>
+        <p>Then open AirBridge from your application menu (or run <code>AirBridge</code>), and pair the Android app by scanning the QR code. Prefer packages? There is no deb, rpm, AppImage or Flatpak yet — the static binaries in <a href="https://github.com/DigantaDey/AirBridge/releases/latest">the release</a> are the supported path today, and building from source is documented in the <a href="https://github.com/DigantaDey/AirBridge#readme">README</a>.</p>
+        
+        <p>The official builds, the Android APK and <code>SHA256SUMS.txt</code> are published on the <a href="https://github.com/DigantaDey/AirBridge/releases/latest">GitHub releases page</a>. Every release also carries keyless Sigstore build-provenance attestations you can check with <code>gh attestation verify</code>.</p>
+
+      <h2 id="limits">Limits worth knowing</h2>
+        <ul>
+          <li><strong>No distro packaging yet.</strong> Installation is a per-user script plus static binaries, not a distro package with repository updates.</li>
+          <li><strong>Desktop integration is XDG-based.</strong> Menu actions and the launcher entry work on freedesktop-compliant desktops; exotic setups may need to launch the binary directly.</li>
+          <li><strong>Text-only desktop clipboard</strong> outside macOS, as described above.</li>
+          <li><strong>Screen sharing is viewing only</strong>, and computer-to-computer sharing uses the browser’s own screen picker.</li>
+          <li><strong>No iOS client.</strong> Android, macOS, Windows and Linux are the supported endpoints.</li>
+        </ul>
+      </div>
+<section class="faq-block" aria-labelledby="questions">
+      <h2 id="questions">Questions about this guide</h2>
+      <div class="faq-list">
+      <details>
+        <summary>Do I need root or sudo to install AirBridge on Linux?<span aria-hidden="true">＋</span></summary>
+        <p>No. The installer writes into your home directory (~/.local/bin, ~/Applications where relevant, and your XDG data directory) and writes a per-user launcher entry.</p>
+      </details>
+      <details>
+        <summary>Which distributions are supported?<span aria-hidden="true">＋</span></summary>
+        <p>Releases include glibc and static musl builds for x64 and arm64, which covers mainstream distributions and older systems. Anything that can run a static arm64/x64 binary should work; the musl build is the most portable choice.</p>
+      </details>
+      <details>
+        <summary>Why is the clipboard not syncing on my Linux desktop?<span aria-hidden="true">＋</span></summary>
+        <p>The desktop clipboard bridge needs a clipboard tool for your session: wl-clipboard on Wayland, or xclip/xsel on X11. Install one of those and AirBridge will report the bridge as supported.</p>
+      </details>
+      <details>
+        <summary>Does AirBridge need systemd?<span aria-hidden="true">＋</span></summary>
+        <p>No. systemd is only used for the optional per-user autostart service. Without it, the installer falls back to a ~/.config/autostart entry, and you can always start AirBridge from the launcher or the CLI.</p>
+      </details>
+      </div>
+    </section>
+<aside class="guide-cta" aria-label="Download AirBridge">
+      <div>
+        <p class="section-label"><span>GET AIRBRIDGE</span> FREE FOR PERSONAL USE</p>
+        <h2>Install on your computer, then pair your phone.</h2>
+        <p>Official builds for macOS, Windows and Linux live on the GitHub releases page, next to the Android APK and the <code>SHA256SUMS.txt</code> checksums. Nothing needs an account.</p>
+      </div>
+      <div class="guide-cta-actions">
+        <a class="button button-dark" href="https://github.com/DigantaDey/AirBridge/releases/latest">Download v2.5.2 <svg class="icon" aria-hidden="true"><use href="#arrow"/></svg></a>
+        <a class="button button-secondary" href="download.html">All platforms</a>
+      </div>
+    </aside>
+<section class="related-block" aria-labelledby="related">
+      <h2 id="related">Related AirBridge guides</h2>
+      <ul class="related-list">
+        <li><a href="android-to-mac-file-transfer.html"><strong>Android to Mac file transfer</strong><span>Wi-Fi file transfer from Android to macOS with resume, SHA-256 checks and no cloud upload.</span></a></li>
+        <li><a href="android-to-windows-file-transfer.html"><strong>Android to Windows file transfer</strong><span>Portable Windows app, no admin rights, encrypted Wi-Fi transfers from Android.</span></a></li>
+        <li><a href="android-clipboard-sync.html"><strong>Android clipboard sync</strong><span>Text both ways, photos on macOS — without Accessibility access.</span></a></li>
+        <li><a href="open-source-airdrop-alternative.html"><strong>Open-source AirDrop alternative</strong><span>Auditable code, a self-hostable relay and an honest note about the licence.</span></a></li>
+      </ul>
+    </section>
+    </article>
+</main>
+<footer class="legal-footer"><div class="wrap">
+    <p class="footer-guide-links"><strong>Guides</strong></p>
+    <div class="footer-guide-grid">
+      <a href="android-to-mac-file-transfer.html">Android to Mac file transfer</a>
+      <a href="android-to-windows-file-transfer.html">Android to Windows file transfer</a>
+      <a href="android-to-linux-file-transfer.html">Android to Linux file transfer</a>
+      <a href="android-airdrop-alternative.html">Android AirDrop alternative</a>
+      <a href="android-clipboard-sync.html">Android clipboard sync</a>
+      <a href="android-screen-sharing.html">Android screen sharing</a>
+      <a href="download.html">Download &amp; install</a>
+      <a href="compare.html">Honest comparison</a>
+      <a href="privacy.html">Privacy policy</a>
+    </div>
+    <p>© AirBridge · <a href="index.html">Home</a> · <a href="https://github.com/DigantaDey/AirBridge">Source code on GitHub</a> · <a href="https://github.com/DigantaDey/AirBridge#readme">README</a></p>
+  </div></footer>
+</body>
+</html>

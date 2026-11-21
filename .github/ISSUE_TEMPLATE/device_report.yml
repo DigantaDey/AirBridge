@@ -1,0 +1,59 @@
+name: Device report
+description: Report how AirBridge behaves on your specific phone or desktop
+labels: ["device-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Real-device reports are the most useful contribution to this project:
+        Android background behaviour, clipboard rules and battery management
+        differ by OEM and cannot be reproduced in CI.
+  - type: input
+    id: phone
+    attributes:
+      label: Phone model
+      placeholder: "moto g57 power"
+    validations:
+      required: true
+  - type: input
+    id: android
+    attributes:
+      label: Android version and OEM build
+      placeholder: "Android 15, Motorola MYUX build ..."
+    validations:
+      required: true
+  - type: input
+    id: desktop
+    attributes:
+      label: Desktop OS and AirBridge version
+      placeholder: "macOS 15.2, AirBridge 2.5.1"
+    validations:
+      required: true
+  - type: textarea
+    id: works
+    attributes:
+      label: What works reliably
+      placeholder: File transfer in both directions, clipboard from computer to phone, screen sharing.
+    validations:
+      required: false
+  - type: textarea
+    id: fails
+    attributes:
+      label: What does not work
+      placeholder: Clipboard from phone to computer only arrives after opening AirBridge; screen-off transfers stop after ~10 minutes.
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: Background and battery configuration
+      description: Background clipboard & connection switch, battery optimisation state, autostart restrictions, notification permission.
+    validations:
+      required: false
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Relay vs direct connection, Wi-Fi band, whether a VPN or private DNS is active, and so on.
+    validations:
+      required: false

@@ -1,6 +1,6 @@
 {
   "name": "airbridge-drop",
-  "version": "2.5.0",
+  "version": "2.5.2",
   "description": "AirBridge — Fast, E2EE, open-source AirDrop & Universal Clipboard alternative for Android and MacBook.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
@@ -25,19 +25,28 @@
     "test:e2e:tier4": "vitest run tests/e2e/tier4-real-world",
     "test:e2e:watch": "vitest watch tests/e2e/",
     "build:desktop": "node scripts/build-desktop.mjs",
-    "verify:android": "bash android/scripts/verify.sh"
+    "verify:android": "bash android/scripts/verify.sh",
+    "website:pages": "node scripts/build-site-pages.mjs",
+    "brand:assets": "node scripts/build-brand-assets.mjs"
   },
   "keywords": [
     "airdrop",
+    "airdrop-alternative",
     "android",
-    "macbook",
+    "android-file-transfer",
+    "android-mac",
+    "windows",
+    "linux",
     "macos",
     "file-transfer",
+    "clipboard-sync",
+    "screen-sharing",
     "webrtc",
     "p2p",
     "e2ee",
+    "privacy",
+    "cross-platform",
     "universal-clipboard",
-    "localsend",
     "open-source"
   ],
   "dependencies": {

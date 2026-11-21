@@ -126,3 +126,23 @@ ECDH session. Summary of the audit (and fixes) behind the current code:
   management cannot be bypassed by a foreground service. AirBridge intentionally
   does not declare an Accessibility Service. Process-death resume and automatic
   image capture are not guaranteed.
+
+## Reporting a vulnerability
+
+Do not open a public issue for a security problem.
+
+1. Prefer GitHub's **private vulnerability reporting** on the repository's
+   *Security* tab (Security advisories → *Report a vulnerability*), if it is
+   available for this repository.
+2. Otherwise email **hello@airbridge.fyi** with a minimal description, the
+   affected version, the platform, and the steps to reproduce. Redact pairing
+   codes, keys, IP addresses and personal file names.
+
+Please include a reproduction that does not require your real devices where
+possible. Reports are acknowledged as soon as they are read; this is a
+single-maintainer project, so a fix may take time. Please allow a reasonable
+window to ship a release before publishing details.
+
+Out of scope: findings that require a rooted or already-compromised device,
+attacks that need code execution on the host, and issues in third-party
+applications shown on the screen during a consented screen share.
