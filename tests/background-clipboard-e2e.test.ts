@@ -119,7 +119,33 @@ describe('background clipboard without open browser UIs', () => {
         (peerId) => typeof peerId === 'string',
       );
       expect(daemonClient.getSnapshot().autoClipboardSync).toBe(true);
-      expect(daemonPhonePeerId).toBeDefined();
+      // Keep the readiness assertion strict, but make a CI-only failure
+      // actionable. Do not print pairing codes, public keys or clipboard data.
+      const daemonSnapshot = daemonClient.getSnapshot();
+      const phoneSnapshot = phone.getSnapshot();
+      const readiness = {
+        connectedPeers: server.hub.getStats().connectedPeers,
+        samePairCode: daemonSnapshot.pairCode === phoneSnapshot.pairCode,
+        daemon: {
+          state: daemonSnapshot.connectionState,
+          admission: daemonSnapshot.admission,
+          visibility: daemonSnapshot.visibility,
+          error: daemonSnapshot.connectionError,
+          peers: daemonSnapshot.peers.map((peer) => ({
+            model: peer.device.model,
+            scope: peer.discoveryScope,
+            isPhone: peer.device.deviceId === '1111111111111111',
+          })),
+        },
+        phone: {
+          state: phoneSnapshot.connectionState,
+          admission: phoneSnapshot.admission,
+          visibility: phoneSnapshot.visibility,
+          error: phoneSnapshot.connectionError,
+          peers: phoneSnapshot.peers.map((peer) => ({ model: peer.device.model, scope: peer.discoveryScope })),
+        },
+      };
+      expect(daemonPhonePeerId, `Daemon/phone readiness: ${JSON.stringify(readiness)}`).toBeDefined();
       const daemonAtPhoneId = await waitFor(
         () => {
           const snapshot = phone.getSnapshot();
