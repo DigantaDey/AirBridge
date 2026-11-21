@@ -31,7 +31,7 @@
   {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"AirBridge","item":"https://airbridge.fyi/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://airbridge.fyi/guides.html"},{"@type":"ListItem","position":3,"name":"Honest comparison","item":"https://airbridge.fyi/compare.html"}]}
   </script>
   <script type="application/ld+json">
-  {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is AirBridge better than LocalSend?","acceptedAnswer":{"@type":"Answer","text":"Not universally. LocalSend is permissively licensed, supports iOS, and is very simple to use. AirBridge adds an Android-focused desktop companion with clipboard sync, screen viewing, contacts and calls inside one verified session — at the cost of a non-commercial licence and no iOS app."}},{"@type":"Question","name":"Does AirBridge replace KDE Connect?","acceptedAnswer":{"@type":"Answer","text":"Only partly. KDE Connect is deeper inside KDE Plasma (notification mirroring, remote input, applets). AirBridge focuses on Android ↔ macOS/Windows/Linux with its own encrypted pairing, resumable transfers and screen streaming."}},{"@type":"Question","name":"Can AirBridge replace AirDroid?","acceptedAnswer":{"@type":"Answer","text":"For nearby files, clipboard and screen viewing, often yes. If you need remote management over the internet, web dashboards or SMS tools from a browser, AirDroid’s cloud model covers more of that workflow."}},{"@type":"Question","name":"Why is Quick Share not enough?","acceptedAnswer":{"@type":"Answer","text":"Quick Share is excellent for nearby file transfer on the devices that support it, but it does not give you clipboard sync, screen viewing, contacts or calls on a Mac or Linux machine. Use both: Quick Share when it is already there, AirBridge when you need the rest."}}]}
+  {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is AirBridge better than LocalSend?","acceptedAnswer":{"@type":"Answer","text":"Not universally. LocalSend is permissively licensed, supports iOS, and is very simple to use. AirBridge adds an Android-focused desktop companion with clipboard sync, screen viewing, contacts and calls inside one verified session — at the cost of a non-commercial licence and browser-only iOS access."}},{"@type":"Question","name":"Does AirBridge replace KDE Connect?","acceptedAnswer":{"@type":"Answer","text":"Only partly. KDE Connect is deeper inside KDE Plasma (notification mirroring, remote input, applets). AirBridge focuses on Android ↔ macOS/Windows/Linux with its own encrypted pairing, resumable transfers and screen streaming."}},{"@type":"Question","name":"Can AirBridge replace AirDroid?","acceptedAnswer":{"@type":"Answer","text":"For nearby files, clipboard and screen viewing, often yes. If you need remote management over the internet, web dashboards or SMS tools from a browser, AirDroid’s cloud model covers more of that workflow."}},{"@type":"Question","name":"Why is Quick Share not enough?","acceptedAnswer":{"@type":"Answer","text":"Quick Share is excellent for nearby file transfer on the devices that support it, but it does not give you clipboard sync, screen viewing, contacts or calls on a Mac or Linux machine. Use both: Quick Share when it is already there, AirBridge when you need the rest."}}]}
   </script>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
@@ -189,7 +189,7 @@
               </tr>
               <tr>
                 <td><strong>iOS support</strong></td>
-                <td class="airbridge-col">No</td>
+                <td class="airbridge-col">Browser: files and clipboard, subject to permissions</td>
                 <td>Yes</td>
                 <td>Limited</td>
                 <td>Yes</td>
@@ -219,12 +219,12 @@
           <li><strong>You want a commercial product with support.</strong> LinkMyMac and similar paid apps offer vendor support and a financed roadmap; AirBridge is a one-person open project.</li>
           <li><strong>You just need Windows ↔ Android nearby sharing.</strong> Quick Share is already installed and needs no setup at all — if files are the only requirement, use what is on the device.</li>
           <li><strong>Everything you own is Apple.</strong> AirDrop and Continuity are deeply integrated in ways no third-party app can match. AirBridge exists for the mixed Android + desktop case.</li>
-          <li><strong>You need iOS in the mix.</strong> AirBridge has no iOS client; choose a tool that does.</li>
+          <li><strong>You need a native iOS app.</strong> AirBridge supports iPhone and iPad through the browser for files and clipboard sharing, subject to permissions. Choose another tool if you need a native iOS app or broader iOS integration.</li>
         </ul>
 
       <h2 id="disclosure">AirBridge’s limitations</h2>
         <ul>
-          <li><strong>No iOS, no browser-based account, no cloud.</strong> That is the design, and it is also a real limitation for some workflows.</li>
+          <li><strong>Limited iOS integration.</strong> Safari provides file transfer and clipboard sharing, subject to browser permissions. Screen sharing, contacts and calls are not promised on iOS. The local HTTPS certificate may trigger a CA trust warning; only continue after verifying your own instance’s address.</li>
           <li><strong>The licence is not OSI-approved.</strong> Source is public, but commercial use needs written consent. See <a href="https://github.com/DigantaDey/AirBridge/blob/main/LICENSE">LICENSE</a>.</li>
           <li><strong>Binaries are not covered by paid signing certificates</strong> — ad-hoc signed on macOS, unsigned on Windows — so macOS may need a right-click → Open for browser downloads and Windows may show SmartScreen. Checksums and Sigstore attestations are published instead.</li>
           <li><strong>Android restricts background clipboard reads</strong>, and AirBridge refuses the Accessibility workarounds other tools use. Explicit Share/Process text/Paste actions are the reliable path.</li>
@@ -237,7 +237,7 @@
       <div class="faq-list">
       <details>
         <summary>Is AirBridge better than LocalSend?<span aria-hidden="true">＋</span></summary>
-        <p>Not universally. LocalSend is permissively licensed, supports iOS, and is very simple to use. AirBridge adds an Android-focused desktop companion with clipboard sync, screen viewing, contacts and calls inside one verified session — at the cost of a non-commercial licence and no iOS app.</p>
+        <p>Not universally. LocalSend is permissively licensed, supports iOS, and is very simple to use. AirBridge adds an Android-focused desktop companion with clipboard sync, screen viewing, contacts and calls inside one verified session — at the cost of a non-commercial licence and browser-only iOS access.</p>
       </details>
       <details>
         <summary>Does AirBridge replace KDE Connect?<span aria-hidden="true">＋</span></summary>

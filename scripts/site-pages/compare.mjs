@@ -133,7 +133,7 @@ export const COMPARE = {
               </tr>
               <tr>
                 <td><strong>iOS support</strong></td>
-                <td class="airbridge-col">No</td>
+                <td class="airbridge-col">Browser: files and clipboard, subject to permissions</td>
                 <td>Yes</td>
                 <td>Limited</td>
                 <td>Yes</td>
@@ -167,14 +167,14 @@ export const COMPARE = {
           <li><strong>You want a commercial product with support.</strong> LinkMyMac and similar paid apps offer vendor support and a financed roadmap; AirBridge is a one-person open project.</li>
           <li><strong>You just need Windows ↔ Android nearby sharing.</strong> Quick Share is already installed and needs no setup at all — if files are the only requirement, use what is on the device.</li>
           <li><strong>Everything you own is Apple.</strong> AirDrop and Continuity are deeply integrated in ways no third-party app can match. AirBridge exists for the mixed Android + desktop case.</li>
-          <li><strong>You need iOS in the mix.</strong> AirBridge has no iOS client; choose a tool that does.</li>
+          <li><strong>You need a native iOS app.</strong> AirBridge supports iPhone and iPad through the browser for files and clipboard sharing, subject to permissions. Choose another tool if you need a native iOS app or broader iOS integration.</li>
         </ul>`,
     },
     {
       id: 'disclosure',
       h2: 'AirBridge’s limitations',
       html: `        <ul>
-          <li><strong>No iOS, no browser-based account, no cloud.</strong> That is the design, and it is also a real limitation for some workflows.</li>
+          <li><strong>Limited iOS integration.</strong> Safari provides file transfer and clipboard sharing, subject to browser permissions. Screen sharing, contacts and calls are not promised on iOS. The local HTTPS certificate may trigger a CA trust warning; only continue after verifying your own instance’s address.</li>
           <li><strong>The licence is not OSI-approved.</strong> Source is public, but commercial use needs written consent. See <a href="${SITE.repoUrl}/blob/main/LICENSE">LICENSE</a>.</li>
           <li><strong>Binaries are not covered by paid signing certificates</strong> — ad-hoc signed on macOS, unsigned on Windows — so macOS may need a right-click → Open for browser downloads and Windows may show SmartScreen. Checksums and Sigstore attestations are published instead.</li>
           <li><strong>Android restricts background clipboard reads</strong>, and AirBridge refuses the Accessibility workarounds other tools use. Explicit Share/Process text/Paste actions are the reliable path.</li>
@@ -186,7 +186,7 @@ export const COMPARE = {
   faqs: [
     {
       q: 'Is AirBridge better than LocalSend?',
-      a: 'Not universally. LocalSend is permissively licensed, supports iOS, and is very simple to use. AirBridge adds an Android-focused desktop companion with clipboard sync, screen viewing, contacts and calls inside one verified session — at the cost of a non-commercial licence and no iOS app.',
+      a: 'Not universally. LocalSend is permissively licensed, supports iOS, and is very simple to use. AirBridge adds an Android-focused desktop companion with clipboard sync, screen viewing, contacts and calls inside one verified session — at the cost of a non-commercial licence and browser-only iOS access.',
     },
     {
       q: 'Does AirBridge replace KDE Connect?',

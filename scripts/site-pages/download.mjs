@@ -44,6 +44,11 @@ export const DOWNLOAD = {
                 <td>Google Play Store app — coming soon. For now, sideload the APK, then pair with the desktop QR code.</td>
               </tr>
               <tr>
+                <td><strong>iPhone / iPad</strong></td>
+                <td>Safari browser UI; no native iOS app</td>
+                <td>Open the address shown by your running AirBridge computer. File transfer and clipboard sharing depend on browser permissions. Screen sharing, contacts and calls are not promised on iOS. The local HTTPS certificate may trigger a CA trust warning: only continue after verifying the address belongs to your own instance.</td>
+              </tr>
+              <tr>
                 <td><strong>Any OS with Node 20+</strong></td>
                 <td><code>npx airbridge</code> / source checkout</td>
                 <td>Run the CLI, daemon, relay and browser UI without a prebuilt binary.</td>

@@ -260,7 +260,11 @@ export function DownloadsModal({ onClose }: DownloadsModalProps) {
             AirBridge is truly cross-platform: anywhere a Node 20+ runtime (or the{" "}
             <code className="font-mono">npx airbridge</code> shim) can start, the server starts —
             and it prints a <strong>pairing QR in the terminal</strong> so a phone connects by
-            scanning. iPhone/iPad: use Safari on this page (Add to Home Screen for a full-screen app).
+            scanning. iPhone/iPad: open your running AirBridge computer’s address in Safari for
+            file transfer and clipboard sharing, subject to browser permissions. Clipboard access
+            may need a tap or manual copy/paste. Screen sharing, contacts and calls are not
+            promised on iOS. The local HTTPS certificate may trigger a CA trust warning;
+            only continue after verifying that the address belongs to your own AirBridge instance.
           </p>
           <div className="space-y-2.5">
             {CLI_COMMANDS.map((item, idx) => (
